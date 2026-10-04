@@ -1,8 +1,8 @@
 import { verifyKey } from "discord-interactions";
 import { handlers } from "../src/commands.js";
 
-// Vercel Edge Function으로 동작 — 요청이 올 때만 실행되고 평소엔 대기 상태
-export const config = { runtime: "edge" };
+// Node.js 런타임으로 동작 (Edge는 discord-interactions가 쓰는 Node crypto를 지원하지 않아 제외)
+// Node.js 런타임도 요청이 올 때만 실행되고 평소엔 대기 상태인 서버리스예요.
 
 const InteractionType = { PING: 1, APPLICATION_COMMAND: 2 };
 const InteractionResponseType = { PONG: 1, CHANNEL_MESSAGE_WITH_SOURCE: 4 };
@@ -19,7 +19,9 @@ function loadEnv() {
   };
 }
 
-export default async function handler(request) {
+export default { fetch: handler };
+
+async function handler(request) {
   if (request.method !== "POST") {
     return new Response("이 엔드포인트는 Discord Interactions 전용입니다.", { status: 405 });
   }
