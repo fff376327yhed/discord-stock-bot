@@ -1,4 +1,24 @@
-import { listCollection } from "./firebase.js";
+import { getDoc, setDoc, listCollection } from "./firebase.js";
+
+// ---------- 주식채널 가격 변동 공지 on/off (관리자 콘솔의 체크박스) ----------
+// 유저별 DM 알림(/알림설정)과는 별개예요. 기본값은 켜짐입니다.
+const ANNOUNCE_PATH = "config/announce";
+
+export async function getAnnounceConfig(env) {
+  try {
+    const saved = await getDoc(env, ANNOUNCE_PATH);
+    return { enabled: saved?.enabled ?? true };
+  } catch (err) {
+    console.error("공지 설정 조회 실패:", err.message);
+    return { enabled: true };
+  }
+}
+
+export async function setAnnounceConfig(env, { enabled }) {
+  const next = { enabled: Boolean(enabled) };
+  await setDoc(env, ANNOUNCE_PATH, next);
+  return next;
+}
 
 const DISCORD_API = "https://discord.com/api/v10";
 
@@ -67,7 +87,7 @@ function announceLine(c) {
 }
 
 // 시세가 변동될 때마다 주식채널(ALLOWED_CHANNEL_ID)에 변동 내역을 공지합니다.
-// 유저의 알림 설정과 상관없이 항상 올라가요. 실패해도 시세 변동 자체는 막지 않습니다.
+// 유저의 알림 설정과 상관없이 올라가요. (관리자 콘솔의 '가격 변동 알림' 체크를 끄면 올라가지 않음) 실패해도 시세 변동 자체는 막지 않습니다.
 // 반환값: { sent: true, messages: 보낸 메시지 수 } 또는 { sent: false, reason: "이유" }
 export async function announcePriceChanges(env, changes, label = "시세 변동") {
   if (!env.DISCORD_BOT_TOKEN) {
@@ -78,6 +98,12 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
   }
   if (changes.length === 0) {
     return { sent: false, reason: "변동 내역이 없어요" };
+  }
+
+  // 관리자 콘솔에서 체크를 끈 경우 공지를 보내지 않음
+  const config = await getAnnounceConfig(env);
+  if (!config.enabled) {
+    return { sent: false, reason: "가격 변동 공지가 꺼져 있어요" };
   }
 
   try {

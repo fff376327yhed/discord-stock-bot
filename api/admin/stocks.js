@@ -14,6 +14,7 @@ import {
 } from "../../src/economy.js";
 import { listCollection } from "../../src/firebase.js";
 import { getAttendanceConfig, setAttendanceConfig } from "../../src/attendance.js";
+import { getAnnounceConfig, setAnnounceConfig } from "../../src/notify.js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -174,6 +175,17 @@ async function handler(request) {
         }
         const enabled = body.enabled === undefined ? undefined : Boolean(body.enabled);
         return json(await setAttendanceConfig(env, { enabled, reward }));
+      }
+
+      // ----- 가격 변동 공지 (주식채널) -----
+      case "getAnnounce":
+        return json(await getAnnounceConfig(env));
+
+      case "setAnnounce": {
+        if (typeof body.enabled !== "boolean") {
+          return json({ error: "enabled는 true/false여야 합니다." }, 400);
+        }
+        return json(await setAnnounceConfig(env, { enabled: body.enabled }));
       }
 
       default:

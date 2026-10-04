@@ -13,6 +13,11 @@ import {
   setNotify,
   getHistory,
   compareKo,
+  costOf,
+  previewBuy,
+  previewSell,
+  profitLabel,
+  fmtSigned,
 } from "./economy.js";
 import {
   checkAttendance,
@@ -166,7 +171,7 @@ function textChoices(items, keyword) {
 
 // 숫자 옵션용: suggestions = [{ label, value(정수) }]
 // 숫자를 입력하면 그 숫자를 맨 앞에 보여주고, 같은 숫자로 시작하는 예시만 남겨요.
-function numberChoices(suggestions, keyword) {
+function numberChoices(suggestions, keyword, labelFor) {
   const seen = new Set();
   const list = [];
   const push = (label, value) => {
@@ -178,7 +183,7 @@ function numberChoices(suggestions, keyword) {
   if (/^\d+$/.test(keyword)) {
     const typed = Number(keyword);
     const exists = suggestions.some((s) => s.value === typed);
-    if (!exists && Number.isSafeInteger(typed)) push(typed.toLocaleString(), typed);
+    if (!exists && Number.isSafeInteger(typed)) push(labelFor ? labelFor(typed) : typed.toLocaleString(), typed);
     for (const s of suggestions) {
       if (String(s.value).startsWith(keyword)) push(s.label, s.value);
     }
@@ -193,32 +198,53 @@ const HOURS = Array.from({ length: 24 }, (_, h) => ({
   value: h,
 }));
 
-// 매수/매도 수량 예시: 1, 5, 10 + 최대(살 수 있는 만큼) 또는 전량(보유 전부)
-async function quantitySuggestions(command, interaction, env) {
-  const base = [1, 5, 10].map((n) => ({ label: `${n}주`, value: n }));
+// 매수/매도 수량 예시 + 미리보기
+// 수량 칸을 누르면 "이 수량으로 사고팔면 잔고가 얼마가 되는지, 이득/손해가 얼마인지"가 항목마다 보여요.
+async function quantityChoices(command, interaction, env, keyword) {
+  const defaults = [1, 5, 10];
+  const plain = () => numberChoices(defaults.map((n) => ({ label: `${n}주`, value: n })), keyword);
+
   const stockName = String(opt(interaction, "종목") ?? "").trim();
   const userId = interaction.member?.user?.id;
-  if (!stockName || !userId) return base;
+  if (!stockName || !userId) return plain();
+
+  const [stock, user] = await Promise.all([getStock(env, stockName), getUser(env, userId)]);
+  if (!stock) return plain();
+
+  let labelFor;
+  let values;
 
   if (command === "매수") {
-    const [stock, user] = await Promise.all([getStock(env, stockName), getUser(env, userId)]);
-    if (!stock || stock.price <= 0) return base;
-    const max = Math.floor(user.balance / stock.price);
-    if (max <= 0) return base;
-    return [
-      ...base.filter((s) => s.value < max),
-      { label: `최대 ${max.toLocaleString()}주 (잔고 ${user.balance.toLocaleString()}해정)`, value: max },
-    ];
+    const max = stock.price > 0 ? Math.floor(user.balance / stock.price) : 0;
+    labelFor = (q) => {
+      if (q <= 0) return "1주 이상 입력해 주세요";
+      const p = previewBuy(user, stock, q);
+      return p.ok
+        ? `${q.toLocaleString()}주 매수 → -${p.cost.toLocaleString()}해정 · 잔고 ${p.after.toLocaleString()}해정`
+        : `${q.toLocaleString()}주 매수 불가 (필요 ${p.cost.toLocaleString()} / 잔고 ${user.balance.toLocaleString()}해정)`;
+    };
+    values = max > 0 ? [...defaults.filter((n) => n < max), max] : defaults;
+    return numberChoices(
+      values.map((v) => ({ label: (v === max && max > 0 ? "최대 " : "") + labelFor(v), value: v })),
+      keyword,
+      labelFor
+    );
   }
 
   // 매도
-  const user = await getUser(env, userId);
   const held = user.holdings[stockName] || 0;
-  if (held <= 0) return base;
-  return [
-    ...base.filter((s) => s.value < held),
-    { label: `전량 ${held.toLocaleString()}주`, value: held },
-  ];
+  labelFor = (q) => {
+    if (q <= 0) return "1주 이상 입력해 주세요";
+    const p = previewSell(user, stock, q);
+    if (!p.ok) return `${q.toLocaleString()}주 매도 불가 (보유 ${held.toLocaleString()}주)`;
+    return `${q.toLocaleString()}주 매도 → +${p.earned.toLocaleString()} · 잔고 ${p.after.toLocaleString()} · ${profitLabel(p.profit, p.basis)}`;
+  };
+  values = held > 0 ? [...defaults.filter((n) => n < held), held] : defaults;
+  return numberChoices(
+    values.map((v) => ({ label: (v === held && held > 0 ? "전량 " : "") + labelFor(v), value: v })),
+    keyword,
+    labelFor
+  );
 }
 
 // 시세설정 가격 예시: 현재가 기준 -50% ~ +100%
@@ -250,17 +276,33 @@ export async function autocomplete(interaction, env) {
   if (focused.name === "종목" && command !== "종목추가") {
     const stocks = await listStocks(env); // 이름순
 
+    const userId = interaction.member?.user?.id;
+    const user = userId ? await getUser(env, userId) : { balance: 0, holdings: {}, costs: {} };
+
     if (command === "매도") {
-      // 매도는 내가 가진 종목만 보여줌
-      const userId = interaction.member?.user?.id;
-      const user = userId ? await getUser(env, userId) : { holdings: {} };
+      // 매도는 내가 가진 종목만 보여줌 (현재가 기준 평가손익 함께 표시)
       return textChoices(
         stocks
           .filter((s) => (user.holdings[s.name] || 0) > 0)
-          .map((s) => ({
-            label: `${s.name} (보유 ${user.holdings[s.name]}주 · ${s.price.toLocaleString()}해정)`,
-            value: s.name,
-          })),
+          .map((s) => {
+            const qty = user.holdings[s.name];
+            const cost = costOf(user, s.name, s.price);
+            return {
+              label: `${s.name} (보유 ${qty}주 · ${s.price.toLocaleString()}해정 · ${profitLabel(s.price * qty - cost, cost)})`,
+              value: s.name,
+            };
+          }),
+        keyword
+      );
+    }
+
+    if (command === "매수") {
+      // 매수는 지금 잔고로 최대 몇 주까지 살 수 있는지 함께 표시
+      return textChoices(
+        stocks.map((s) => ({
+          label: `${s.name} (${s.price.toLocaleString()}해정 · 최대 ${Math.floor(user.balance / s.price).toLocaleString()}주)`,
+          value: s.name,
+        })),
         keyword
       );
     }
@@ -285,7 +327,7 @@ export async function autocomplete(interaction, env) {
 
   // ----- 숫자 옵션 -----
   if (focused.name === "수량") {
-    return numberChoices(await quantitySuggestions(command, interaction, env), keyword);
+    return quantityChoices(command, interaction, env, keyword);
   }
 
   if (focused.name === "개수") {
@@ -355,16 +397,28 @@ export const handlers = {
     const detail = await getUserDetail(env, userId);
 
     const holdingsText = detail.holdings
-      .map((h) => `- ${h.name}: ${h.qty}주 (현재가 ${h.price.toLocaleString()}해정, 평가금 ${h.value.toLocaleString()}해정)`)
+      .map(
+        (h) =>
+          `- ${h.name}: ${h.qty}주 (현재가 ${h.price.toLocaleString()} · 평균 매수가 ${h.avg.toLocaleString()} · 평가금 ${h.value.toLocaleString()}해정)\n  ${profitLabel(h.profit, h.cost)}`
+      )
       .join("\n") || "(보유 종목 없음)";
 
     const rankText = detail.rank > 0 ? `${detail.rank}위 / ${detail.totalUsers}명` : "(순위 없음)";
+
+    let changeText = "📊 지난 조회 대비: 첫 조회예요. 다음 조회부터 증감이 표시돼요.";
+    if (detail.assetChange !== null) {
+      const mark = detail.assetChange > 0 ? "🔺 증가" : detail.assetChange < 0 ? "🔻 감소" : "➖ 변동 없음";
+      changeText = `📊 지난 조회 대비 총자산: ${mark} ${fmtSigned(detail.assetChange)}해정 (${formatKST(detail.prevAssetAt)} 조회 시점: ${detail.prevAsset.toLocaleString()}해정)`;
+    }
 
     return [
       "**내 상세정보**",
       `현금 잔고: ${detail.balance.toLocaleString()}해정`,
       `보유 종목 평가액: ${detail.holdingsValue.toLocaleString()}해정`,
       `총 자산: ${detail.totalAsset.toLocaleString()}해정`,
+      changeText,
+      `보유 종목 평가손익: ${profitLabel(detail.holdingsProfit, detail.holdingsCost)}`,
+      `누적 실현 손익(매도 확정분): ${fmtSigned(detail.realizedProfit)}해정`,
       `전체 순위: ${rankText}`,
       "",
       "보유 종목 (이름순):",
