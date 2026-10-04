@@ -11,21 +11,27 @@ import { announcePriceChanges, notifyPriceChanges } from "../../src/notify.js";
 
 export default { fetch: handler };
 
-// 슬롯: 0시(자정), 18시, 21시 중 현재 시각과 가장 가까운 것
-function slotLabel() {
-  const now = new Date(Date.now() + 9 * 60 * 60 * 1000);
-  const t = now.getUTCHours() + now.getUTCMinutes() / 60;
-  const slots = [
-    { at: 0, label: "새벽 12시 급등락" },
-    { at: 18, label: "오후 6시 급등락" },
-    { at: 21, label: "오후 9시 급등락" },
-    { at: 24, label: "새벽 12시 급등락" },
-  ];
-  let best = slots[0];
-  for (const s of slots) {
-    if (Math.abs(s.at - t) < Math.abs(best.at - t)) best = s;
+const SLOT_LABELS = {
+  0: "새벽 12시 급등락",
+  18: "오후 6시 급등락",
+  21: "오후 9시 급등락",
+};
+const SLOT_TOLERANCE_MIN = 30; // 슬롯 시각 ±30분 안에서만 시각 이름을 써요
+
+// cron-job.org 주소 뒤에 ?slot=18 / ?slot=21 / ?slot=0 을 붙이면 그 이름을 강제로 써요.
+// 안 붙이면 현재 한국시간이 슬롯 시각 ±30분 안일 때만 이름을 붙이고, 아니면 그냥 "급등락"이에요.
+function slotLabel(request) {
+  const forced = new URL(request.url).searchParams.get("slot");
+  if (forced !== null && SLOT_LABELS[Number(forced)]) return SLOT_LABELS[Number(forced)];
+
+  const d = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  const nowMin = d.getUTCHours() * 60 + d.getUTCMinutes();
+
+  for (const [hour, label] of Object.entries(SLOT_LABELS)) {
+    const diff = Math.abs(nowMin - Number(hour) * 60);
+    if (Math.min(diff, 1440 - diff) <= SLOT_TOLERANCE_MIN) return label;
   }
-  return best.label;
+  return "급등락";
 }
 
 async function handler(request) {
@@ -38,7 +44,7 @@ async function handler(request) {
   const changes = await fluctuatePrices(env, { minPct: -100, maxPct: 100 });
 
   // 1) 주식채널에 변동 내역 공지 (알림 설정과 무관), 2) 알림을 켠 유저에게 DM
-  const announce = await announcePriceChanges(env, changes, slotLabel());
+  const announce = await announcePriceChanges(env, changes, slotLabel(request));
   await notifyPriceChanges(env, changes);
 
   return Response.json({

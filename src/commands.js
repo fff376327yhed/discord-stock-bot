@@ -1,6 +1,7 @@
 import {
   listStocks,
   listDelisted,
+  getDelistedHistory,
   getPriceHistory,
   getStock,
   upsertStock,
@@ -53,8 +54,9 @@ export const commandDefinitions = [
   },
   {
     name: "상장폐지종류",
-    description: "상장폐지된 종목과 폐지 시각, 역대 최고가를 봅니다. (최신순)",
+    description: "상장폐지된 종목과 하락률을 봅니다. 종목을 고르면 시세 그래프도 그려요. (최신순)",
     options: [
+      { name: "종목", description: "그래프를 볼 폐지 종목 (안 고르면 목록)", type: 3, required: false, autocomplete: true },
       { name: "개수", description: "볼 종목 개수 (기본 10, 최대 20)", type: 4, required: false, autocomplete: true },
     ],
   },
@@ -311,6 +313,22 @@ export async function autocomplete(interaction, env) {
   const command = interaction.data.name;
   const keyword = String(focused.value ?? "").trim();
 
+  // ----- 상장폐지종류: 폐지된 종목 이름 (최신 폐지순, 같은 이름은 가장 최근 것만) -----
+  if (focused.name === "종목" && command === "상장폐지종류") {
+    const delisted = await listDelisted(env, 200);
+    const seen = new Set();
+    const items = [];
+    for (const d of delisted) {
+      if (seen.has(d.name)) continue;
+      seen.add(d.name);
+      items.push({
+        label: `🚫 ${d.name} (${formatKST(d.delistedAt)} 폐지 · 최대 하락 -${d.maxDropPct}%)`,
+        value: d.name,
+      });
+    }
+    return textChoices(items, keyword);
+  }
+
   // ----- 종목 이름 (종목추가는 새 이름을 입력하는 거라 제외) -----
   if (focused.name === "종목" && command !== "종목추가") {
     const stocks = await listStocks(env); // 이름순
@@ -445,8 +463,47 @@ export const handlers = {
     ].join("\n");
   },
 
-  // 상장폐지된 종목 목록 (최신 폐지순)
+  // 상장폐지된 종목 목록 (최신 폐지순) + 하락률. 종목을 고르면 폐지된 종목도 시세 그래프를 그려줘요.
   상장폐지종류: async (interaction, env) => {
+    const pick = String(opt(interaction, "종목") ?? "").trim();
+
+    // ----- 종목 지정: 하락률 + 그래프 -----
+    if (pick) {
+      const all = await listDelisted(env, 200);
+      const d = all.find((x) => x.name === pick); // 최신 폐지순이라 가장 최근 기록이 잡혀요
+      if (!d) return `"${pick}" 상장폐지 기록을 찾지 못했어요. 칸을 눌러 목록에서 골라 주세요.`;
+
+      const points = getDelistedHistory(d);
+      const prices = points.map((p) => p.p);
+      const high = Math.max(...prices);
+      const low = Math.min(...prices);
+      const imageUrl = await renderStockChart(points, false); // 폐지 종목이라 파란색(하락)
+
+      return {
+        embeds: [
+          {
+            title: `🚫 ${d.name} 상장폐지`,
+            description: [
+              `폐지 시각: \`${formatKSTFull(d.delistedAt)}\` (한국시간)`,
+              `${DOWN_MARK} 폐지된 변동: ${(d.lastPrice || 0).toLocaleString()} → ${(d.finalPrice || 0).toLocaleString()}해정 (**-${d.dropPct}%**)`,
+              `📉 역대 최고가 ${(d.maxPrice || 0).toLocaleString()}해정 대비 **-${d.peakDropPct}%**`,
+              `⬇️ 기록 중 한 번에 가장 많이 하락: **-${d.maxDropPct}%**`,
+              `구간 최고 ${high.toLocaleString()} / 최저 ${low.toLocaleString()}해정 · 폐지 당시 보유자 ${(d.holders || 0).toLocaleString()}명`,
+            ].join("\n"),
+            color: 0x1e88e5,
+            image: { url: imageUrl },
+            footer: {
+              text:
+                points.length > 2
+                  ? `최근 ${points.length}개 기록 · ${formatKST(points[0].t)} ~ ${formatKST(points[points.length - 1].t)} (한국시간)`
+                  : "예전에 폐지된 종목이라 시세 기록이 없어 폐지 직전 → 폐지 가격만 보여줘요",
+            },
+          },
+        ],
+      };
+    }
+
+    // ----- 목록 -----
     const requested = opt(interaction, "개수") ?? 10;
     const count = Math.min(Math.max(requested, 1), 20);
 
@@ -455,14 +512,14 @@ export const handlers = {
 
     const lines = list.map(
       (d) =>
-        `🚫 **${d.name}** · 폐지 \`${formatKSTFull(d.delistedAt)}\` · 최고가 ${(d.maxPrice || 0).toLocaleString()}해정 · 폐지 직전 ${(d.lastPrice || 0).toLocaleString()} → ${(d.finalPrice || 0).toLocaleString()}해정`
+        `🚫 **${d.name}** · \`${formatKSTFull(d.delistedAt)}\` · ${(d.lastPrice || 0).toLocaleString()} → ${(d.finalPrice || 0).toLocaleString()}해정 (**-${d.dropPct}%**) · 최고가 ${(d.maxPrice || 0).toLocaleString()} 대비 -${d.peakDropPct}% · 최대 하락 -${d.maxDropPct}%`
     );
 
     // 디스코드 메시지 한도(2000자) 보호
-    let text = `**🪦 상장폐지된 종목 (${list.length}건, 최신순)**`;
+    let text = `**🪦 상장폐지된 종목 (${list.length}건, 최신순)**\n그래프는 \`/상장폐지종류 종목:이름\`으로 볼 수 있어요.`;
     for (const line of lines) {
       if (text.length + line.length + 1 > 1900) {
-        text += "\n…(이하 생략)";
+        text += "\n…(이하 생략 · `개수`를 줄여 보세요)";
         break;
       }
       text += `\n${line}`;

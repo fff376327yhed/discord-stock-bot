@@ -434,10 +434,10 @@ export async function getUserDetail(env, userId) {
 // 종목을 삭제하고, 이 종목을 가진 모든 유저의 보유분을 휴지조각으로 만듭니다.
 // 매수 원가 전액을 실현 손실(realizedProfit)로 반영하고, 거래 기록에도 남겨요.
 // 폐지 내역(언제, 최고가, 폐지 직전/최종 가격)은 delisted 컬렉션에 저장돼 /상장폐지종류로 볼 수 있어요.
-// info: { lastPrice: 폐지 직전 가격, finalPrice: 폐지를 일으킨 변동 후 가격, maxPrice: 역대 최고가 }
+// info: { lastPrice: 폐지 직전 가격, finalPrice: 폐지를 일으킨 변동 후 가격, maxPrice: 역대 최고가, history: 시세 기록 맵 }
 // 반환값: 영향받은 유저 ID 목록 (알림 DM용)
 export async function delistStock(env, stockName, info) {
-  const { lastPrice, finalPrice, maxPrice } = info;
+  const { lastPrice, finalPrice, maxPrice, history } = info;
   await removeStock(env, stockName);
 
   const users = await listCollection(env, "users");
@@ -476,13 +476,26 @@ export async function delistStock(env, stockName, info) {
   try {
     const delistedAt = Date.now();
     const key = `${String(9999999999999 - delistedAt).padStart(13, "0")}_${encodeURIComponent(stockName)}`;
+    const peak = Math.max(maxPrice || 0, lastPrice);
+
+    // 그래프용 시세 기록: 폐지를 일으킨 마지막 가격까지 포함해서 저장
+    const savedHistory = { ...(history || {}) };
+    if (Object.keys(savedHistory).length === 0) {
+      savedHistory[String(delistedAt - 1).padStart(13, "0")] = lastPrice;
+    }
+    savedHistory[String(delistedAt).padStart(13, "0")] = finalPrice;
+
     await setDoc(env, `delisted/${key}`, {
       name: stockName,
       delistedAt,
       lastPrice,
       finalPrice,
-      maxPrice: Math.max(maxPrice || 0, lastPrice),
+      maxPrice: peak,
       holders: holders.length,
+      dropPct: dropPctOf(lastPrice, finalPrice), // 폐지된 변동의 하락률(%)
+      peakDropPct: dropPctOf(peak, finalPrice), // 역대 최고가 대비 하락률(%)
+      maxDropPct: biggestDropPct(savedHistory), // 기록 중 한 번에 가장 크게 떨어진 하락률(%)
+      history: savedHistory,
     });
   } catch (err) {
     console.error(`폐지 내역 저장 실패 (${stockName}):`, err.message);
@@ -491,10 +504,48 @@ export async function delistStock(env, stockName, info) {
   return holders;
 }
 
-// 상장폐지된 종목 목록 (최신 폐지순): [{ name, delistedAt, lastPrice, finalPrice, maxPrice, holders }]
+// 하락률(%) 계산: from -> to (오른 경우는 0). 소수 첫째 자리까지
+export function dropPctOf(from, to) {
+  if (!Number.isFinite(from) || from <= 0 || !Number.isFinite(to)) return 0;
+  return Math.max(0, Math.round(((from - to) / from) * 1000) / 10);
+}
+
+// 시세 기록(history 맵)에서 한 번에 가장 크게 떨어진 하락률(%)
+function biggestDropPct(history) {
+  const prices = Object.keys(history || {}).sort().map((k) => history[k]);
+  let worst = 0;
+  for (let i = 1; i < prices.length; i++) {
+    worst = Math.max(worst, dropPctOf(prices[i - 1], prices[i]));
+  }
+  return worst;
+}
+
+// 상장폐지된 종목 목록 (최신 폐지순)
+// [{ name, delistedAt, lastPrice, finalPrice, maxPrice, holders, dropPct, peakDropPct, maxDropPct, history }]
+// 하락률 필드가 없는 예전 폐지 기록은 저장된 가격으로 다시 계산해서 채워줘요.
 export async function listDelisted(env, limit = 10) {
   const list = await listCollection(env, "delisted");
-  return list.sort((a, b) => (b.delistedAt || 0) - (a.delistedAt || 0)).slice(0, limit);
+  return list
+    .sort((a, b) => (b.delistedAt || 0) - (a.delistedAt || 0))
+    .slice(0, limit)
+    .map((d) => ({
+      ...d,
+      dropPct: Number.isFinite(d.dropPct) ? d.dropPct : dropPctOf(d.lastPrice, d.finalPrice),
+      peakDropPct: Number.isFinite(d.peakDropPct) ? d.peakDropPct : dropPctOf(d.maxPrice, d.finalPrice),
+      maxDropPct: Number.isFinite(d.maxDropPct) ? d.maxDropPct : dropPctOf(d.lastPrice, d.finalPrice),
+    }));
+}
+
+// 폐지 종목의 그래프용 시세 기록 -> [{ t, p }]
+// 기록이 없는 예전 폐지 종목은 (폐지 직전 → 폐지 가격) 두 점만 그려요.
+export function getDelistedHistory(d) {
+  const points = getPriceHistory(d);
+  if (points.length >= 2) return points;
+  const at = d.delistedAt || Date.now();
+  return [
+    { t: at - 1, p: d.lastPrice || 0 },
+    { t: at, p: d.finalPrice || 0 },
+  ];
 }
 
 // ---------- 시세 변동 ----------
@@ -518,6 +569,7 @@ export async function fluctuatePrices(env, { minPct, maxPct }) {
         lastPrice: stock.price,
         finalPrice: newPrice,
         maxPrice,
+        history: stock.history,
       });
       changes.push({ name: stock.name, before: stock.price, after: newPrice, pct, delisted: true, holders });
       continue;
