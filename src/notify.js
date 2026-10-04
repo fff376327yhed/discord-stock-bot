@@ -54,12 +54,19 @@ async function sendDM(env, userId, content) {
   await discordPost(env, `/channels/${channel.id}/messages`, { content });
 }
 
+// 상장폐지된 변동의 하락 문구: "-1,200해정, -92.3%"
+function dropText(c) {
+  const lost = c.before - c.after;
+  const pct = c.before > 0 ? (lost / c.before) * 100 : 0;
+  return `-${lost.toLocaleString()}해정, -${pct.toFixed(1)}%`;
+}
+
 // DM용 한 줄 (상장폐지는 별도 문구)
 function formatLines(list) {
   return list
     .map((c) => {
       if (c.delisted) {
-        return `• 🚫 **${c.name}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정, 보유 주식 소멸)`;
+        return `• 🚫 **${c.name}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 · ${dropText(c)} 하락, 보유 주식 소멸)`;
       }
       const pct = ((c.after - c.before) / c.before) * 100;
       const sign = pct > 0 ? "+" : "";
@@ -98,7 +105,7 @@ export function isWithinNotifyWindow(setting, hour = currentHourKST()) {
 // 폐지 위기 종목은 "(±%)" 뒤에 ⚠️ 표시
 function announceLine(c) {
   if (c.delisted) {
-    return `🚫 **${c.name}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정)`;
+    return `🚫 **${c.name}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 · ${dropText(c)} 하락)`;
   }
   if (c.after === c.before) {
     return `➖ **${c.name}**: ${c.after.toLocaleString()}해정 (변동 없음)${dangerTag(c.after)}`;

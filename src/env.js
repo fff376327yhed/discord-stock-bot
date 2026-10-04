@@ -21,3 +21,35 @@ export function isAuthorizedCron(request, env) {
   const auth = request.headers.get("authorization");
   return auth === `Bearer ${env.CRON_SECRET}`;
 }
+// ---------- 급등락(±100%) 시각 ----------
+// 하루 딱 3번: 새벽 12시(0시), 오후 6시, 오후 9시 (한국시간)
+const SURGE_SLOTS = [
+  { hour: 0, label: "새벽 12시 급등락" },
+  { hour: 18, label: "오후 6시 급등락" },
+  { hour: 21, label: "오후 9시 급등락" },
+];
+
+// 현재 한국시간이 슬롯 시각에서 몇 분 떨어져 있는지 (음수 = 슬롯 전, 양수 = 슬롯 후)
+function minutesFromSlot(hour, now) {
+  const d = new Date(now + 9 * 60 * 60 * 1000);
+  const nowMin = d.getUTCHours() * 60 + d.getUTCMinutes();
+  return ((nowMin - hour * 60 + 1440 + 720) % 1440) - 720;
+}
+
+// 지금이 급등락 시각이면 { hour, label }, 아니면 null
+// 급등락은 슬롯 10분 전 ~ 30분 후 사이에 호출됐을 때만 실행돼요. (외부 스케줄러가 조금 늦거나 빨라도 허용)
+export function currentSurgeSlot(now = Date.now()) {
+  for (const s of SURGE_SLOTS) {
+    const diff = minutesFromSlot(s.hour, now);
+    if (diff >= -10 && diff <= 30) return s;
+  }
+  return null;
+}
+
+// 평소 변동(±50%)을 건너뛸지: 급등락 시각 3분 전 ~ 5분 후에는 평소 변동을 쉬어서 겹치지 않게 해요.
+export function isSurgeMoment(now = Date.now()) {
+  return SURGE_SLOTS.some((s) => {
+    const diff = minutesFromSlot(s.hour, now);
+    return diff >= -3 && diff <= 5;
+  });
+}

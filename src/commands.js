@@ -485,7 +485,7 @@ export const handlers = {
             title: `🚫 ${d.name} 상장폐지`,
             description: [
               `폐지 시각: \`${formatKSTFull(d.delistedAt)}\` (한국시간)`,
-              `${DOWN_MARK} 폐지된 변동: ${(d.lastPrice || 0).toLocaleString()} → ${(d.finalPrice || 0).toLocaleString()}해정 (**-${d.dropPct}%**)`,
+              `${DOWN_MARK} 폐지된 변동: ${(d.lastPrice || 0).toLocaleString()} → ${(d.finalPrice || 0).toLocaleString()}해정 (**-${((d.lastPrice || 0) - (d.finalPrice || 0)).toLocaleString()}해정, -${d.dropPct}%**)`,
               `📉 역대 최고가 ${(d.maxPrice || 0).toLocaleString()}해정 대비 **-${d.peakDropPct}%**`,
               `⬇️ 기록 중 한 번에 가장 많이 하락: **-${d.maxDropPct}%**`,
               `구간 최고 ${high.toLocaleString()} / 최저 ${low.toLocaleString()}해정 · 폐지 당시 보유자 ${(d.holders || 0).toLocaleString()}명`,
@@ -512,7 +512,7 @@ export const handlers = {
 
     const lines = list.map(
       (d) =>
-        `🚫 **${d.name}** · \`${formatKSTFull(d.delistedAt)}\` · ${(d.lastPrice || 0).toLocaleString()} → ${(d.finalPrice || 0).toLocaleString()}해정 (**-${d.dropPct}%**) · 최고가 ${(d.maxPrice || 0).toLocaleString()} 대비 -${d.peakDropPct}% · 최대 하락 -${d.maxDropPct}%`
+        `🚫 **${d.name}** · \`${formatKSTFull(d.delistedAt)}\` · ${(d.lastPrice || 0).toLocaleString()} → ${(d.finalPrice || 0).toLocaleString()}해정 (**-${((d.lastPrice || 0) - (d.finalPrice || 0)).toLocaleString()}해정, -${d.dropPct}%**) · 최고가 ${(d.maxPrice || 0).toLocaleString()} 대비 -${d.peakDropPct}% · 최대 하락 -${d.maxDropPct}%`
     );
 
     // 디스코드 메시지 한도(2000자) 보호

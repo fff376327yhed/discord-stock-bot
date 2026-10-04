@@ -1,4 +1,4 @@
-import { loadEnv, isAuthorizedCron } from "../../src/env.js";
+import { loadEnv, isAuthorizedCron, isSurgeMoment } from "../../src/env.js";
 import { fluctuatePrices } from "../../src/economy.js";
 import { announcePriceChanges, notifyPriceChanges } from "../../src/notify.js";
 
@@ -15,6 +15,11 @@ async function handler(request) {
 
   if (!isAuthorizedCron(request, env)) {
     return new Response("Unauthorized", { status: 401 });
+  }
+
+  // 급등락 시각(18시/21시/0시) 직전·직후에는 평소 변동을 쉬어서 급등락과 겹치지 않게 함
+  if (isSurgeMoment()) {
+    return Response.json({ ok: true, skipped: true, reason: "급등락 시각이라 평소 변동은 건너뛰었어요." });
   }
 
   const changes = await fluctuatePrices(env, { minPct: -50, maxPct: 50 });
