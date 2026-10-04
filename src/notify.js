@@ -31,16 +31,36 @@ function formatLines(list) {
     .join("\n");
 }
 
+// 한국시간 기준 현재 시(0~23)
+function currentHourKST() {
+  return new Date(Date.now() + 9 * 60 * 60 * 1000).getUTCHours();
+}
+
+// 알림 시간대 안인지 확인합니다.
+// - start/end가 없거나 서로 같으면 하루 종일
+// - start < end: start시 이상 end시 미만 (예: 9~22)
+// - start > end: 자정을 넘기는 구간 (예: 22~6)
+export function isWithinNotifyWindow(setting, hour = currentHourKST()) {
+  const { start, end } = setting || {};
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start === end) return true;
+  if (start < end) return hour >= start && hour < end;
+  return hour >= start || hour < end;
+}
+
 // 시세 변동 목록을 받아 유저별 알림 설정에 맞춰 DM 전송
 // changes: [{ name, before, after }]
 export async function notifyPriceChanges(env, changes) {
   if (!env.DISCORD_BOT_TOKEN || changes.length === 0) return;
 
   const users = await listCollection(env, "users");
+  const hour = currentHourKST();
 
   for (const user of users) {
     const setting = user.notify || {};
     if (!setting.all && !setting.up && !setting.down) continue;
+
+    // 유저가 정한 알림 시간대 밖이면 건너뜀 (나중에 몰아서 보내지 않음)
+    if (!isWithinNotifyWindow(setting, hour)) continue;
 
     const held = user.holdings || {};
     const buckets = { heldUp: [], heldDown: [], all: [] };

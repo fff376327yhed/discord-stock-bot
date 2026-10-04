@@ -19,6 +19,7 @@ import {
 } from "./attendance.js";
 
 // ---- 1) Discord에 등록할 커맨드 정의 ----
+// autocomplete: true 인 옵션은 입력할 때 목록이 떠서 골라 쓸 수 있어요.
 export const commandDefinitions = [
   { name: "도움말", description: "사용할 수 있는 명령어 목록을 봅니다." },
   { name: "출석체크", description: "오늘 출석하고 해정을 받습니다. 하루 1회." },
@@ -35,34 +36,38 @@ export const commandDefinitions = [
   },
   {
     name: "매수",
-    description: "종목을 매수합니다.",
+    description: "종목을 매수합니다. 수량을 안 쓰면 1주예요.",
     options: [
-      { name: "종목", description: "종목 이름", type: 3, required: true },
-      { name: "수량", description: "매수할 수량", type: 4, required: true },
+      { name: "종목", description: "종목 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+      { name: "수량", description: "매수할 수량 (기본 1)", type: 4, required: false, min_value: 1 },
     ],
   },
   {
     name: "매도",
-    description: "종목을 매도합니다.",
+    description: "종목을 매도합니다. 수량을 안 쓰면 1주예요.",
     options: [
-      { name: "종목", description: "종목 이름", type: 3, required: true },
-      { name: "수량", description: "매도할 수량", type: 4, required: true },
+      { name: "종목", description: "내가 가진 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+      { name: "수량", description: "매도할 수량 (기본 1)", type: 4, required: false, min_value: 1 },
     ],
   },
   { name: "상점", description: "구입할 수 있는 상품 목록을 봅니다." },
   {
     name: "구입",
     description: "상점에서 상품을 구입합니다.",
-    options: [{ name: "상품", description: "상품 이름", type: 3, required: true }],
+    options: [
+      { name: "상품", description: "상품 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+    ],
   },
   { name: "보유상품", description: "내가 구입한 상품 목록을 봅니다." },
   {
     name: "알림설정",
-    description: "시세 알림을 켜고 끕니다. 여러 개를 동시에 켤 수 있어요.",
+    description: "시세 알림과 받을 시간대를 설정합니다. 여러 개를 동시에 켤 수 있어요.",
     options: [
       { name: "전체", description: "모든 종목 시세 변동 알림", type: 5, required: false },
       { name: "상승", description: "내가 보유한 종목이 오를 때 알림", type: 5, required: false },
       { name: "하락", description: "내가 보유한 종목이 내릴 때 알림", type: 5, required: false },
+      { name: "시작", description: "알림 받을 시작 시각 (한국시간 0~23)", type: 4, required: false, min_value: 0, max_value: 23 },
+      { name: "종료", description: "알림 받을 종료 시각 (한국시간 0~23, 시작과 같으면 하루 종일)", type: 4, required: false, min_value: 0, max_value: 23 },
     ],
   },
   { name: "알림확인", description: "현재 알림 설정을 봅니다." },
@@ -77,13 +82,15 @@ export const commandDefinitions = [
   {
     name: "종목삭제",
     description: "[관리자] 종목을 삭제합니다.",
-    options: [{ name: "종목", description: "종목 이름", type: 3, required: true }],
+    options: [
+      { name: "종목", description: "종목 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+    ],
   },
   {
     name: "시세설정",
     description: "[관리자] 종목 가격을 변경합니다.",
     options: [
-      { name: "종목", description: "종목 이름", type: 3, required: true },
+      { name: "종목", description: "종목 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
       { name: "가격", description: "새 가격(해정)", type: 4, required: true },
     ],
   },
@@ -114,11 +121,14 @@ function formatKST(ms) {
 
 function notifyStatusText(s, title) {
   const mark = (on) => (on ? "✅ 켜짐" : "❌ 꺼짐");
+  const hasWindow = Number.isInteger(s.start) && Number.isInteger(s.end) && s.start !== s.end;
+  const windowText = hasWindow ? `${s.start}시 ~ ${s.end}시 (한국시간)` : "하루 종일";
   return [
     `**${title}**`,
     `- 전체 시세 변동: ${mark(s.all)}`,
     `- 내 보유 종목 상승: ${mark(s.up)}`,
     `- 내 보유 종목 하락: ${mark(s.down)}`,
+    `- 알림 받는 시간: ${windowText}`,
   ].join("\n");
 }
 
@@ -140,7 +150,50 @@ function helpText() {
   ].join("\n");
 }
 
-// ---- 3) 커맨드별 핸들러: (interaction, env) => Promise<string> ----
+// ---- 3) 자동완성: (interaction, env) => Promise<[{ name, value }]> ----
+// 종목/상품 옵션을 입력할 때 Discord가 호출해요. 최대 25개까지만 보여줄 수 있어요.
+export async function autocomplete(interaction, env) {
+  const focused = interaction.data.options?.find((o) => o.focused);
+  if (!focused) return [];
+
+  const command = interaction.data.name;
+  const keyword = String(focused.value || "").trim().toLowerCase();
+  let items = [];
+
+  if (focused.name === "상품") {
+    const products = await listProducts(env);
+    items = products.map((p) => ({
+      label: `${p.name} (${p.price.toLocaleString()}해정)`,
+      value: p.name,
+    }));
+  } else if (focused.name === "종목") {
+    const stocks = await listStocks(env);
+
+    if (command === "매도") {
+      // 매도는 내가 가진 종목만 보여줌
+      const userId = interaction.member?.user?.id;
+      const user = userId ? await getUser(env, userId) : { holdings: {} };
+      items = stocks
+        .filter((s) => (user.holdings[s.name] || 0) > 0)
+        .map((s) => ({
+          label: `${s.name} (보유 ${user.holdings[s.name]}주 · ${s.price.toLocaleString()}해정)`,
+          value: s.name,
+        }));
+    } else {
+      items = stocks.map((s) => ({
+        label: `${s.name} (${s.price.toLocaleString()}해정)`,
+        value: s.name,
+      }));
+    }
+  }
+
+  return items
+    .filter((i) => i.value.toLowerCase().includes(keyword))
+    .slice(0, 25)
+    .map((i) => ({ name: i.label.slice(0, 100), value: i.value }));
+}
+
+// ---- 4) 커맨드별 핸들러: (interaction, env) => Promise<string> ----
 export const handlers = {
   도움말: async () => helpText(),
 
@@ -215,7 +268,7 @@ export const handlers = {
   매수: async (interaction, env) => {
     const userId = interaction.member.user.id;
     const name = opt(interaction, "종목");
-    const qty = opt(interaction, "수량");
+    const qty = opt(interaction, "수량") ?? 1;
     if (qty <= 0) return "수량은 1 이상이어야 해요.";
     const result = await buyStock(env, userId, name, qty);
     return result.message;
@@ -224,7 +277,7 @@ export const handlers = {
   매도: async (interaction, env) => {
     const userId = interaction.member.user.id;
     const name = opt(interaction, "종목");
-    const qty = opt(interaction, "수량");
+    const qty = opt(interaction, "수량") ?? 1;
     if (qty <= 0) return "수량은 1 이상이어야 해요.";
     const result = await sellStock(env, userId, name, qty);
     return result.message;
@@ -263,6 +316,17 @@ export const handlers = {
       up: opt(interaction, "상승") ?? current.up,
       down: opt(interaction, "하락") ?? current.down,
     };
+
+    // 알림 시간대: 안 넘긴 값은 기존 설정을 유지
+    const start = opt(interaction, "시작") ?? current.start;
+    const end = opt(interaction, "종료") ?? current.end;
+    if (Number.isInteger(start)) next.start = start;
+    if (Number.isInteger(end)) next.end = end;
+
+    if (Number.isInteger(next.start) !== Number.isInteger(next.end)) {
+      return "알림 시간대는 `시작`과 `종료`를 함께 입력해 주세요. (예: 시작 9, 종료 22)";
+    }
+
     await setNotify(env, userId, next);
     return notifyStatusText(next, "알림 설정을 저장했어요.");
   },

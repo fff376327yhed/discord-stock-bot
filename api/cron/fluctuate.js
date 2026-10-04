@@ -4,7 +4,8 @@ import { notifyPriceChanges } from "../../src/notify.js";
 
 // 평소 시세 변동: ±30%
 // Vercel Hobby(무료) 플랜의 자체 Cron은 하루 1회까지만 무료라서,
-// "자주" 변동시키려면 cron-job.org 같은 무료 외부 스케줄러가 이 주소를 호출하게 해야 해요.
+// 15분마다 변동시키려면 cron-job.org 같은 무료 외부 스케줄러가 이 주소를 호출하게 해야 해요.
+// (cron-job.org 스케줄: */15 * * * *)
 
 export default { fetch: handler };
 

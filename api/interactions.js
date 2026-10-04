@@ -1,12 +1,16 @@
 import { verifyKey } from "discord-interactions";
-import { handlers } from "../src/commands.js";
+import { handlers, autocomplete } from "../src/commands.js";
 import { loadEnv } from "../src/env.js";
 
 // Node.js 런타임으로 동작 (Edge는 discord-interactions가 쓰는 Node crypto를 지원하지 않아 제외)
 // Node.js 런타임도 요청이 올 때만 실행되고 평소엔 대기 상태인 서버리스예요.
 
-const InteractionType = { PING: 1, APPLICATION_COMMAND: 2 };
-const InteractionResponseType = { PONG: 1, CHANNEL_MESSAGE_WITH_SOURCE: 4 };
+const InteractionType = { PING: 1, APPLICATION_COMMAND: 2, APPLICATION_COMMAND_AUTOCOMPLETE: 4 };
+const InteractionResponseType = {
+  PONG: 1,
+  CHANNEL_MESSAGE_WITH_SOURCE: 4,
+  APPLICATION_COMMAND_AUTOCOMPLETE_RESULT: 8,
+};
 
 // 응답을 "명령어를 친 본인에게만" 보이게 하는 플래그
 const EPHEMERAL = 64;
@@ -45,6 +49,21 @@ async function handler(request) {
   // ---- PING: Discord가 엔드포인트 등록 시 헬스체크로 보냄 ----
   if (interaction.type === InteractionType.PING) {
     return Response.json({ type: InteractionResponseType.PONG });
+  }
+
+  // ---- 자동완성: 종목/상품 이름을 입력할 때 목록을 돌려줌 ----
+  if (interaction.type === InteractionType.APPLICATION_COMMAND_AUTOCOMPLETE) {
+    let choices = [];
+    try {
+      const allowed = !env.ALLOWED_CHANNEL_ID || interaction.channel_id === env.ALLOWED_CHANNEL_ID;
+      if (allowed) choices = await autocomplete(interaction, env);
+    } catch (err) {
+      console.error("자동완성 오류:", err.message);
+    }
+    return Response.json({
+      type: InteractionResponseType.APPLICATION_COMMAND_AUTOCOMPLETE_RESULT,
+      data: { choices },
+    });
   }
 
   // ---- 슬래시 커맨드 처리 ----
