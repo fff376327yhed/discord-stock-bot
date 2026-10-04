@@ -36,6 +36,17 @@ async function handler(request) {
 
   // ---- 슬래시 커맨드 처리 ----
   if (interaction.type === InteractionType.APPLICATION_COMMAND) {
+    // 주식채널에서만 명령어 허용 (나만 보이는 메시지로 안내)
+    if (env.ALLOWED_CHANNEL_ID && interaction.channel_id !== env.ALLOWED_CHANNEL_ID) {
+      return Response.json({
+        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+        data: {
+          content: `이 명령어는 <#${env.ALLOWED_CHANNEL_ID}> 채널에서만 쓸 수 있어요.`,
+          flags: 64,
+        },
+      });
+    }
+
     const commandName = interaction.data.name;
     const handlerFn = handlers[commandName];
 
