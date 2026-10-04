@@ -1,0 +1,133 @@
+import {
+  listStocks,
+  upsertStock,
+  removeStock,
+  getUser,
+  buyStock,
+  sellStock,
+  getRanking,
+} from "./economy.js";
+
+// ---- 1) Discord에 등록할 커맨드 정의 (register-commands.js 에서 사용) ----
+export const commandDefinitions = [
+  { name: "주식목록", description: "현재 거래 가능한 종목과 가격을 봅니다." },
+  { name: "잔고", description: "내 해정 잔고와 보유 종목을 봅니다." },
+  { name: "랭킹", description: "총 자산 기준 랭킹을 봅니다." },
+  {
+    name: "매수",
+    description: "종목을 매수합니다.",
+    options: [
+      { name: "종목", description: "종목 이름", type: 3, required: true },
+      { name: "수량", description: "매수할 수량", type: 4, required: true },
+    ],
+  },
+  {
+    name: "매도",
+    description: "종목을 매도합니다.",
+    options: [
+      { name: "종목", description: "종목 이름", type: 3, required: true },
+      { name: "수량", description: "매도할 수량", type: 4, required: true },
+    ],
+  },
+  {
+    name: "종목추가",
+    description: "[관리자] 새 종목을 등록합니다.",
+    options: [
+      { name: "종목", description: "종목 이름", type: 3, required: true },
+      { name: "가격", description: "초기 가격(해정)", type: 4, required: true },
+    ],
+  },
+  {
+    name: "종목삭제",
+    description: "[관리자] 종목을 삭제합니다.",
+    options: [{ name: "종목", description: "종목 이름", type: 3, required: true }],
+  },
+  {
+    name: "시세설정",
+    description: "[관리자] 종목 가격을 변경합니다.",
+    options: [
+      { name: "종목", description: "종목 이름", type: 3, required: true },
+      { name: "가격", description: "새 가격(해정)", type: 4, required: true },
+    ],
+  },
+];
+
+// ---- 2) 옵션 파싱 헬퍼 ----
+function opt(interaction, name) {
+  const found = interaction.data.options?.find((o) => o.name === name);
+  return found?.value;
+}
+
+function isAdmin(interaction, env) {
+  return interaction.member?.user?.id === env.ADMIN_DISCORD_ID;
+}
+
+// ---- 3) 커맨드별 핸들러: (interaction, env) => Promise<string> ----
+export const handlers = {
+  주식목록: async (_interaction, env) => {
+    const stocks = await listStocks(env);
+    if (stocks.length === 0) return "등록된 종목이 없어요. 관리자가 `/종목추가`로 등록할 수 있어요.";
+    return stocks
+      .map((s) => `**${s.name}** — ${s.price.toLocaleString()}해정`)
+      .join("\n");
+  },
+
+  잔고: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const user = await getUser(env, userId);
+    const holdingsText = Object.entries(user.holdings)
+      .map(([name, qty]) => `- ${name}: ${qty}주`)
+      .join("\n") || "(보유 종목 없음)";
+    return `잔고: **${user.balance.toLocaleString()}해정**\n${holdingsText}`;
+  },
+
+  랭킹: async (_interaction, env) => {
+    const ranking = await getRanking(env);
+    if (ranking.length === 0) return "아직 랭킹 데이터가 없어요.";
+    return ranking
+      .slice(0, 10)
+      .map((r, i) => `${i + 1}위 — <@${r.id}> (${r.total.toLocaleString()}해정)`)
+      .join("\n");
+  },
+
+  매수: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const name = opt(interaction, "종목");
+    const qty = opt(interaction, "수량");
+    if (qty <= 0) return "수량은 1 이상이어야 해요.";
+    const result = await buyStock(env, userId, name, qty);
+    return result.message;
+  },
+
+  매도: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const name = opt(interaction, "종목");
+    const qty = opt(interaction, "수량");
+    if (qty <= 0) return "수량은 1 이상이어야 해요.";
+    const result = await sellStock(env, userId, name, qty);
+    return result.message;
+  },
+
+  종목추가: async (interaction, env) => {
+    if (!isAdmin(interaction, env)) return "관리자만 사용할 수 있는 명령어예요.";
+    const name = opt(interaction, "종목");
+    const price = opt(interaction, "가격");
+    await upsertStock(env, name, price);
+    return `"${name}" 종목을 ${price.toLocaleString()}해정에 등록했어요.`;
+  },
+
+  종목삭제: async (interaction, env) => {
+    if (!isAdmin(interaction, env)) return "관리자만 사용할 수 있는 명령어예요.";
+    const name = opt(interaction, "종목");
+    await removeStock(env, name);
+    return `"${name}" 종목을 삭제했어요.`;
+  },
+
+  시세설정: async (interaction, env) => {
+    if (!isAdmin(interaction, env)) return "관리자만 사용할 수 있는 명령어예요.";
+    const name = opt(interaction, "종목");
+    const price = opt(interaction, "가격");
+    await upsertStock(env, name, price);
+    return `"${name}" 가격을 ${price.toLocaleString()}해정으로 변경했어요.`;
+  },
+};

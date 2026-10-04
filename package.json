@@ -1,0 +1,17 @@
+{
+  "name": "discord-stock-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "register": "node scripts/register-commands.js",
+    "dev": "vercel dev",
+    "deploy": "vercel deploy --prod"
+  },
+  "dependencies": {
+    "discord-interactions": "^3.4.0"
+  },
+  "devDependencies": {
+    "vercel": "^37.0.0"
+  }
+}
