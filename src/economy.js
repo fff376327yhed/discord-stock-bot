@@ -28,6 +28,10 @@ export async function listProducts(env) {
   return listCollection(env, "products");
 }
 
+export async function getProduct(env, name) {
+  return getDoc(env, `products/${encodeURIComponent(name)}`);
+}
+
 export async function upsertProduct(env, name, price, description) {
   await setDoc(env, `products/${encodeURIComponent(name)}`, {
     name,
@@ -97,7 +101,7 @@ export async function sellStock(env, userId, stockName, qty) {
 // ---------- 상품 구입 ----------
 // 구입 시점의 상품 가격만큼 잔고에서 차감하고, 보유 수량을 1 늘립니다.
 export async function buyProduct(env, userId, productName) {
-  const product = await getDoc(env, `products/${encodeURIComponent(productName)}`);
+  const product = await getProduct(env, productName);
   if (!product) return { ok: false, message: `"${productName}" 상품을 찾을 수 없어요.` };
 
   const user = await getUser(env, userId);
@@ -164,6 +168,7 @@ export async function getUserDetail(env, userId) {
 }
 
 // ---------- 시세 변동 ----------
+// 모든 종목 가격을 minPct~maxPct(%) 범위에서 무작위로 변동시킴 (최저가 1해정 보장)
 export async function fluctuatePrices(env, { minPct, maxPct }) {
   const stocks = await listStocks(env);
   const changes = [];

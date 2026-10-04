@@ -3,11 +3,13 @@ import {
   listStocks,
   upsertStock,
   removeStock,
+  getStock,
   getUser,
   saveUser,
   listProducts,
   upsertProduct,
   removeProduct,
+  getProduct,
   setUserItem,
 } from "../../src/economy.js";
 import { listCollection } from "../../src/firebase.js";
@@ -75,6 +77,19 @@ async function handler(request) {
         return json({ ok: true });
       }
 
+      case "renameStock": {
+        const from = String(body.from || "").trim();
+        const to = String(body.to || "").trim();
+        const price = Number(body.price);
+        if (!from || !to) return json({ error: "기존 이름과 새 이름을 입력하세요." }, 400);
+        if (from === to) return json({ error: "새 이름이 기존 이름과 같습니다." }, 400);
+        const exists = await getStock(env, to);
+        if (exists) return json({ error: `"${to}" 종목이 이미 있습니다.` }, 400);
+        await upsertStock(env, to, price);
+        await removeStock(env, from);
+        return json({ ok: true });
+      }
+
       // ----- 상품 -----
       case "listProducts":
         return json(await listProducts(env));
@@ -95,6 +110,23 @@ async function handler(request) {
         const name = String(body.name || "").trim();
         if (!name) return json({ error: "상품 이름이 없습니다." }, 400);
         await removeProduct(env, name);
+        return json({ ok: true });
+      }
+
+      case "renameProduct": {
+        const from = String(body.from || "").trim();
+        const to = String(body.to || "").trim();
+        const price = Number(body.price);
+        const description = String(body.description || "").trim();
+        if (!from || !to) return json({ error: "기존 이름과 새 이름을 입력하세요." }, 400);
+        if (from === to) return json({ error: "새 이름이 기존 이름과 같습니다." }, 400);
+        if (!Number.isInteger(price) || price < 1) {
+          return json({ error: "가격은 1 이상의 정수여야 합니다." }, 400);
+        }
+        const exists = await getProduct(env, to);
+        if (exists) return json({ error: `"${to}" 상품이 이미 있습니다.` }, 400);
+        await upsertProduct(env, to, price, description);
+        await removeProduct(env, from);
         return json({ ok: true });
       }
 
