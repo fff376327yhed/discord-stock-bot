@@ -7,8 +7,8 @@ const HISTORY_LIMIT = 30; // 유저당 최근 N건만 보관
 export const DELIST_PRICE = 100;
 
 // 상승/하락 표시 (한국식: 오름 = 빨강, 내림 = 파랑)
-export const UP_MARK = "🔺"; // 빨간 위쪽 화살표
-export const DOWN_MARK = "🔽"; // 파란 아래쪽 화살표
+export const UP_MARK = "🟥"; // 빨간 네모 (상승)
+export const DOWN_MARK = "🟦"; // 파란 네모 (하락)
 
 // 한글 가나다순 비교 (정렬용)
 export const compareKo = (a, b) => String(a).localeCompare(String(b), "ko");
@@ -20,7 +20,7 @@ export function fmtSigned(n) {
   return `${sign}${Math.abs(n).toLocaleString()}`;
 }
 
-// 손익 문구: "🔺 이득 +2,500해정 (+25.0%)" / "🔽 손해 -500해정 (-5.0%)" / "➖ 본전 0해정 (0.0%)"
+// 손익 문구: "🟥 이득 +2,500해정 (+25.0%)" / "🟦 손해 -500해정 (-5.0%)" / "➖ 본전 0해정 (0.0%)"
 // cost = 기준이 되는 매수 원가 (퍼센트 계산용)
 export function profitLabel(profit, cost) {
   const pct = cost > 0 ? (profit / cost) * 100 : 0;

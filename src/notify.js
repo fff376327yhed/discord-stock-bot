@@ -94,7 +94,7 @@ export function isWithinNotifyWindow(setting, hour = currentHourKST()) {
   return hour >= start || hour < end;
 }
 
-// 공지용 한 줄: 🔺(빨강) 상승 / 🔽(파랑) 하락 / ➖ 변동 없음 / 🚫 상장폐지
+// 공지용 한 줄: 🟥(빨강) 상승 / 🟦(파랑) 하락 / ➖ 변동 없음 / 🚫 상장폐지
 function announceLine(c) {
   if (c.delisted) {
     return `🚫 **${c.name}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정)`;
