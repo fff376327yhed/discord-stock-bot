@@ -25,11 +25,11 @@ export function isDelistDanger(price) {
   return price > DELIST_PRICE && price <= DANGER_PRICE;
 }
 
-// 종목 줄 끝에 붙이는 위기 표시 (위기가 아니면 빈 문자열)
+// 종목 이름 바로 옆에 붙이는 위기 표시: " ⚠️" (위기가 아니면 빈 문자열)
 // plain = true면 자동완성 목록용 기본 이모지 사용
 export function dangerTag(price, plain = false) {
   if (!isDelistDanger(price)) return "";
-  return ` ${plain ? "⚠️" : DANGER_MARK} 상장폐지 위기`;
+  return ` ${plain ? "⚠️" : DANGER_MARK}`;
 }
 
 // 한글 가나다순 비교 (정렬용)

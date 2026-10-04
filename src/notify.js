@@ -1,5 +1,5 @@
 import { getDoc, setDoc, listCollection } from "./firebase.js";
-import { UP_MARK, DOWN_MARK, dangerTag } from "./economy.js";
+import { UP_MARK, DOWN_MARK, DANGER_MARK, DANGER_PRICE, dangerTag, isDelistDanger } from "./economy.js";
 
 // ---------- 주식채널 가격 변동 공지 on/off (관리자 콘솔의 체크박스) ----------
 // 유저별 DM 알림(/알림설정)과는 별개예요. 기본값은 켜짐입니다.
@@ -64,7 +64,7 @@ function formatLines(list) {
       const pct = ((c.after - c.before) / c.before) * 100;
       const sign = pct > 0 ? "+" : "";
       const mark = c.after > c.before ? UP_MARK : c.after < c.before ? DOWN_MARK : "➖";
-      return `• ${mark} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${sign}${pct.toFixed(1)}%)${dangerTag(c.after)}`;
+      return `• ${mark} **${c.name}**${dangerTag(c.after)}: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${sign}${pct.toFixed(1)}%)`;
     })
     .join("\n");
 }
@@ -100,11 +100,11 @@ function announceLine(c) {
     return `🚫 **${c.name}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정)`;
   }
   if (c.after === c.before) {
-    return `➖ **${c.name}**: ${c.after.toLocaleString()}해정 (변동 없음)${dangerTag(c.after)}`;
+    return `➖ **${c.name}**${dangerTag(c.after)}: ${c.after.toLocaleString()}해정 (변동 없음)`;
   }
   const up = c.after > c.before;
   const pct = ((c.after - c.before) / c.before) * 100;
-  return `${up ? UP_MARK : DOWN_MARK} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)${dangerTag(c.after)}`;
+  return `${up ? UP_MARK : DOWN_MARK} **${c.name}**${dangerTag(c.after)}: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)`;
 }
 
 // 시세가 변동될 때마다 주식채널(ALLOWED_CHANNEL_ID)에 변동 내역을 공지합니다.
@@ -143,9 +143,16 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
       current += (current ? "\n" : "") + line;
     }
 
-    // 상장폐지 안내
+    // 안내 문구: 상장폐지 종목이 있을 때 / 위기(⚠️) 종목이 있을 때
+    const notes = [];
     if (changes.some((c) => c.delisted)) {
-      const note = "⚠️ 상장폐지된 종목은 거래할 수 없고, 보유 중이던 주식은 모두 사라졌어요.";
+      notes.push("🚫 상장폐지된 종목은 거래할 수 없고, 보유 중이던 주식은 모두 사라졌어요.");
+    }
+    if (changes.some((c) => !c.delisted && isDelistDanger(c.after))) {
+      notes.push(`${DANGER_MARK} = 상장폐지 위기 (${DANGER_PRICE.toLocaleString()}해정 이하)`);
+    }
+    if (notes.length) {
+      const note = notes.join("\n");
       if (current.length + note.length + 2 > 1900) {
         chunks.push(current);
         current = "";
