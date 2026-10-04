@@ -9,6 +9,7 @@ import {
   getUserDetail,
   listProducts,
   buyProduct,
+  setNotify,
 } from "./economy.js";
 
 // ---- 1) Discord에 등록할 커맨드 정의 ----
@@ -41,6 +42,16 @@ export const commandDefinitions = [
   },
   { name: "보유상품", description: "내가 구입한 상품 목록을 봅니다." },
   {
+    name: "알림설정",
+    description: "시세 알림을 켜고 끕니다. 여러 개를 동시에 켤 수 있어요.",
+    options: [
+      { name: "전체", description: "모든 종목 시세 변동 알림", type: 5, required: false },
+      { name: "상승", description: "내가 보유한 종목이 오를 때 알림", type: 5, required: false },
+      { name: "하락", description: "내가 보유한 종목이 내릴 때 알림", type: 5, required: false },
+    ],
+  },
+  { name: "알림확인", description: "현재 알림 설정을 봅니다." },
+  {
     name: "종목추가",
     description: "[관리자] 새 종목을 등록합니다.",
     options: [
@@ -71,6 +82,16 @@ function opt(interaction, name) {
 
 function isAdmin(interaction, env) {
   return interaction.member?.user?.id === env.ADMIN_DISCORD_ID;
+}
+
+function notifyStatusText(s, title) {
+  const mark = (on) => (on ? "✅ 켜짐" : "❌ 꺼짐");
+  return [
+    `**${title}**`,
+    `- 전체 시세 변동: ${mark(s.all)}`,
+    `- 내 보유 종목 상승: ${mark(s.up)}`,
+    `- 내 보유 종목 하락: ${mark(s.down)}`,
+  ].join("\n");
 }
 
 // ---- 3) 커맨드별 핸들러: (interaction, env) => Promise<string> ----
@@ -162,6 +183,26 @@ export const handlers = {
     const entries = Object.entries(user.items);
     if (entries.length === 0) return "보유한 상품이 없어요. `/상점`에서 구경해 보세요.";
     return entries.map(([name, count]) => `- ${name} x${count}`).join("\n");
+  },
+
+  알림설정: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const user = await getUser(env, userId);
+    const current = user.notify || { all: false, up: false, down: false };
+
+    const next = {
+      all: opt(interaction, "전체") ?? current.all,
+      up: opt(interaction, "상승") ?? current.up,
+      down: opt(interaction, "하락") ?? current.down,
+    };
+    await setNotify(env, userId, next);
+    return notifyStatusText(next, "알림 설정을 저장했어요.");
+  },
+
+  알림확인: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const user = await getUser(env, userId);
+    return notifyStatusText(user.notify || { all: false, up: false, down: false }, "현재 알림 설정");
   },
 
   종목추가: async (interaction, env) => {

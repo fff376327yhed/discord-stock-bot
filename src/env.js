@@ -2,6 +2,7 @@
 export function loadEnv() {
   return {
     DISCORD_PUBLIC_KEY: process.env.DISCORD_PUBLIC_KEY,
+    DISCORD_BOT_TOKEN: process.env.DISCORD_BOT_TOKEN,
     ADMIN_DISCORD_ID: process.env.ADMIN_DISCORD_ID,
     FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID,
     FIREBASE_CLIENT_EMAIL: process.env.FIREBASE_CLIENT_EMAIL,

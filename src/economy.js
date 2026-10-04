@@ -182,3 +182,10 @@ export async function fluctuatePrices(env, { minPct, maxPct }) {
 
   return changes;
 }
+
+// ---------- 알림 설정 ----------
+export async function setNotify(env, userId, notify) {
+  const user = await getUser(env, userId);
+  user.notify = notify;
+  await saveUser(env, userId, user);
+}
