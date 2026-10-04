@@ -5,7 +5,7 @@ import { getDoc, setDoc, listCollection } from "./firebase.js";
 const ANNOUNCE_PATH = "config/announce";
 
 // config/announce 문서: { enabled, messageIds, channelId }
-// messageIds = 마지막으로 올린 공지 메시지 ID들(쉼표로 구분). 다음 변동 때 새로 올리지 않고 이 메시지를 수정합니다.
+// messageIds = 마지막으로 올린 공지 메시지 ID들(쉼표로 구분). 다음 변동 때 이 메시지들을 지우고 새로 올립니다.
 async function readAnnounceDoc(env) {
   try {
     return (await getDoc(env, ANNOUNCE_PATH)) || {};
@@ -134,45 +134,27 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
     }
     if (current) chunks.push(current);
 
-    // 채널이 그대로일 때만 이전 공지 메시지를 재사용
+    // 이전 공지는 지우고 새 메시지를 올림 (항상 채널 맨 아래에 최신 공지만 남음)
     const channel = env.ALLOWED_CHANNEL_ID;
     const oldIds = doc.channelId === channel ? String(doc.messageIds || "").split(",").filter(Boolean) : [];
-    const newIds = [];
-    let edited = 0;
 
-    for (let i = 0; i < chunks.length; i++) {
-      const content = chunks[i];
-      let message = null;
-
-      // 이전 공지가 있으면 새로 올리지 않고 그 메시지를 수정 (수정은 알림이 가지 않아요)
-      if (oldIds[i]) {
-        try {
-          message = await discordRequest(env, "PATCH", `/channels/${channel}/messages/${oldIds[i]}`, { content });
-          edited++;
-        } catch (err) {
-          // 메시지가 지워졌거나 수정에 실패하면 아래에서 새로 올림
-          console.error("공지 수정 실패, 새로 올립니다:", err.message);
-        }
-      }
-
-      // flags 4096 = 무음 메시지(푸시 알림·소리 없음)
-      if (!message) {
-        message = await discordPost(env, `/channels/${channel}/messages`, { content, flags: 4096 });
-      }
-      newIds.push(message.id);
-    }
-
-    // 공지가 이전보다 짧아져서 남는 옛 메시지는 지움
-    for (const id of oldIds.slice(chunks.length)) {
+    for (const id of oldIds) {
       try {
         await discordRequest(env, "DELETE", `/channels/${channel}/messages/${id}`);
       } catch (err) {
-        console.error("남은 공지 삭제 실패:", err.message);
+        console.error("이전 공지 삭제 실패:", err.message);
       }
     }
 
+    const newIds = [];
+    for (const content of chunks) {
+      // flags 4096 = 무음 메시지(푸시 알림·소리 없음)
+      const message = await discordPost(env, `/channels/${channel}/messages`, { content, flags: 4096 });
+      newIds.push(message.id);
+    }
+
     await setDoc(env, ANNOUNCE_PATH, { messageIds: newIds.join(","), channelId: channel });
-    return { sent: true, messages: chunks.length, edited };
+    return { sent: true, messages: chunks.length, edited: 0 };
   } catch (err) {
     console.error("시세 변동 공지 실패:", err.message);
     return { sent: false, reason: err.message };
