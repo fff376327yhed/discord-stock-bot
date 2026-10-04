@@ -101,6 +101,11 @@ export async function getHistory(env, userId, limit = 10) {
     .map(([, v]) => v);
 }
 
+// 거래 후 정산된 잔고 문구
+function balanceLine(balance) {
+  return `💰 현재 잔고: **${balance.toLocaleString()}해정**`;
+}
+
 // ---------- 주식 매수/매도 ----------
 export async function buyStock(env, userId, stockName, qty) {
   const stock = await getStock(env, stockName);
@@ -115,14 +120,14 @@ export async function buyStock(env, userId, stockName, qty) {
   user.balance -= cost;
   user.holdings[stockName] = (user.holdings[stockName] || 0) + qty;
 
-  const message = `${stockName} ${qty}주 매수 완료 (-${cost.toLocaleString()}해정)`;
+  const summary = `${stockName} ${qty}주 매수 완료 (-${cost.toLocaleString()}해정)`;
   // 저장과 기록을 동시에 처리해서 응답 시간을 늘리지 않음
   await Promise.all([
     saveUser(env, userId, user),
-    addHistory(env, userId, `매수: ${message}`),
+    addHistory(env, userId, `매수: ${summary} → 잔고 ${user.balance.toLocaleString()}해정`),
   ]);
 
-  return { ok: true, message, user };
+  return { ok: true, message: `${summary}\n${balanceLine(user.balance)}`, user };
 }
 
 export async function sellStock(env, userId, stockName, qty) {
@@ -140,13 +145,13 @@ export async function sellStock(env, userId, stockName, qty) {
   if (user.holdings[stockName] === 0) delete user.holdings[stockName];
   user.balance += earned;
 
-  const message = `${stockName} ${qty}주 매도 완료 (+${earned.toLocaleString()}해정)`;
+  const summary = `${stockName} ${qty}주 매도 완료 (+${earned.toLocaleString()}해정)`;
   await Promise.all([
     saveUser(env, userId, user),
-    addHistory(env, userId, `매도: ${message}`),
+    addHistory(env, userId, `매도: ${summary} → 잔고 ${user.balance.toLocaleString()}해정`),
   ]);
 
-  return { ok: true, message, user };
+  return { ok: true, message: `${summary}\n${balanceLine(user.balance)}`, user };
 }
 
 // ---------- 상품 구입 ----------
@@ -163,13 +168,13 @@ export async function buyProduct(env, userId, productName) {
   user.balance -= product.price;
   user.items[productName] = (user.items[productName] || 0) + 1;
 
-  const message = `"${productName}" 구입 완료 (-${product.price.toLocaleString()}해정)`;
+  const summary = `"${productName}" 구입 완료 (-${product.price.toLocaleString()}해정)`;
   await Promise.all([
     saveUser(env, userId, user),
-    addHistory(env, userId, `구입: ${message}`),
+    addHistory(env, userId, `구입: ${summary} → 잔고 ${user.balance.toLocaleString()}해정`),
   ]);
 
-  return { ok: true, message };
+  return { ok: true, message: `${summary}\n${balanceLine(user.balance)}` };
 }
 
 // 관리자용: 보유 수량을 직접 설정 (0이면 목록에서 제거)

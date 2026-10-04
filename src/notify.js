@@ -36,6 +36,15 @@ function currentHourKST() {
   return new Date(Date.now() + 9 * 60 * 60 * 1000).getUTCHours();
 }
 
+// 한국시간 기준 "MM/DD HH:mm"
+function formatNowKST() {
+  return new Date(Date.now() + 9 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(5, 16)
+    .replace("T", " ")
+    .replace("-", "/");
+}
+
 // 알림 시간대 안인지 확인합니다.
 // - start/end가 없거나 서로 같으면 하루 종일
 // - start < end: start시 이상 end시 미만 (예: 9~22)
@@ -45,6 +54,45 @@ export function isWithinNotifyWindow(setting, hour = currentHourKST()) {
   if (!Number.isInteger(start) || !Number.isInteger(end) || start === end) return true;
   if (start < end) return hour >= start && hour < end;
   return hour >= start || hour < end;
+}
+
+// 공지용 한 줄: 🔺 상승 / 🔻 하락 / ➖ 변동 없음
+function announceLine(c) {
+  if (c.after === c.before) {
+    return `➖ **${c.name}**: ${c.after.toLocaleString()}해정 (변동 없음)`;
+  }
+  const up = c.after > c.before;
+  const pct = ((c.after - c.before) / c.before) * 100;
+  return `${up ? "🔺" : "🔻"} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)`;
+}
+
+// 시세가 변동될 때마다 주식채널(ALLOWED_CHANNEL_ID)에 변동 내역을 공지합니다.
+// 유저의 알림 설정과 상관없이 항상 올라가요. 실패해도 시세 변동 자체는 막지 않습니다.
+export async function announcePriceChanges(env, changes, label = "시세 변동") {
+  if (!env.DISCORD_BOT_TOKEN || !env.ALLOWED_CHANNEL_ID || changes.length === 0) return;
+
+  try {
+    const header = `📊 **시세 변동** · ${label} · ${formatNowKST()}`;
+    const chunks = [];
+    let current = header;
+
+    for (const c of changes) {
+      const line = announceLine(c);
+      // 디스코드 메시지 한도(2000자)를 넘지 않게 나눠서 보냄
+      if (current.length + line.length + 1 > 1900) {
+        chunks.push(current);
+        current = "";
+      }
+      current += (current ? "\n" : "") + line;
+    }
+    if (current) chunks.push(current);
+
+    for (const content of chunks) {
+      await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, { content });
+    }
+  } catch (err) {
+    console.error("시세 변동 공지 실패:", err.message);
+  }
 }
 
 // 시세 변동 목록을 받아 유저별 알림 설정에 맞춰 DM 전송
