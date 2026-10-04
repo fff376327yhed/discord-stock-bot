@@ -1,4 +1,5 @@
 import { getDoc, setDoc, deleteDoc, listCollection } from "./firebase.js";
+import { ensureMinimumStocks } from "./listing.js";
 
 const STARTING_BALANCE = 1000; // 신규 유저 기본 지급 해정
 const HISTORY_LIMIT = 30; // 유저당 최근 N건만 보관
@@ -526,6 +527,8 @@ export async function fluctuatePrices(env, { minPct, maxPct }) {
     changes.push({ name: stock.name, before: stock.price, after: newPrice, pct, delisted: false, holders: [] });
   }
 
+  // 종목 수가 기준 이하로 줄었으면 자동 상장
+  await ensureMinimumStocks(env);
   return changes;
 }
 

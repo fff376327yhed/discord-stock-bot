@@ -6,6 +6,8 @@ import {
   upsertStock,
   removeStock,
   getUser,
+  saveUser,
+  addHistory,
   buyStock,
   sellStock,
   getRanking,
@@ -30,6 +32,7 @@ import {
   setAttendanceConfig,
 } from "./attendance.js";
 import { mineOnce, upgradeMining, getMiningInfo } from "./mining.js";
+import { getListingConfig, LISTING_PRICE, ensureMinimumStocks } from "./listing.js";
 import { renderStockChart } from "./chart.js";
 
 // ---- 1) Discord에 등록할 커맨드 정의 ----
@@ -115,6 +118,13 @@ export const commandDefinitions = [
     description: "[관리자] 종목을 삭제합니다.",
     options: [
       { name: "종목", description: "종목 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+    ],
+  },
+  {
+    name: "종목생성",
+    description: "새 종목을 1000해정에 상장합니다. 이름만 정할 수 있고, 하루 횟수 제한이 있어요.",
+    options: [
+      { name: "이름", description: "새 종목 이름 (1~12자)", type: 3, required: true },
     ],
   },
   {
@@ -669,7 +679,33 @@ export const handlers = {
     if (!isAdmin(interaction, env)) return "관리자만 사용할 수 있는 명령어예요.";
     const name = opt(interaction, "종목");
     await removeStock(env, name);
+    await ensureMinimumStocks(env); // 종목 수가 기준 이하면 자동 상장
     return `"${name}" 종목을 삭제했어요.`;
+  },
+
+  // 유저 종목 생성: 이름만 정하고 가격은 LISTING_PRICE 고정, 하루 dailyLimit회 (무료)
+  종목생성: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const name = String(opt(interaction, "이름") ?? "").trim();
+    if (!name || name.length > 12) return "종목 이름은 1~12자로 입력해 주세요.";
+
+    const cfg = await getListingConfig(env);
+    const user = await getUser(env, userId);
+    const today = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const used = user.listingDay === today ? user.listingCount || 0 : 0;
+    if (used >= cfg.dailyLimit) {
+      return `오늘은 종목 생성을 ${cfg.dailyLimit}회 모두 썼어요. 내일 다시 시도해 주세요.`;
+    }
+
+    if (await getStock(env, name)) return `"${name}" 종목이 이미 있어요. 다른 이름을 골라 주세요.`;
+
+    await upsertStock(env, name, LISTING_PRICE);
+    user.listingDay = today;
+    user.listingCount = used + 1;
+    await saveUser(env, userId, user);
+    await addHistory(env, userId, `종목 생성: ${name} (${LISTING_PRICE.toLocaleString()}해정 상장)`);
+
+    return `"${name}" 종목을 ${LISTING_PRICE.toLocaleString()}해정에 상장했어요. (오늘 ${used + 1}/${cfg.dailyLimit}회)`;
   },
 
   시세설정: async (interaction, env) => {

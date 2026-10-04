@@ -15,6 +15,7 @@ import {
 import { listCollection } from "../../src/firebase.js";
 import { getAttendanceConfig, setAttendanceConfig } from "../../src/attendance.js";
 import { getAnnounceConfig, setAnnounceConfig } from "../../src/notify.js";
+import { getListingConfig, setListingConfig, parseNames, ensureMinimumStocks } from "../../src/listing.js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -76,6 +77,7 @@ async function handler(request) {
         const name = String(body.name || "").trim();
         if (!name) return json({ error: "종목 이름이 없습니다." }, 400);
         await removeStock(env, name);
+        await ensureMinimumStocks(env);
         return json({ ok: true });
       }
 
@@ -186,6 +188,24 @@ async function handler(request) {
           return json({ error: "enabled는 true/false여야 합니다." }, 400);
         }
         return json(await setAnnounceConfig(env, { enabled: body.enabled }));
+      }
+
+      // ----- 자동 상장 설정 -----
+      case "getListing":
+        return json(await getListingConfig(env));
+
+      case "setListing": {
+        const patch = {};
+        for (const key of ["triggerCount", "addCount", "dailyLimit"]) {
+          if (body[key] === undefined) continue;
+          const v = Number(body[key]);
+          if (!Number.isInteger(v) || v < 0) {
+            return json({ error: "기준 종목 수·추가 수·하루 횟수는 0 이상의 정수여야 합니다." }, 400);
+          }
+          patch[key] = v;
+        }
+        if (body.names !== undefined) patch.names = parseNames(body.names).join("\n");
+        return json(await setListingConfig(env, patch));
       }
 
       default:
