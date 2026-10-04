@@ -90,3 +90,38 @@ export async function getRanking(env) {
     })
     .sort((a, b) => b.total - a.total);
 }
+
+// 유저 한 명의 잔고/보유종목/총자산/순위를 한 번에 계산 (/내정보 용)
+export async function getUserDetail(env, userId) {
+  const [user, stocks, ranking] = await Promise.all([
+    getUser(env, userId),
+    listStocks(env),
+    getRanking(env),
+  ]);
+  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+
+  const holdings = Object.entries(user.holdings).map(([name, qty]) => {
+    const price = priceMap[name] || 0;
+    return { name, qty, price, value: price * qty };
+  });
+  const holdingsValue = holdings.reduce((sum, h) => sum + h.value, 0);
+  const totalAsset = user.balance + holdingsValue;
+  const rank = ranking.findIndex((r) => r.id === userId) + 1;
+
+  return { balance: user.balance, holdings, holdingsValue, totalAsset, rank, totalUsers: ranking.length };
+}
+
+// 모든 종목 가격을 minPct~maxPct(%) 범위에서 무작위로 변동시킴 (최저가 1해정 보장)
+export async function fluctuatePrices(env, { minPct, maxPct }) {
+  const stocks = await listStocks(env);
+  const changes = [];
+
+  for (const stock of stocks) {
+    const pct = minPct + Math.random() * (maxPct - minPct);
+    const newPrice = Math.max(1, Math.round(stock.price * (1 + pct / 100)));
+    await upsertStock(env, stock.name, newPrice);
+    changes.push({ name: stock.name, before: stock.price, after: newPrice, pct });
+  }
+
+  return changes;
+}

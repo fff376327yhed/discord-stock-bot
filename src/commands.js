@@ -6,12 +6,14 @@ import {
   buyStock,
   sellStock,
   getRanking,
+  getUserDetail,
 } from "./economy.js";
 
 // ---- 1) Discord에 등록할 커맨드 정의 (register-commands.js 에서 사용) ----
 export const commandDefinitions = [
   { name: "주식목록", description: "현재 거래 가능한 종목과 가격을 봅니다." },
   { name: "잔고", description: "내 해정 잔고와 보유 종목을 봅니다." },
+  { name: "내정보", description: "내 잔고, 보유 종목 평가액, 총자산, 순위를 한 번에 봅니다." },
   { name: "랭킹", description: "총 자산 기준 랭킹을 봅니다." },
   {
     name: "매수",
@@ -79,6 +81,28 @@ export const handlers = {
       .map(([name, qty]) => `- ${name}: ${qty}주`)
       .join("\n") || "(보유 종목 없음)";
     return `잔고: **${user.balance.toLocaleString()}해정**\n${holdingsText}`;
+  },
+
+  내정보: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const detail = await getUserDetail(env, userId);
+
+    const holdingsText = detail.holdings
+      .map((h) => `- ${h.name}: ${h.qty}주 (현재가 ${h.price.toLocaleString()}해정, 평가금 ${h.value.toLocaleString()}해정)`)
+      .join("\n") || "(보유 종목 없음)";
+
+    const rankText = detail.rank > 0 ? `${detail.rank}위 / ${detail.totalUsers}명` : "(순위 없음)";
+
+    return [
+      "**내 상세정보**",
+      `현금 잔고: ${detail.balance.toLocaleString()}해정`,
+      `보유 종목 평가액: ${detail.holdingsValue.toLocaleString()}해정`,
+      `총 자산: ${detail.totalAsset.toLocaleString()}해정`,
+      `전체 순위: ${rankText}`,
+      "",
+      "보유 종목:",
+      holdingsText,
+    ].join("\n");
   },
 
   랭킹: async (_interaction, env) => {

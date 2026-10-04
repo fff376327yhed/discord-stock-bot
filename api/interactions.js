@@ -1,23 +1,12 @@
 import { verifyKey } from "discord-interactions";
 import { handlers } from "../src/commands.js";
+import { loadEnv } from "../src/env.js";
 
 // Node.js 런타임으로 동작 (Edge는 discord-interactions가 쓰는 Node crypto를 지원하지 않아 제외)
 // Node.js 런타임도 요청이 올 때만 실행되고 평소엔 대기 상태인 서버리스예요.
 
 const InteractionType = { PING: 1, APPLICATION_COMMAND: 2 };
 const InteractionResponseType = { PONG: 1, CHANNEL_MESSAGE_WITH_SOURCE: 4 };
-
-// Vercel 프로젝트에 등록해둔 환경변수를 다른 파일(firebase.js 등)이 쓰던
-// env 객체 형태 그대로 모아줍니다. (Workers -> Vercel 전환 시 다른 파일은 수정 불필요)
-function loadEnv() {
-  return {
-    DISCORD_PUBLIC_KEY: process.env.DISCORD_PUBLIC_KEY,
-    ADMIN_DISCORD_ID: process.env.ADMIN_DISCORD_ID,
-    FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID,
-    FIREBASE_CLIENT_EMAIL: process.env.FIREBASE_CLIENT_EMAIL,
-    FIREBASE_PRIVATE_KEY: process.env.FIREBASE_PRIVATE_KEY,
-  };
-}
 
 export default { fetch: handler };
 
