@@ -4,14 +4,20 @@ import { getDoc, setDoc, listCollection } from "./firebase.js";
 // 유저별 DM 알림(/알림설정)과는 별개예요. 기본값은 켜짐입니다.
 const ANNOUNCE_PATH = "config/announce";
 
-export async function getAnnounceConfig(env) {
+// config/announce 문서: { enabled, messageIds, channelId }
+// messageIds = 마지막으로 올린 공지 메시지 ID들(쉼표로 구분). 다음 변동 때 새로 올리지 않고 이 메시지를 수정합니다.
+async function readAnnounceDoc(env) {
   try {
-    const saved = await getDoc(env, ANNOUNCE_PATH);
-    return { enabled: saved?.enabled ?? true };
+    return (await getDoc(env, ANNOUNCE_PATH)) || {};
   } catch (err) {
     console.error("공지 설정 조회 실패:", err.message);
-    return { enabled: true };
+    return {};
   }
+}
+
+export async function getAnnounceConfig(env) {
+  const saved = await readAnnounceDoc(env);
+  return { enabled: saved.enabled ?? true };
 }
 
 export async function setAnnounceConfig(env, { enabled }) {
@@ -22,18 +28,24 @@ export async function setAnnounceConfig(env, { enabled }) {
 
 const DISCORD_API = "https://discord.com/api/v10";
 
-async function discordPost(env, path, body) {
+async function discordRequest(env, method, path, body) {
   const res = await fetch(`${DISCORD_API}${path}`, {
-    method: "POST",
+    method,
     headers: {
       Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(body),
+    body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`Discord 전송 실패(${res.status}): ${await res.text()}`);
-  return res.json();
+  if (!res.ok) {
+    const err = new Error(`Discord 요청 실패(${res.status}): ${await res.text()}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.status === 204 ? null : res.json();
 }
+
+const discordPost = (env, path, body) => discordRequest(env, "POST", path, body);
 
 // 유저에게 DM 보내기 (DM 채널을 먼저 열고 메시지 전송)
 async function sendDM(env, userId, content) {
@@ -101,8 +113,8 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
   }
 
   // 관리자 콘솔에서 체크를 끈 경우 공지를 보내지 않음
-  const config = await getAnnounceConfig(env);
-  if (!config.enabled) {
+  const doc = await readAnnounceDoc(env);
+  if (doc.enabled === false) {
     return { sent: false, reason: "가격 변동 공지가 꺼져 있어요" };
   }
 
@@ -122,11 +134,45 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
     }
     if (current) chunks.push(current);
 
-    for (const content of chunks) {
-      // flags 4096 = 무음 메시지(푸시 알림·소리 없음). 메시지는 채널에 그대로 올라가요.
-      await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, { content, flags: 4096 });
+    // 채널이 그대로일 때만 이전 공지 메시지를 재사용
+    const channel = env.ALLOWED_CHANNEL_ID;
+    const oldIds = doc.channelId === channel ? String(doc.messageIds || "").split(",").filter(Boolean) : [];
+    const newIds = [];
+    let edited = 0;
+
+    for (let i = 0; i < chunks.length; i++) {
+      const content = chunks[i];
+      let message = null;
+
+      // 이전 공지가 있으면 새로 올리지 않고 그 메시지를 수정 (수정은 알림이 가지 않아요)
+      if (oldIds[i]) {
+        try {
+          message = await discordRequest(env, "PATCH", `/channels/${channel}/messages/${oldIds[i]}`, { content });
+          edited++;
+        } catch (err) {
+          // 메시지가 지워졌거나 수정에 실패하면 아래에서 새로 올림
+          console.error("공지 수정 실패, 새로 올립니다:", err.message);
+        }
+      }
+
+      // flags 4096 = 무음 메시지(푸시 알림·소리 없음)
+      if (!message) {
+        message = await discordPost(env, `/channels/${channel}/messages`, { content, flags: 4096 });
+      }
+      newIds.push(message.id);
     }
-    return { sent: true, messages: chunks.length };
+
+    // 공지가 이전보다 짧아져서 남는 옛 메시지는 지움
+    for (const id of oldIds.slice(chunks.length)) {
+      try {
+        await discordRequest(env, "DELETE", `/channels/${channel}/messages/${id}`);
+      } catch (err) {
+        console.error("남은 공지 삭제 실패:", err.message);
+      }
+    }
+
+    await setDoc(env, ANNOUNCE_PATH, { messageIds: newIds.join(","), channelId: channel });
+    return { sent: true, messages: chunks.length, edited };
   } catch (err) {
     console.error("시세 변동 공지 실패:", err.message);
     return { sent: false, reason: err.message };
