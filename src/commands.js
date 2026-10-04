@@ -741,26 +741,35 @@ export const handlers = {
   },
 
   // 유저 종목 생성: 이름만 정하고 가격은 LISTING_PRICE 고정, 하루 dailyLimit회 (무료)
+  // 디스코드는 3초 안에 응답이 없으면 "응답하지 않았다"고 표시해서, Firestore 호출을 최대한 묶어서 처리해요.
   종목생성: async (interaction, env) => {
     const userId = interaction.member.user.id;
     const name = String(opt(interaction, "이름") ?? "").trim();
     if (!name || name.length > 12) return "종목 이름은 1~12자로 입력해 주세요.";
 
-    const cfg = await getListingConfig(env);
-    const user = await getUser(env, userId);
+    // 설정 / 유저 / 같은 이름 종목 확인을 동시에 조회
+    const [cfg, user, exists] = await Promise.all([
+      getListingConfig(env),
+      getUser(env, userId),
+      getStock(env, name),
+    ]);
+
     const today = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const used = user.listingDay === today ? user.listingCount || 0 : 0;
     if (used >= cfg.dailyLimit) {
       return `오늘은 종목 생성을 ${cfg.dailyLimit}회 모두 썼어요. 내일 다시 시도해 주세요.`;
     }
+    if (exists) return `"${name}" 종목이 이미 있어요. 다른 이름을 골라 주세요.`;
 
-    if (await getStock(env, name)) return `"${name}" 종목이 이미 있어요. 다른 이름을 골라 주세요.`;
-
-    await upsertStock(env, name, LISTING_PRICE);
     user.listingDay = today;
     user.listingCount = used + 1;
-    await saveUser(env, userId, user);
-    await addHistory(env, userId, `종목 생성: ${name} (${LISTING_PRICE.toLocaleString()}해정 상장)`);
+
+    // 상장 / 횟수 저장 / 기록을 동시에 처리 (upsertStock에 {}를 넘겨 이미 없는 걸 아니까 다시 읽지 않게 함)
+    await Promise.all([
+      upsertStock(env, name, LISTING_PRICE, {}),
+      saveUser(env, userId, user),
+      addHistory(env, userId, `종목 생성: ${name} (${LISTING_PRICE.toLocaleString()}해정 상장)`),
+    ]);
 
     return `"${name}" 종목을 ${LISTING_PRICE.toLocaleString()}해정에 상장했어요. (오늘 ${used + 1}/${cfg.dailyLimit}회)`;
   },
