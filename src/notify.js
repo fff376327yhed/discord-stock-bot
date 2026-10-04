@@ -68,8 +68,17 @@ function announceLine(c) {
 
 // 시세가 변동될 때마다 주식채널(ALLOWED_CHANNEL_ID)에 변동 내역을 공지합니다.
 // 유저의 알림 설정과 상관없이 항상 올라가요. 실패해도 시세 변동 자체는 막지 않습니다.
+// 반환값: { sent: true, messages: 보낸 메시지 수 } 또는 { sent: false, reason: "이유" }
 export async function announcePriceChanges(env, changes, label = "시세 변동") {
-  if (!env.DISCORD_BOT_TOKEN || !env.ALLOWED_CHANNEL_ID || changes.length === 0) return;
+  if (!env.DISCORD_BOT_TOKEN) {
+    return { sent: false, reason: "DISCORD_BOT_TOKEN 환경변수가 없어요" };
+  }
+  if (!env.ALLOWED_CHANNEL_ID) {
+    return { sent: false, reason: "ALLOWED_CHANNEL_ID 환경변수가 없어요" };
+  }
+  if (changes.length === 0) {
+    return { sent: false, reason: "변동 내역이 없어요" };
+  }
 
   try {
     const header = `📊 **시세 변동** · ${label} · ${formatNowKST()}`;
@@ -90,8 +99,10 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
     for (const content of chunks) {
       await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, { content });
     }
+    return { sent: true, messages: chunks.length };
   } catch (err) {
     console.error("시세 변동 공지 실패:", err.message);
+    return { sent: false, reason: err.message };
   }
 }
 

@@ -19,8 +19,8 @@ async function handler(request) {
   const changes = await fluctuatePrices(env, { minPct: -30, maxPct: 30 });
 
   // 1) 주식채널에 변동 내역 공지 (알림 설정과 무관), 2) 알림을 켠 유저에게 DM
-  await announcePriceChanges(env, changes, "평소 변동");
+  const announce = await announcePriceChanges(env, changes, "평소 변동");
   await notifyPriceChanges(env, changes);
 
-  return Response.json({ ok: true, count: changes.length, changes });
+  return Response.json({ ok: true, announce, count: changes.length, changes });
 }
