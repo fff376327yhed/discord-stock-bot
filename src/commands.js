@@ -22,6 +22,7 @@ import {
   fmtSigned,
   UP_MARK,
   DOWN_MARK,
+  dangerTag,
 } from "./economy.js";
 import {
   checkAttendance,
@@ -265,7 +266,7 @@ async function quantityChoices(command, interaction, env, keyword) {
     if (q <= 0) return "1주 이상 입력해 주세요";
     const p = previewSell(user, stock, q);
     if (!p.ok) return `${q.toLocaleString()}주 매도 불가 (보유 ${held.toLocaleString()}주)`;
-    return `${q.toLocaleString()}주 매도 → +${p.earned.toLocaleString()} · 잔고 ${p.after.toLocaleString()} · ${profitLabel(p.profit, p.basis)}`;
+    return `${q.toLocaleString()}주 매도 → +${p.earned.toLocaleString()} · 잔고 ${p.after.toLocaleString()} · ${profitLabel(p.profit, p.basis, true)}`;
   };
   values = held > 0 ? [...defaults.filter((n) => n < held), held] : defaults;
   return numberChoices(
@@ -316,7 +317,7 @@ export async function autocomplete(interaction, env) {
             const qty = user.holdings[s.name];
             const cost = costOf(user, s.name, s.price);
             return {
-              label: `${s.name} (보유 ${qty}주 · ${s.price.toLocaleString()}해정 · ${profitLabel(s.price * qty - cost, cost)})`,
+              label: `${s.name} (보유 ${qty}주 · ${s.price.toLocaleString()}해정 · ${profitLabel(s.price * qty - cost, cost, true)})${dangerTag(s.price, true)}`,
               value: s.name,
             };
           }),
@@ -328,7 +329,7 @@ export async function autocomplete(interaction, env) {
       // 매수는 지금 잔고로 최대 몇 주까지 살 수 있는지 함께 표시
       return textChoices(
         stocks.map((s) => ({
-          label: `${s.name} (${s.price.toLocaleString()}해정 · 최대 ${Math.floor(user.balance / s.price).toLocaleString()}주)`,
+          label: `${s.name} (${s.price.toLocaleString()}해정 · 최대 ${Math.floor(user.balance / s.price).toLocaleString()}주)${dangerTag(s.price, true)}`,
           value: s.name,
         })),
         keyword
@@ -336,7 +337,7 @@ export async function autocomplete(interaction, env) {
     }
 
     return textChoices(
-      stocks.map((s) => ({ label: `${s.name} (${s.price.toLocaleString()}해정)`, value: s.name })),
+      stocks.map((s) => ({ label: `${s.name} (${s.price.toLocaleString()}해정)${dangerTag(s.price, true)}`, value: s.name })),
       keyword
     );
   }
@@ -429,7 +430,7 @@ export const handlers = {
       ...stocks.map((s) => {
         const held = user.holdings[s.name] || 0;
         const mark = held > 0 ? `⭐ (보유 ${held}주) ` : "";
-        return `${mark}**${s.name}** — ${s.price.toLocaleString()}해정`;
+        return `${mark}**${s.name}** — ${s.price.toLocaleString()}해정${dangerTag(s.price)}`;
       }),
     ].join("\n");
   },
@@ -485,9 +486,9 @@ export const handlers = {
     return {
       embeds: [
         {
-          title: `${mark} ${name} 시세 그래프`,
+          title: `${name} 시세 그래프`,
           description: [
-            `현재가 **${stock.price.toLocaleString()}해정**`,
+            `${mark} 현재가 **${stock.price.toLocaleString()}해정**${dangerTag(stock.price)}`,
             `구간 변동: ${mark} ${fmtSigned(diff)}해정 (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%) · ${formatKST(first.t)} 시작가 ${first.p.toLocaleString()}해정 대비`,
             `구간 최고 ${high.toLocaleString()} / 최저 ${low.toLocaleString()}해정`,
             `역대 최고가 ${Math.max(stock.maxPrice || 0, high).toLocaleString()}해정`,
@@ -518,7 +519,7 @@ export const handlers = {
     const holdingsText = detail.holdings
       .map(
         (h) =>
-          `- ${h.name}: ${h.qty}주 (현재가 ${h.price.toLocaleString()} · 평균 매수가 ${h.avg.toLocaleString()} · 평가금 ${h.value.toLocaleString()}해정)\n  ${profitLabel(h.profit, h.cost)}`
+          `- ${h.name}: ${h.qty}주 (현재가 ${h.price.toLocaleString()} · 평균 매수가 ${h.avg.toLocaleString()} · 평가금 ${h.value.toLocaleString()}해정)${dangerTag(h.price)}\n  ${profitLabel(h.profit, h.cost)}`
       )
       .join("\n") || "(보유 종목 없음)";
 

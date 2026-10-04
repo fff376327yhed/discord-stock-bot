@@ -1,5 +1,5 @@
 import { getDoc, setDoc, listCollection } from "./firebase.js";
-import { UP_MARK, DOWN_MARK } from "./economy.js";
+import { UP_MARK, DOWN_MARK, dangerTag } from "./economy.js";
 
 // ---------- 주식채널 가격 변동 공지 on/off (관리자 콘솔의 체크박스) ----------
 // 유저별 DM 알림(/알림설정)과는 별개예요. 기본값은 켜짐입니다.
@@ -64,7 +64,7 @@ function formatLines(list) {
       const pct = ((c.after - c.before) / c.before) * 100;
       const sign = pct > 0 ? "+" : "";
       const mark = c.after > c.before ? UP_MARK : c.after < c.before ? DOWN_MARK : "➖";
-      return `• ${mark} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${sign}${pct.toFixed(1)}%)`;
+      return `• ${mark} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${sign}${pct.toFixed(1)}%)${dangerTag(c.after)}`;
     })
     .join("\n");
 }
@@ -94,17 +94,17 @@ export function isWithinNotifyWindow(setting, hour = currentHourKST()) {
   return hour >= start || hour < end;
 }
 
-// 공지용 한 줄: 🟥(빨강) 상승 / 🟦(파랑) 하락 / ➖ 변동 없음 / 🚫 상장폐지
+// 공지용 한 줄: UP_MARK(빨강) 상승 / DOWN_MARK(파랑) 하락 / ➖ 변동 없음 / 🚫 상장폐지
 function announceLine(c) {
   if (c.delisted) {
     return `🚫 **${c.name}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정)`;
   }
   if (c.after === c.before) {
-    return `➖ **${c.name}**: ${c.after.toLocaleString()}해정 (변동 없음)`;
+    return `➖ **${c.name}**: ${c.after.toLocaleString()}해정 (변동 없음)${dangerTag(c.after)}`;
   }
   const up = c.after > c.before;
   const pct = ((c.after - c.before) / c.before) * 100;
-  return `${up ? UP_MARK : DOWN_MARK} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)`;
+  return `${up ? UP_MARK : DOWN_MARK} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)${dangerTag(c.after)}`;
 }
 
 // 시세가 변동될 때마다 주식채널(ALLOWED_CHANNEL_ID)에 변동 내역을 공지합니다.
