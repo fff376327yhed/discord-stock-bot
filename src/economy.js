@@ -3,9 +3,14 @@ import { getDoc, setDoc, deleteDoc, listCollection } from "./firebase.js";
 const STARTING_BALANCE = 1000; // 신규 유저 기본 지급 해정
 const HISTORY_LIMIT = 30; // 유저당 최근 N건만 보관
 
+// 한글 가나다순 비교 (정렬용)
+export const compareKo = (a, b) => String(a).localeCompare(String(b), "ko");
+
 // ---------- 종목 ----------
+// 이름순(가나다)으로 정렬해서 반환
 export async function listStocks(env) {
-  return listCollection(env, "stocks");
+  const stocks = await listCollection(env, "stocks");
+  return stocks.sort((a, b) => compareKo(a.name, b.name));
 }
 
 export async function getStock(env, name) {
@@ -25,8 +30,10 @@ export async function removeStock(env, name) {
 }
 
 // ---------- 상품 (장식 아이템 등) ----------
+// 가격 낮은 순으로 정렬해서 반환 (가격이 같으면 이름순)
 export async function listProducts(env) {
-  return listCollection(env, "products");
+  const products = await listCollection(env, "products");
+  return products.sort((a, b) => a.price - b.price || compareKo(a.name, b.name));
 }
 
 export async function getProduct(env, name) {
@@ -197,6 +204,7 @@ export async function getRanking(env) {
 }
 
 // 유저 한 명의 잔고/보유종목/총자산/순위를 한 번에 계산 (/내정보 용)
+// 보유 종목은 이름순으로 정렬
 export async function getUserDetail(env, userId) {
   const [user, stocks, ranking] = await Promise.all([
     getUser(env, userId),
@@ -205,10 +213,12 @@ export async function getUserDetail(env, userId) {
   ]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
 
-  const holdings = Object.entries(user.holdings).map(([name, qty]) => {
-    const price = priceMap[name] || 0;
-    return { name, qty, price, value: price * qty };
-  });
+  const holdings = Object.entries(user.holdings)
+    .map(([name, qty]) => {
+      const price = priceMap[name] || 0;
+      return { name, qty, price, value: price * qty };
+    })
+    .sort((a, b) => compareKo(a.name, b.name));
   const holdingsValue = holdings.reduce((sum, h) => sum + h.value, 0);
   const totalAsset = user.balance + holdingsValue;
   const rank = ranking.findIndex((r) => r.id === userId) + 1;

@@ -56,7 +56,7 @@ async function handler(request) {
 
   try {
     switch (action) {
-      // ----- 종목 -----
+      // ----- 종목 (이름순) -----
       case "listStocks":
         return json(await listStocks(env));
 
@@ -91,7 +91,7 @@ async function handler(request) {
         return json({ ok: true });
       }
 
-      // ----- 상품 -----
+      // ----- 상품 (가격 낮은 순) -----
       case "listProducts":
         return json(await listProducts(env));
 
@@ -131,9 +131,12 @@ async function handler(request) {
         return json({ ok: true });
       }
 
-      // ----- 유저 -----
-      case "listUsers":
-        return json(await listCollection(env, "users"));
+      // ----- 유저 (잔고 높은 순) -----
+      case "listUsers": {
+        const users = await listCollection(env, "users");
+        users.sort((a, b) => (b.balance || 0) - (a.balance || 0));
+        return json(users);
+      }
 
       case "setBalance": {
         const userId = String(body.userId || "");
