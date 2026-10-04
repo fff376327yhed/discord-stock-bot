@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "register": "node scripts/register-commands.js",
+    "register": "node --env-file=.env scripts/register-commands.js",
+    "slowmode": "node --env-file=.env scripts/set-slowmode.js",
     "dev": "vercel dev",
     "deploy": "vercel deploy --prod"
   },
