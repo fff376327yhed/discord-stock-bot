@@ -7,6 +7,7 @@ export function loadEnv() {
     FIREBASE_CLIENT_EMAIL: process.env.FIREBASE_CLIENT_EMAIL,
     FIREBASE_PRIVATE_KEY: process.env.FIREBASE_PRIVATE_KEY,
     CRON_SECRET: process.env.CRON_SECRET,
+    ADMIN_PANEL_PASSWORD: process.env.ADMIN_PANEL_PASSWORD,
   };
 }
 
