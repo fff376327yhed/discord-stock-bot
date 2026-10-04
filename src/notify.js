@@ -123,7 +123,8 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
     if (current) chunks.push(current);
 
     for (const content of chunks) {
-      await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, { content });
+      // flags 4096 = 무음 메시지(푸시 알림·소리 없음). 메시지는 채널에 그대로 올라가요.
+      await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, { content, flags: 4096 });
     }
     return { sent: true, messages: chunks.length };
   } catch (err) {
