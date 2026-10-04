@@ -5,8 +5,8 @@ import {
   removeStock,
   getUser,
   saveUser,
-  listCollection,
 } from "../../src/economy.js";
+import { listCollection } from "../../src/firebase.js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
