@@ -26,12 +26,16 @@ export async function setAttendanceConfig(env, { enabled, reward }) {
 }
 
 export async function checkAttendance(env, userId) {
-  const config = await getAttendanceConfig(env);
+  // 설정 조회와 유저 조회를 동시에 처리
+  const [config, user] = await Promise.all([
+    getAttendanceConfig(env),
+    getUser(env, userId),
+  ]);
+
   if (!config.enabled) {
     return { ok: false, message: "지금은 출석체크가 꺼져 있어요." };
   }
 
-  const user = await getUser(env, userId);
   const today = todayKST();
   if (user.lastAttendance === today) {
     return { ok: false, message: "오늘은 이미 출석체크를 했어요. 내일 다시 와 주세요!" };

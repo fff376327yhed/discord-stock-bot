@@ -35,8 +35,7 @@ async function importPrivateKey(pem) {
 }
 
 // 서비스 계정으로 서명된 JWT를 만들고, Google OAuth 서버에서 access token으로 교환합니다.
-// (토큰은 1시간 유효 — 매 요청마다 새로 발급받는 단순 구조. 트래픽이 커지면 캐싱을 추가하세요.)
-async function getAccessToken(env) {
+async function requestAccessToken(env) {
   const header = { alg: "RS256", typ: "JWT" };
   const now = Math.floor(Date.now() / 1000);
   const claim = {
@@ -67,7 +66,31 @@ async function getAccessToken(env) {
 
   if (!res.ok) throw new Error(`Firebase 인증 실패: ${await res.text()}`);
   const data = await res.json();
-  return data.access_token;
+  return { token: data.access_token, expiresIn: data.expires_in || 3600 };
+}
+
+// ---- 토큰 캐시 ----
+// 같은 서버리스 인스턴스가 살아 있는 동안 토큰을 재사용합니다.
+// 동시에 여러 호출이 오면 토큰 요청을 하나로 합칩니다.
+let cachedToken = null;
+let cachedExpiresAt = 0; // ms
+let pendingToken = null;
+
+async function getAccessToken(env) {
+  if (cachedToken && Date.now() < cachedExpiresAt - 60_000) return cachedToken;
+  if (pendingToken) return pendingToken;
+
+  pendingToken = requestAccessToken(env)
+    .then(({ token, expiresIn }) => {
+      cachedToken = token;
+      cachedExpiresAt = Date.now() + expiresIn * 1000;
+      return token;
+    })
+    .finally(() => {
+      pendingToken = null;
+    });
+
+  return pendingToken;
 }
 
 function baseUrl(env) {
