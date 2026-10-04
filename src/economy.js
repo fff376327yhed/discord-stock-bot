@@ -2,6 +2,7 @@ import { getDoc, setDoc, deleteDoc, listCollection } from "./firebase.js";
 
 const STARTING_BALANCE = 1000; // 신규 유저 기본 지급 해정
 
+// ---------- 종목 ----------
 export async function listStocks(env) {
   return listCollection(env, "stocks");
 }
@@ -22,13 +23,33 @@ export async function removeStock(env, name) {
   await deleteDoc(env, `stocks/${encodeURIComponent(name)}`);
 }
 
+// ---------- 상품 (장식 아이템 등) ----------
+export async function listProducts(env) {
+  return listCollection(env, "products");
+}
+
+export async function upsertProduct(env, name, price, description) {
+  await setDoc(env, `products/${encodeURIComponent(name)}`, {
+    name,
+    price,
+    description: description || "",
+    updatedAt: new Date(),
+  });
+}
+
+export async function removeProduct(env, name) {
+  await deleteDoc(env, `products/${encodeURIComponent(name)}`);
+}
+
+// ---------- 유저 ----------
 export async function getUser(env, userId) {
   let user = await getDoc(env, `users/${userId}`);
   if (!user) {
-    user = { balance: STARTING_BALANCE, holdings: {} };
+    user = { balance: STARTING_BALANCE, holdings: {}, items: {} };
     await setDoc(env, `users/${userId}`, user);
   }
   if (!user.holdings) user.holdings = {};
+  if (!user.items) user.items = {};
   return user;
 }
 
@@ -36,6 +57,7 @@ export async function saveUser(env, userId, user) {
   await setDoc(env, `users/${userId}`, user);
 }
 
+// ---------- 주식 매수/매도 ----------
 export async function buyStock(env, userId, stockName, qty) {
   const stock = await getStock(env, stockName);
   if (!stock) return { ok: false, message: `"${stockName}" 종목을 찾을 수 없어요.` };
@@ -72,6 +94,36 @@ export async function sellStock(env, userId, stockName, qty) {
   return { ok: true, message: `${stockName} ${qty}주 매도 완료 (+${earned.toLocaleString()}해정)`, user };
 }
 
+// ---------- 상품 구입 ----------
+// 구입 시점의 상품 가격만큼 잔고에서 차감하고, 보유 수량을 1 늘립니다.
+export async function buyProduct(env, userId, productName) {
+  const product = await getDoc(env, `products/${encodeURIComponent(productName)}`);
+  if (!product) return { ok: false, message: `"${productName}" 상품을 찾을 수 없어요.` };
+
+  const user = await getUser(env, userId);
+  if (user.balance < product.price) {
+    return { ok: false, message: `잔고가 부족해요. (필요: ${product.price.toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정)` };
+  }
+
+  user.balance -= product.price;
+  user.items[productName] = (user.items[productName] || 0) + 1;
+  await saveUser(env, userId, user);
+
+  return { ok: true, message: `"${productName}" 구입 완료 (-${product.price.toLocaleString()}해정)` };
+}
+
+// 관리자용: 보유 수량을 직접 설정 (0이면 목록에서 제거)
+export async function setUserItem(env, userId, productName, count) {
+  const user = await getUser(env, userId);
+  if (count <= 0) {
+    delete user.items[productName];
+  } else {
+    user.items[productName] = count;
+  }
+  await saveUser(env, userId, user);
+}
+
+// ---------- 랭킹 / 상세 ----------
 // 총 자산(해정 잔고 + 보유 종목 평가액) 기준 랭킹
 export async function getRanking(env) {
   const [users, stocks] = await Promise.all([
@@ -111,7 +163,7 @@ export async function getUserDetail(env, userId) {
   return { balance: user.balance, holdings, holdingsValue, totalAsset, rank, totalUsers: ranking.length };
 }
 
-// 모든 종목 가격을 minPct~maxPct(%) 범위에서 무작위로 변동시킴 (최저가 1해정 보장)
+// ---------- 시세 변동 ----------
 export async function fluctuatePrices(env, { minPct, maxPct }) {
   const stocks = await listStocks(env);
   const changes = [];

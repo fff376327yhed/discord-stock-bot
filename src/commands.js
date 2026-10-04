@@ -7,9 +7,11 @@ import {
   sellStock,
   getRanking,
   getUserDetail,
+  listProducts,
+  buyProduct,
 } from "./economy.js";
 
-// ---- 1) Discord에 등록할 커맨드 정의 (register-commands.js 에서 사용) ----
+// ---- 1) Discord에 등록할 커맨드 정의 ----
 export const commandDefinitions = [
   { name: "주식목록", description: "현재 거래 가능한 종목과 가격을 봅니다." },
   { name: "잔고", description: "내 해정 잔고와 보유 종목을 봅니다." },
@@ -31,6 +33,13 @@ export const commandDefinitions = [
       { name: "수량", description: "매도할 수량", type: 4, required: true },
     ],
   },
+  { name: "상점", description: "구입할 수 있는 상품 목록을 봅니다." },
+  {
+    name: "구입",
+    description: "상점에서 상품을 구입합니다.",
+    options: [{ name: "상품", description: "상품 이름", type: 3, required: true }],
+  },
+  { name: "보유상품", description: "내가 구입한 상품 목록을 봅니다." },
   {
     name: "종목추가",
     description: "[관리자] 새 종목을 등록합니다.",
@@ -130,6 +139,29 @@ export const handlers = {
     if (qty <= 0) return "수량은 1 이상이어야 해요.";
     const result = await sellStock(env, userId, name, qty);
     return result.message;
+  },
+
+  상점: async (_interaction, env) => {
+    const products = await listProducts(env);
+    if (products.length === 0) return "판매 중인 상품이 없어요.";
+    return products
+      .map((p) => `**${p.name}** — ${p.price.toLocaleString()}해정${p.description ? `\n> ${p.description}` : ""}`)
+      .join("\n");
+  },
+
+  구입: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const name = opt(interaction, "상품");
+    const result = await buyProduct(env, userId, name);
+    return result.message;
+  },
+
+  보유상품: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const user = await getUser(env, userId);
+    const entries = Object.entries(user.items);
+    if (entries.length === 0) return "보유한 상품이 없어요. `/상점`에서 구경해 보세요.";
+    return entries.map(([name, count]) => `- ${name} x${count}`).join("\n");
   },
 
   종목추가: async (interaction, env) => {
