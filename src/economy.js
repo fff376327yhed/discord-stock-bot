@@ -1,6 +1,6 @@
 import { getDoc, setDoc, deleteDoc, listCollection } from "./firebase.js";
 
-const STARTING_BALANCE = 1000000; // 신규 유저 기본 지급 해정
+const STARTING_BALANCE = 1000; // 신규 유저 기본 지급 해정
 
 export async function listStocks(env) {
   return listCollection(env, "stocks");
