@@ -35,6 +35,16 @@ import {
 import { mineOnce, upgradeMining, getMiningInfo } from "./mining.js";
 import { getListingConfig, LISTING_PRICE, ensureMinimumStocks } from "./listing.js";
 import { renderStockChart } from "./chart.js";
+import {
+  MAX_ORDERS_PER_USER,
+  getOrderItems,
+  getOrders,
+  saveOrderItems,
+  newOrderId,
+  cancelOrder,
+  orderText,
+  sideText,
+} from "./orders.js";
 
 // ---- 1) Discord에 등록할 커맨드 정의 ----
 // autocomplete: true 인 옵션은 칸을 누르기만 해도 예시 목록이 떠요. 목록에 없는 값도 직접 입력할 수 있어요.
@@ -84,6 +94,32 @@ export const commandDefinitions = [
     options: [
       { name: "종목", description: "내가 가진 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
       { name: "수량", description: "매도할 수량 (기본 1, '전량'은 보유 전부)", type: 4, required: false, autocomplete: true },
+    ],
+  },
+  {
+    name: "예약매수",
+    description: "지정한 가격 이하가 되면 자동으로 매수하도록 예약합니다.",
+    options: [
+      { name: "종목", description: "종목 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+      { name: "가격", description: "이 가격 이하가 되면 매수 (해정)", type: 4, required: true, autocomplete: true },
+      { name: "수량", description: "매수할 수량 (기본 1)", type: 4, required: false, autocomplete: true },
+    ],
+  },
+  {
+    name: "예약매도",
+    description: "지정한 가격 이상이 되면 자동으로 매도하도록 예약합니다.",
+    options: [
+      { name: "종목", description: "내가 가진 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+      { name: "가격", description: "이 가격 이상이 되면 매도 (해정)", type: 4, required: true, autocomplete: true },
+      { name: "수량", description: "매도할 수량 (기본 1)", type: 4, required: false, autocomplete: true },
+    ],
+  },
+  { name: "예약목록", description: "내가 걸어둔 예약 매수/매도 목록을 봅니다." },
+  {
+    name: "예약취소",
+    description: "걸어둔 예약을 취소합니다.",
+    options: [
+      { name: "예약", description: "취소할 예약 (목록에서 선택, '전체 취소'도 가능)", type: 3, required: true, autocomplete: true },
     ],
   },
   { name: "상점", description: "구입할 수 있는 상품 목록을 봅니다. (가격 낮은 순)" },
@@ -336,7 +372,7 @@ export async function autocomplete(interaction, env) {
     const userId = interaction.member?.user?.id;
     const user = userId ? await getUser(env, userId) : { balance: 0, holdings: {}, costs: {} };
 
-    if (command === "매도") {
+    if (command === "매도" || command === "예약매도") {
       // 매도는 내가 가진 종목만 보여줌 (현재가 기준 평가손익 함께 표시)
       return textChoices(
         stocks
@@ -353,7 +389,7 @@ export async function autocomplete(interaction, env) {
       );
     }
 
-    if (command === "매수") {
+    if (command === "매수" || command === "예약매수") {
       // 매수는 지금 잔고로 최대 몇 주까지 살 수 있는지 함께 표시
       return textChoices(
         stocks.map((s) => ({
@@ -382,8 +418,24 @@ export async function autocomplete(interaction, env) {
     );
   }
 
+  // ----- 예약취소: 내 예약 목록 -----
+  if (focused.name === "예약") {
+    const userId = interaction.member?.user?.id;
+    const orders = userId ? await getOrders(env, userId) : [];
+    const items = orders.map((o) => ({
+      label: `[${o.id}] ${sideText(o.side)} ${o.stock} · ${o.price.toLocaleString()}해정 ${o.side === "buy" ? "이하" : "이상"} · ${o.qty.toLocaleString()}주`,
+      value: o.id,
+    }));
+    if (items.length > 1) items.push({ label: "전체 취소", value: "all" });
+    return textChoices(items, keyword);
+  }
+
   // ----- 숫자 옵션 -----
   if (focused.name === "수량") {
+    // 예약은 체결 시점 가격이 달라서 미리보기 없이 예시만 보여줌
+    if (command === "예약매수" || command === "예약매도") {
+      return numberChoices([1, 5, 10, 50, 100].map((n) => ({ label: `${n}주`, value: n })), keyword);
+    }
     return quantityChoices(command, interaction, env, keyword);
   }
 
@@ -396,7 +448,7 @@ export async function autocomplete(interaction, env) {
   }
 
   if (focused.name === "가격") {
-    if (command === "시세설정") {
+    if (command === "시세설정" || command === "예약매수" || command === "예약매도") {
       return numberChoices(await priceSuggestions(interaction, env), keyword);
     }
     // 종목추가: 초기 가격 예시
@@ -416,6 +468,58 @@ export async function autocomplete(interaction, env) {
   }
 
   return [];
+}
+
+// 예약 매수/매도 공통 처리 (side: "buy" | "sell")
+async function reserveOrder(side, interaction, env) {
+  const userId = interaction.member.user.id;
+  const name = String(opt(interaction, "종목") ?? "").trim();
+  const price = opt(interaction, "가격");
+  const qty = opt(interaction, "수량") ?? 1;
+  if (!Number.isInteger(price) || price < 1) return "가격은 1 이상의 정수여야 해요.";
+  if (!Number.isInteger(qty) || qty <= 0) return "수량은 1 이상의 정수여야 해요.";
+
+  // 디스코드 3초 제한 때문에 한 번에 같이 조회
+  const [stock, user, items] = await Promise.all([
+    getStock(env, name),
+    getUser(env, userId),
+    getOrderItems(env, userId),
+  ]);
+  if (!stock) return `"${name}" 종목을 찾을 수 없어요.`;
+
+  if (Object.keys(items).length >= MAX_ORDERS_PER_USER) {
+    return `예약은 최대 ${MAX_ORDERS_PER_USER}개까지 걸 수 있어요. \`/예약취소\`로 정리한 뒤 다시 시도해 주세요.`;
+  }
+
+  if (side === "buy") {
+    if (stock.price <= price) {
+      return `현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이하예요. 바로 \`/매수\`를 쓰거나, 더 낮은 가격으로 예약해 주세요.`;
+    }
+    if (user.balance < price * qty) {
+      return `잔고가 부족해요. (예약가 기준 필요: ${(price * qty).toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정)`;
+    }
+  } else {
+    if (stock.price >= price) {
+      return `현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이상이에요. 바로 \`/매도\`를 쓰거나, 더 높은 가격으로 예약해 주세요.`;
+    }
+    const held = user.holdings[name] || 0;
+    const reserved = Object.values(items)
+      .filter((o) => o.side === "sell" && o.stock === name)
+      .reduce((sum, o) => sum + o.qty, 0);
+    if (held - reserved < qty) {
+      return `예약할 수 있는 보유 수량이 부족해요. (보유 ${held.toLocaleString()}주 · 이미 매도 예약 ${reserved.toLocaleString()}주)`;
+    }
+  }
+
+  const id = newOrderId(items);
+  const order = { stock: name, side, qty, price, at: Date.now() };
+  await saveOrderItems(env, userId, { ...items, [id]: order });
+
+  return [
+    `⏰ 예약했어요. \`${id}\``,
+    orderText(order),
+    `현재가 ${stock.price.toLocaleString()}해정 · 시세가 변동될 때(평소 변동, 급등락)마다 확인하고, 체결되면 DM으로 알려드려요. (체결가는 그때의 현재가예요)`,
+  ].join("\n");
 }
 
 // ---- 4) 커맨드별 핸들러: (interaction, env) => Promise<string> ----
@@ -653,6 +757,34 @@ export const handlers = {
     if (!Number.isInteger(qty) || qty <= 0) return "수량은 1 이상의 정수여야 해요.";
     const result = await sellStock(env, userId, name, qty);
     return result.message;
+  },
+
+  예약매수: (interaction, env) => reserveOrder("buy", interaction, env),
+  예약매도: (interaction, env) => reserveOrder("sell", interaction, env),
+
+  예약목록: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const [orders, stocks] = await Promise.all([getOrders(env, userId), listStocks(env)]);
+    if (orders.length === 0) {
+      return "걸어둔 예약이 없어요. `/예약매수`, `/예약매도`로 가격을 정해 예약해 보세요.";
+    }
+    const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+    return [
+      `**⏰ 내 예약 (${orders.length}/${MAX_ORDERS_PER_USER}개)**`,
+      ...orders.map((o) => {
+        const now = priceMap[o.stock];
+        const nowText = now === undefined ? "상장폐지" : `현재가 ${now.toLocaleString()}해정`;
+        return `\`${o.id}\` ${orderText(o)} · ${nowText}`;
+      }),
+    ].join("\n");
+  },
+
+  예약취소: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const target = String(opt(interaction, "예약") ?? "").trim();
+    const removed = await cancelOrder(env, userId, target);
+    if (removed.length === 0) return "해당 예약을 찾지 못했어요. 칸을 눌러 목록에서 골라 주세요.";
+    return [`**예약 ${removed.length}건을 취소했어요.**`, ...removed.map((o) => `- \`${o.id}\` ${orderText(o)}`)].join("\n");
   },
 
   // 가격 낮은 순 (listProducts가 정렬해서 줌)

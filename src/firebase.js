@@ -170,13 +170,21 @@ async function deleteDoc(env, path) {
 
 async function listCollection(env, collection) {
   const token = await getAccessToken(env);
-  const res = await fetch(`${baseUrl(env)}/${collection}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) throw new Error(`Firestore 목록 조회 실패: ${await res.text()}`);
-  const data = await res.json();
-  if (!data.documents) return [];
-  return data.documents.map((doc) => ({
+  // Firestore는 한 번에 일부만 돌려줄 수 있어서, 다음 페이지가 없을 때까지 이어서 읽어요.
+  const docs = [];
+  let pageToken = "";
+  do {
+    const query = `pageSize=100${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`;
+    const res = await fetch(`${baseUrl(env)}/${collection}?${query}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`Firestore 목록 조회 실패: ${await res.text()}`);
+    const data = await res.json();
+    if (data.documents) docs.push(...data.documents);
+    pageToken = data.nextPageToken || "";
+  } while (pageToken);
+
+  return docs.map((doc) => ({
     id: doc.name.split("/").pop(),
     ...fromFields(doc.fields),
   }));

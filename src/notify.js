@@ -49,7 +49,7 @@ async function discordRequest(env, method, path, body) {
 const discordPost = (env, path, body) => discordRequest(env, "POST", path, body);
 
 // 유저에게 DM 보내기 (DM 채널을 먼저 열고 메시지 전송)
-async function sendDM(env, userId, content) {
+export async function sendDM(env, userId, content) {
   const channel = await discordPost(env, "/users/@me/channels", { recipient_id: userId });
   await discordPost(env, `/channels/${channel.id}/messages`, { content });
 }

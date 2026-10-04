@@ -1,6 +1,7 @@
 import { loadEnv, isAuthorizedCron, currentSurgeSlot } from "../../src/env.js";
 import { fluctuatePrices } from "../../src/economy.js";
 import { announcePriceChanges, notifyPriceChanges } from "../../src/notify.js";
+import { processOrders } from "../../src/orders.js";
 
 // 급등락: ±100% — 하루 딱 3번 (오후 6시, 오후 9시, 새벽 12시 / 한국시간)
 //  - -100%가 나오면 가격이 최저가로 떨어져 바로 상장폐지(100해정 이하)돼요.
@@ -30,11 +31,21 @@ async function handler(request) {
 
   // 1) 주식채널에 변동 내역 공지 (알림 설정과 무관), 2) 알림을 켠 유저에게 DM
   const announce = await announcePriceChanges(env, changes, label);
+
+  // 3) 예약 매수/매도 체결 (실패해도 시세 변동 결과는 그대로 응답)
+  let orders = null;
+  try {
+    orders = await processOrders(env);
+  } catch (err) {
+    console.error("예약 주문 처리 실패:", err.message);
+  }
+
   await notifyPriceChanges(env, changes);
 
   return Response.json({
     ok: true,
     announce,
+    orders,
     mode: label,
     count: changes.length,
     delisted: changes.filter((c) => c.delisted).map((c) => c.name),
