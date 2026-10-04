@@ -21,10 +21,13 @@ const PUBLIC_COMMANDS = new Set([]);
 
 export default { fetch: handler };
 
+// content: 문자열, 또는 { content?, embeds? } 같은 객체(그래프처럼 이미지 임베드를 보낼 때)
 function reply(content, ephemeral = true) {
+  const data = typeof content === "string" ? { content } : { ...content };
+  if (ephemeral) data.flags = EPHEMERAL;
   return Response.json({
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    data: ephemeral ? { content, flags: EPHEMERAL } : { content },
+    data,
   });
 }
 

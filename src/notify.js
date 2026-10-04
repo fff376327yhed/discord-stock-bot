@@ -1,4 +1,5 @@
 import { getDoc, setDoc, listCollection } from "./firebase.js";
+import { UP_MARK, DOWN_MARK } from "./economy.js";
 
 // ---------- 주식채널 가격 변동 공지 on/off (관리자 콘솔의 체크박스) ----------
 // 유저별 DM 알림(/알림설정)과는 별개예요. 기본값은 켜짐입니다.
@@ -53,12 +54,17 @@ async function sendDM(env, userId, content) {
   await discordPost(env, `/channels/${channel.id}/messages`, { content });
 }
 
+// DM용 한 줄 (상장폐지는 별도 문구)
 function formatLines(list) {
   return list
     .map((c) => {
+      if (c.delisted) {
+        return `• 🚫 **${c.name}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정, 보유 주식 소멸)`;
+      }
       const pct = ((c.after - c.before) / c.before) * 100;
       const sign = pct > 0 ? "+" : "";
-      return `• **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${sign}${pct.toFixed(1)}%)`;
+      const mark = c.after > c.before ? UP_MARK : c.after < c.before ? DOWN_MARK : "➖";
+      return `• ${mark} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${sign}${pct.toFixed(1)}%)`;
     })
     .join("\n");
 }
@@ -88,18 +94,22 @@ export function isWithinNotifyWindow(setting, hour = currentHourKST()) {
   return hour >= start || hour < end;
 }
 
-// 공지용 한 줄: 🔺 상승 / 🔻 하락 / ➖ 변동 없음
+// 공지용 한 줄: 🔺(빨강) 상승 / 🔽(파랑) 하락 / ➖ 변동 없음 / 🚫 상장폐지
 function announceLine(c) {
+  if (c.delisted) {
+    return `🚫 **${c.name}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정)`;
+  }
   if (c.after === c.before) {
     return `➖ **${c.name}**: ${c.after.toLocaleString()}해정 (변동 없음)`;
   }
   const up = c.after > c.before;
   const pct = ((c.after - c.before) / c.before) * 100;
-  return `${up ? "🔺" : "🔻"} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)`;
+  return `${up ? UP_MARK : DOWN_MARK} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)`;
 }
 
 // 시세가 변동될 때마다 주식채널(ALLOWED_CHANNEL_ID)에 변동 내역을 공지합니다.
 // 유저의 알림 설정과 상관없이 올라가요. (관리자 콘솔의 '가격 변동 알림' 체크를 끄면 올라가지 않음) 실패해도 시세 변동 자체는 막지 않습니다.
+// 상장폐지된 종목이 있으면 공지 맨 아래에 안내 문구가 추가돼요.
 // 반환값: { sent: true, messages: 보낸 메시지 수 } 또는 { sent: false, reason: "이유" }
 export async function announcePriceChanges(env, changes, label = "시세 변동") {
   if (!env.DISCORD_BOT_TOKEN) {
@@ -132,6 +142,16 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
       }
       current += (current ? "\n" : "") + line;
     }
+
+    // 상장폐지 안내
+    if (changes.some((c) => c.delisted)) {
+      const note = "⚠️ 상장폐지된 종목은 거래할 수 없고, 보유 중이던 주식은 모두 사라졌어요.";
+      if (current.length + note.length + 2 > 1900) {
+        chunks.push(current);
+        current = "";
+      }
+      current += (current ? "\n\n" : "") + note;
+    }
     if (current) chunks.push(current);
 
     // 이전 공지는 지우고 새 메시지를 올림 (항상 채널 맨 아래에 최신 공지만 남음)
@@ -162,7 +182,8 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
 }
 
 // 시세 변동 목록을 받아 유저별 알림 설정에 맞춰 DM 전송
-// changes: [{ name, before, after }]
+// changes: [{ name, before, after, delisted, holders }]
+// 상장폐지된 종목은 이미 유저 보유분이 지워진 뒤라서, change.holders(폐지 당시 보유자)로 "보유 종목"을 판단해요.
 export async function notifyPriceChanges(env, changes) {
   if (!env.DISCORD_BOT_TOKEN || changes.length === 0) return;
 
@@ -180,9 +201,9 @@ export async function notifyPriceChanges(env, changes) {
     const buckets = { heldUp: [], heldDown: [], all: [] };
 
     for (const c of changes) {
-      if (c.after === c.before) continue;
+      if (c.after === c.before && !c.delisted) continue;
       const isUp = c.after > c.before;
-      const isHeld = (held[c.name] || 0) > 0;
+      const isHeld = (held[c.name] || 0) > 0 || (c.holders || []).includes(user.id);
 
       // 한 변동당 하나의 알림만 배정 (중복 방지)
       if (isHeld && isUp && setting.up) buckets.heldUp.push(c);
@@ -193,12 +214,12 @@ export async function notifyPriceChanges(env, changes) {
     const messages = [];
     if (buckets.heldUp.length) {
       messages.push(
-        `📈 **[보유 종목 상승]**\n내가 가진 종목 시세가 올랐어요!\n${formatLines(buckets.heldUp)}`
+        `${UP_MARK} **[보유 종목 상승]**\n내가 가진 종목 시세가 올랐어요!\n${formatLines(buckets.heldUp)}`
       );
     }
     if (buckets.heldDown.length) {
       messages.push(
-        `📉 **[보유 종목 하락]**\n내가 가진 종목 시세가 떨어졌어요.\n${formatLines(buckets.heldDown)}`
+        `${DOWN_MARK} **[보유 종목 하락]**\n내가 가진 종목 시세가 떨어졌어요.\n${formatLines(buckets.heldDown)}`
       );
     }
     if (buckets.all.length) {

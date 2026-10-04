@@ -1,5 +1,7 @@
 import {
   listStocks,
+  listDelisted,
+  getPriceHistory,
   getStock,
   upsertStock,
   removeStock,
@@ -18,6 +20,8 @@ import {
   previewSell,
   profitLabel,
   fmtSigned,
+  UP_MARK,
+  DOWN_MARK,
 } from "./economy.js";
 import {
   checkAttendance,
@@ -25,6 +29,7 @@ import {
   setAttendanceConfig,
 } from "./attendance.js";
 import { mineOnce, upgradeMining, getMiningInfo } from "./mining.js";
+import { renderStockChart } from "./chart.js";
 
 // ---- 1) Discord에 등록할 커맨드 정의 ----
 // autocomplete: true 인 옵션은 칸을 누르기만 해도 예시 목록이 떠요. 목록에 없는 값도 직접 입력할 수 있어요.
@@ -35,6 +40,20 @@ export const commandDefinitions = [
   { name: "채굴정보", description: "내 채굴 레벨, 체력, 다음 업그레이드 조건을 봅니다." },
   { name: "채굴업그레이드", description: "채굴 장비를 업그레이드합니다. (해정 지불 또는 노가다 조건 달성)" },
   { name: "주식목록", description: "현재 거래 가능한 종목과 가격을 봅니다. (이름순)" },
+  {
+    name: "그래프",
+    description: "종목의 시세 그래프를 그립니다.",
+    options: [
+      { name: "종목", description: "그래프를 볼 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+    ],
+  },
+  {
+    name: "상장폐지종류",
+    description: "상장폐지된 종목과 폐지 시각, 역대 최고가를 봅니다. (최신순)",
+    options: [
+      { name: "개수", description: "볼 종목 개수 (기본 10, 최대 20)", type: 4, required: false, autocomplete: true },
+    ],
+  },
   { name: "잔고", description: "내 해정 잔고와 보유 종목을 봅니다." },
   { name: "내정보", description: "내 잔고, 보유 종목 평가액, 총자산, 순위를 한 번에 봅니다." },
   { name: "랭킹", description: "총 자산 기준 랭킹을 봅니다." },
@@ -128,6 +147,11 @@ function isAdmin(interaction, env) {
 // 밀리초 타임스탬프 -> "MM-DD HH:mm" (한국시간)
 function formatKST(ms) {
   return new Date(ms + 9 * 60 * 60 * 1000).toISOString().slice(5, 16).replace("T", " ");
+}
+
+// 밀리초 타임스탬프 -> "YYYY-MM-DD HH:mm" (한국시간)
+function formatKSTFull(ms) {
+  return new Date(ms + 9 * 60 * 60 * 1000).toISOString().slice(0, 16).replace("T", " ");
 }
 
 function notifyStatusText(s, title) {
@@ -348,7 +372,7 @@ export async function autocomplete(interaction, env) {
     }
     // 종목추가: 초기 가격 예시
     return numberChoices(
-      [100, 500, 1000, 5000, 10000].map((n) => ({ label: `${n.toLocaleString()}해정`, value: n })),
+      [500, 1000, 5000, 10000, 50000].map((n) => ({ label: `${n.toLocaleString()}해정`, value: n })),
       keyword
     );
   }
@@ -392,14 +416,88 @@ export const handlers = {
     return result.message;
   },
 
-  // 이름순 (listStocks가 정렬해서 줌)
-  주식목록: async (_interaction, env) => {
+  // 이름순 (listStocks가 정렬해서 줌). 나만 보이는 응답이라 내가 보유한 종목만 ⭐로 표시
+  주식목록: async (interaction, env) => {
     const stocks = await listStocks(env);
     if (stocks.length === 0) return "등록된 종목이 없어요. 관리자가 `/종목추가`로 등록할 수 있어요.";
+
+    const userId = interaction.member.user.id;
+    const user = await getUser(env, userId);
+
     return [
-      "**📈 주식 목록 (이름순)**",
-      ...stocks.map((s) => `**${s.name}** — ${s.price.toLocaleString()}해정`),
+      "**📈 주식 목록 (이름순)** · ⭐ = 내가 보유 중",
+      ...stocks.map((s) => {
+        const held = user.holdings[s.name] || 0;
+        const mark = held > 0 ? `⭐ (보유 ${held}주) ` : "";
+        return `${mark}**${s.name}** — ${s.price.toLocaleString()}해정`;
+      }),
     ].join("\n");
+  },
+
+  // 상장폐지된 종목 목록 (최신 폐지순)
+  상장폐지종류: async (interaction, env) => {
+    const requested = opt(interaction, "개수") ?? 10;
+    const count = Math.min(Math.max(requested, 1), 20);
+
+    const list = await listDelisted(env, count);
+    if (list.length === 0) return "아직 상장폐지된 종목이 없어요.";
+
+    const lines = list.map(
+      (d) =>
+        `🚫 **${d.name}** · 폐지 \`${formatKSTFull(d.delistedAt)}\` · 최고가 ${(d.maxPrice || 0).toLocaleString()}해정 · 폐지 직전 ${(d.lastPrice || 0).toLocaleString()} → ${(d.finalPrice || 0).toLocaleString()}해정`
+    );
+
+    // 디스코드 메시지 한도(2000자) 보호
+    let text = `**🪦 상장폐지된 종목 (${list.length}건, 최신순)**`;
+    for (const line of lines) {
+      if (text.length + line.length + 1 > 1900) {
+        text += "\n…(이하 생략)";
+        break;
+      }
+      text += `\n${line}`;
+    }
+    return text;
+  },
+
+  // 종목 시세 그래프 (QuickChart 이미지를 임베드로 보여줌)
+  그래프: async (interaction, env) => {
+    const name = String(opt(interaction, "종목") ?? "").trim();
+    const stock = await getStock(env, name);
+    if (!stock) return `"${name}" 종목을 찾을 수 없어요.`;
+
+    const points = getPriceHistory(stock);
+    if (points.length < 2) {
+      return `**${name}**의 시세 기록이 아직 부족해요. 시세가 한 번 더 변동된 뒤에 다시 시도해 주세요.`;
+    }
+
+    const first = points[0];
+    const last = points[points.length - 1];
+    const prices = points.map((p) => p.p);
+    const high = Math.max(...prices);
+    const low = Math.min(...prices);
+    const diff = last.p - first.p;
+    const pct = first.p > 0 ? (diff / first.p) * 100 : 0;
+    const up = diff >= 0;
+    const mark = diff > 0 ? UP_MARK : diff < 0 ? DOWN_MARK : "➖";
+
+    const imageUrl = await renderStockChart(points, up);
+
+    return {
+      embeds: [
+        {
+          title: `${mark} ${name} 시세 그래프`,
+          description: [
+            `현재가 **${stock.price.toLocaleString()}해정**`,
+            `구간 변동: ${mark} ${fmtSigned(diff)}해정 (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%) · ${formatKST(first.t)} 시작가 ${first.p.toLocaleString()}해정 대비`,
+            `구간 최고 ${high.toLocaleString()} / 최저 ${low.toLocaleString()}해정`,
+            `역대 최고가 ${Math.max(stock.maxPrice || 0, high).toLocaleString()}해정`,
+          ].join("\n"),
+          color: up ? 0xe53935 : 0x1e88e5, // 오름 = 빨강, 내림 = 파랑
+          image: { url: imageUrl },
+          footer: { text: `최근 ${points.length}개 기록 · ${formatKST(first.t)} ~ ${formatKST(last.t)} (한국시간)` },
+        },
+      ],
+    };
   },
 
   잔고: async (interaction, env) => {
@@ -428,7 +526,8 @@ export const handlers = {
 
     let changeText = "📊 지난 조회 대비: 첫 조회예요. 다음 조회부터 증감이 표시돼요.";
     if (detail.assetChange !== null) {
-      const mark = detail.assetChange > 0 ? "🔺 증가" : detail.assetChange < 0 ? "🔻 감소" : "➖ 변동 없음";
+      const mark =
+        detail.assetChange > 0 ? `${UP_MARK} 증가` : detail.assetChange < 0 ? `${DOWN_MARK} 감소` : "➖ 변동 없음";
       changeText = `📊 지난 조회 대비 총자산: ${mark} ${fmtSigned(detail.assetChange)}해정 (${formatKST(detail.prevAssetAt)} 조회 시점: ${detail.prevAsset.toLocaleString()}해정)`;
     }
 
