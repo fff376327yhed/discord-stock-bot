@@ -1,4 +1,4 @@
-import { loadEnv } from "../../src/env.js";
+import { getAttendanceConfig, setAttendanceConfig } from "../../src/attendance.js";
 import {
   listStocks,
   upsertStock,
@@ -157,6 +157,19 @@ async function handler(request) {
         }
         await setUserItem(env, userId, name, count);
         return json({ ok: true });
+      }
+
+            // ----- 출석 -----
+      case "getAttendance":
+        return json(await getAttendanceConfig(env));
+
+      case "setAttendance": {
+        const reward = body.reward === undefined ? undefined : Number(body.reward);
+        if (reward !== undefined && (!Number.isInteger(reward) || reward < 0)) {
+          return json({ error: "보상은 0 이상의 정수여야 합니다." }, 400);
+        }
+        const enabled = body.enabled === undefined ? undefined : Boolean(body.enabled);
+        return json(await setAttendanceConfig(env, { enabled, reward }));
       }
 
       default:

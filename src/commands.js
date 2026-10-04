@@ -11,9 +11,16 @@ import {
   buyProduct,
   setNotify,
 } from "./economy.js";
+import {
+  checkAttendance,
+  getAttendanceConfig,
+  setAttendanceConfig,
+} from "./attendance.js";
 
 // ---- 1) Discord에 등록할 커맨드 정의 ----
 export const commandDefinitions = [
+  { name: "도움말", description: "사용할 수 있는 명령어 목록을 봅니다." },
+  { name: "출석체크", description: "오늘 출석하고 해정을 받습니다. 하루 1회." },
   { name: "주식목록", description: "현재 거래 가능한 종목과 가격을 봅니다." },
   { name: "잔고", description: "내 해정 잔고와 보유 종목을 봅니다." },
   { name: "내정보", description: "내 잔고, 보유 종목 평가액, 총자산, 순위를 한 번에 봅니다." },
@@ -72,6 +79,14 @@ export const commandDefinitions = [
       { name: "가격", description: "새 가격(해정)", type: 4, required: true },
     ],
   },
+  {
+    name: "출석설정",
+    description: "[관리자] 출석 보상과 출석체크 사용 여부를 설정합니다.",
+    options: [
+      { name: "보상", description: "출석 보상(해정)", type: 4, required: false },
+      { name: "활성화", description: "출석체크 켜기/끄기", type: 5, required: false },
+    ],
+  },
 ];
 
 // ---- 2) 옵션 파싱 헬퍼 ----
@@ -94,8 +109,34 @@ function notifyStatusText(s, title) {
   ].join("\n");
 }
 
+function helpText() {
+  const user = [];
+  const admin = [];
+  for (const c of commandDefinitions) {
+    const line = `\`/${c.name}\` — ${c.description}`;
+    (c.description.includes("[관리자]") ? admin : user).push(line);
+  }
+  return [
+    "**📖 해정 봇 도움말**",
+    "",
+    "**일반 명령어**",
+    ...user,
+    "",
+    "**관리자 명령어**",
+    ...admin,
+  ].join("\n");
+}
+
 // ---- 3) 커맨드별 핸들러: (interaction, env) => Promise<string> ----
 export const handlers = {
+  도움말: async () => helpText(),
+
+  출석체크: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const result = await checkAttendance(env, userId);
+    return result.message;
+  },
+
   주식목록: async (_interaction, env) => {
     const stocks = await listStocks(env);
     if (stocks.length === 0) return "등록된 종목이 없어요. 관리자가 `/종목추가`로 등록할 수 있어요.";
@@ -226,5 +267,23 @@ export const handlers = {
     const price = opt(interaction, "가격");
     await upsertStock(env, name, price);
     return `"${name}" 가격을 ${price.toLocaleString()}해정으로 변경했어요.`;
+  },
+
+  출석설정: async (interaction, env) => {
+    if (!isAdmin(interaction, env)) return "관리자만 사용할 수 있는 명령어예요.";
+
+    const reward = opt(interaction, "보상");
+    const enabled = opt(interaction, "활성화");
+
+    if (reward !== undefined && (!Number.isInteger(reward) || reward < 0)) {
+      return "보상은 0 이상의 정수여야 해요.";
+    }
+
+    const next = await setAttendanceConfig(env, { enabled, reward });
+    return [
+      "**출석 설정을 저장했어요.**",
+      `- 상태: ${next.enabled ? "✅ 켜짐" : "❌ 꺼짐"}`,
+      `- 보상: ${next.reward.toLocaleString()}해정`,
+    ].join("\n");
   },
 };
