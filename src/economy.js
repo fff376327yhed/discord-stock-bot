@@ -1,6 +1,7 @@
 import { getDoc, setDoc, deleteDoc, listCollection } from "./firebase.js";
 
 const STARTING_BALANCE = 1000; // 신규 유저 기본 지급 해정
+const HISTORY_LIMIT = 30; // 유저당 최근 N건만 보관
 
 // ---------- 종목 ----------
 export async function listStocks(env) {
@@ -61,6 +62,38 @@ export async function saveUser(env, userId, user) {
   await setDoc(env, `users/${userId}`, user);
 }
 
+// ---------- 거래 기록 ----------
+// history/{userId} 문서의 entries 맵에 최근 기록을 저장합니다.
+// 키는 "시각_랜덤"이라 정렬하면 시간순이 됩니다. 기록 저장이 실패해도 거래 자체는 막지 않아요.
+export async function addHistory(env, userId, text) {
+  try {
+    const doc = await getDoc(env, `history/${userId}`);
+    const entries = (doc && doc.entries) || {};
+    const now = Date.now();
+    const key = `${String(now).padStart(13, "0")}_${Math.random().toString(36).slice(2, 6)}`;
+    entries[key] = { t: now, text };
+
+    const keys = Object.keys(entries).sort();
+    while (keys.length > HISTORY_LIMIT) {
+      delete entries[keys.shift()];
+    }
+
+    await setDoc(env, `history/${userId}`, { entries });
+  } catch (err) {
+    console.error(`기록 저장 실패 (${userId}):`, err.message);
+  }
+}
+
+// 최신순으로 limit건 반환: [{ t, text }]
+export async function getHistory(env, userId, limit = 10) {
+  const doc = await getDoc(env, `history/${userId}`);
+  const entries = (doc && doc.entries) || {};
+  return Object.entries(entries)
+    .sort(([a], [b]) => b.localeCompare(a))
+    .slice(0, limit)
+    .map(([, v]) => v);
+}
+
 // ---------- 주식 매수/매도 ----------
 export async function buyStock(env, userId, stockName, qty) {
   const stock = await getStock(env, stockName);
@@ -74,9 +107,15 @@ export async function buyStock(env, userId, stockName, qty) {
 
   user.balance -= cost;
   user.holdings[stockName] = (user.holdings[stockName] || 0) + qty;
-  await saveUser(env, userId, user);
 
-  return { ok: true, message: `${stockName} ${qty}주 매수 완료 (-${cost.toLocaleString()}해정)`, user };
+  const message = `${stockName} ${qty}주 매수 완료 (-${cost.toLocaleString()}해정)`;
+  // 저장과 기록을 동시에 처리해서 응답 시간을 늘리지 않음
+  await Promise.all([
+    saveUser(env, userId, user),
+    addHistory(env, userId, `매수: ${message}`),
+  ]);
+
+  return { ok: true, message, user };
 }
 
 export async function sellStock(env, userId, stockName, qty) {
@@ -93,9 +132,14 @@ export async function sellStock(env, userId, stockName, qty) {
   user.holdings[stockName] = held - qty;
   if (user.holdings[stockName] === 0) delete user.holdings[stockName];
   user.balance += earned;
-  await saveUser(env, userId, user);
 
-  return { ok: true, message: `${stockName} ${qty}주 매도 완료 (+${earned.toLocaleString()}해정)`, user };
+  const message = `${stockName} ${qty}주 매도 완료 (+${earned.toLocaleString()}해정)`;
+  await Promise.all([
+    saveUser(env, userId, user),
+    addHistory(env, userId, `매도: ${message}`),
+  ]);
+
+  return { ok: true, message, user };
 }
 
 // ---------- 상품 구입 ----------
@@ -111,9 +155,14 @@ export async function buyProduct(env, userId, productName) {
 
   user.balance -= product.price;
   user.items[productName] = (user.items[productName] || 0) + 1;
-  await saveUser(env, userId, user);
 
-  return { ok: true, message: `"${productName}" 구입 완료 (-${product.price.toLocaleString()}해정)` };
+  const message = `"${productName}" 구입 완료 (-${product.price.toLocaleString()}해정)`;
+  await Promise.all([
+    saveUser(env, userId, user),
+    addHistory(env, userId, `구입: ${message}`),
+  ]);
+
+  return { ok: true, message };
 }
 
 // 관리자용: 보유 수량을 직접 설정 (0이면 목록에서 제거)

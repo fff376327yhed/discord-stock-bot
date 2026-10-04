@@ -1,5 +1,5 @@
 import { getDoc, setDoc } from "./firebase.js";
-import { getUser, saveUser } from "./economy.js";
+import { getUser, saveUser, addHistory } from "./economy.js";
 
 const CONFIG_PATH = "config/attendance";
 const DEFAULT_CONFIG = { enabled: true, reward: 100 };
@@ -40,7 +40,16 @@ export async function checkAttendance(env, userId) {
   user.balance += config.reward;
   user.lastAttendance = today;
   user.attendanceCount = (user.attendanceCount || 0) + 1;
-  await saveUser(env, userId, user);
+
+  // 저장과 기록을 동시에 처리
+  await Promise.all([
+    saveUser(env, userId, user),
+    addHistory(
+      env,
+      userId,
+      `출석: +${config.reward.toLocaleString()}해정 (누적 ${user.attendanceCount}일)`
+    ),
+  ]);
 
   return {
     ok: true,

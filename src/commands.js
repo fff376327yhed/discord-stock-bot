@@ -10,6 +10,7 @@ import {
   listProducts,
   buyProduct,
   setNotify,
+  getHistory,
 } from "./economy.js";
 import {
   checkAttendance,
@@ -25,6 +26,13 @@ export const commandDefinitions = [
   { name: "잔고", description: "내 해정 잔고와 보유 종목을 봅니다." },
   { name: "내정보", description: "내 잔고, 보유 종목 평가액, 총자산, 순위를 한 번에 봅니다." },
   { name: "랭킹", description: "총 자산 기준 랭킹을 봅니다." },
+  {
+    name: "내역",
+    description: "내 최근 거래·출석 기록을 봅니다.",
+    options: [
+      { name: "개수", description: "볼 기록 개수 (기본 10, 최대 30)", type: 4, required: false },
+    ],
+  },
   {
     name: "매수",
     description: "종목을 매수합니다.",
@@ -97,6 +105,11 @@ function opt(interaction, name) {
 
 function isAdmin(interaction, env) {
   return interaction.member?.user?.id === env.ADMIN_DISCORD_ID;
+}
+
+// 밀리초 타임스탬프 -> "MM-DD HH:mm" (한국시간)
+function formatKST(ms) {
+  return new Date(ms + 9 * 60 * 60 * 1000).toISOString().slice(5, 16).replace("T", " ");
 }
 
 function notifyStatusText(s, title) {
@@ -183,6 +196,20 @@ export const handlers = {
       .slice(0, 10)
       .map((r, i) => `${i + 1}위 — <@${r.id}> (${r.total.toLocaleString()}해정)`)
       .join("\n");
+  },
+
+  내역: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const requested = opt(interaction, "개수") ?? 10;
+    const count = Math.min(Math.max(requested, 1), 30);
+
+    const list = await getHistory(env, userId, count);
+    if (list.length === 0) {
+      return "아직 기록이 없어요. 매수·매도·구입·출석체크를 하면 여기에 남아요.";
+    }
+
+    const lines = list.map((h) => `\`${formatKST(h.t)}\` ${h.text}`);
+    return [`**📜 내 최근 기록 (${list.length}건, 최신순)**`, ...lines].join("\n");
   },
 
   매수: async (interaction, env) => {

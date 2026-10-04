@@ -8,7 +8,20 @@ import { loadEnv } from "../src/env.js";
 const InteractionType = { PING: 1, APPLICATION_COMMAND: 2 };
 const InteractionResponseType = { PONG: 1, CHANNEL_MESSAGE_WITH_SOURCE: 4 };
 
+// 응답을 "명령어를 친 본인에게만" 보이게 하는 플래그
+const EPHEMERAL = 64;
+
+// 여기에 적은 명령어는 예외로 모두에게 공개돼요. 예: new Set(["랭킹"])
+const PUBLIC_COMMANDS = new Set([]);
+
 export default { fetch: handler };
+
+function reply(content, ephemeral = true) {
+  return Response.json({
+    type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+    data: ephemeral ? { content, flags: EPHEMERAL } : { content },
+  });
+}
 
 async function handler(request) {
   if (request.method !== "POST") {
@@ -38,36 +51,22 @@ async function handler(request) {
   if (interaction.type === InteractionType.APPLICATION_COMMAND) {
     // 주식채널에서만 명령어 허용 (나만 보이는 메시지로 안내)
     if (env.ALLOWED_CHANNEL_ID && interaction.channel_id !== env.ALLOWED_CHANNEL_ID) {
-      return Response.json({
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: {
-          content: `이 명령어는 <#${env.ALLOWED_CHANNEL_ID}> 채널에서만 쓸 수 있어요.`,
-          flags: 64,
-        },
-      });
+      return reply(`이 명령어는 <#${env.ALLOWED_CHANNEL_ID}> 채널에서만 쓸 수 있어요.`);
     }
 
     const commandName = interaction.data.name;
     const handlerFn = handlers[commandName];
+    const ephemeral = !PUBLIC_COMMANDS.has(commandName);
 
     if (!handlerFn) {
-      return Response.json({
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: { content: "알 수 없는 명령어예요." },
-      });
+      return reply("알 수 없는 명령어예요.");
     }
 
     try {
       const content = await handlerFn(interaction, env);
-      return Response.json({
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: { content },
-      });
+      return reply(content, ephemeral);
     } catch (err) {
-      return Response.json({
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: { content: `오류가 발생했어요: ${err.message}` },
-      });
+      return reply(`오류가 발생했어요: ${err.message}`);
     }
   }
 
