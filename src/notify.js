@@ -1,5 +1,5 @@
 import { getDoc, setDoc, listCollection } from "./firebase.js";
-import { UP_MARK, DOWN_MARK, DANGER_MARK, DANGER_PRICE, dangerTag, isDelistDanger } from "./economy.js";
+import { UP_MARK, DOWN_MARK, dangerTag } from "./economy.js";
 
 // ---------- 주식채널 가격 변동 공지 on/off (관리자 콘솔의 체크박스) ----------
 // 유저별 DM 알림(/알림설정)과는 별개예요. 기본값은 켜짐입니다.
@@ -94,17 +94,18 @@ export function isWithinNotifyWindow(setting, hour = currentHourKST()) {
   return hour >= start || hour < end;
 }
 
-// 공지용 한 줄: UP_MARK(빨강) 상승 / DOWN_MARK(파랑) 하락 / ➖ 변동 없음 / 🚫 상장폐지
+// 공지용 한 줄: 📈 상승 / 📉 하락 / ➖ 변동 없음 / 🚫 상장폐지
+// 폐지 위기 종목은 "(±%)" 뒤에 ⚠️ 표시
 function announceLine(c) {
   if (c.delisted) {
     return `🚫 **${c.name}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정)`;
   }
   if (c.after === c.before) {
-    return `➖ **${c.name}**${dangerTag(c.after)}: ${c.after.toLocaleString()}해정 (변동 없음)`;
+    return `➖ **${c.name}**: ${c.after.toLocaleString()}해정 (변동 없음)${dangerTag(c.after)}`;
   }
   const up = c.after > c.before;
   const pct = ((c.after - c.before) / c.before) * 100;
-  return `${up ? UP_MARK : DOWN_MARK} **${c.name}**${dangerTag(c.after)}: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)`;
+  return `${up ? UP_MARK : DOWN_MARK} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)${dangerTag(c.after)}`;
 }
 
 // 시세가 변동될 때마다 주식채널(ALLOWED_CHANNEL_ID)에 변동 내역을 공지합니다.
@@ -143,16 +144,9 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
       current += (current ? "\n" : "") + line;
     }
 
-    // 안내 문구: 상장폐지 종목이 있을 때 / 위기(⚠️) 종목이 있을 때
-    const notes = [];
+    // 안내 문구: 상장폐지 종목이 있을 때만 표시
     if (changes.some((c) => c.delisted)) {
-      notes.push("🚫 상장폐지된 종목은 거래할 수 없고, 보유 중이던 주식은 모두 사라졌어요.");
-    }
-    if (changes.some((c) => !c.delisted && isDelistDanger(c.after))) {
-      notes.push(`${DANGER_MARK} = 상장폐지 위기 (${DANGER_PRICE.toLocaleString()}해정 이하)`);
-    }
-    if (notes.length) {
-      const note = notes.join("\n");
+      const note = "🚫 상장폐지된 종목은 거래할 수 없고, 보유 중이던 주식은 모두 사라졌어요.";
       if (current.length + note.length + 2 > 1900) {
         chunks.push(current);
         current = "";
@@ -243,5 +237,57 @@ export async function notifyPriceChanges(env, changes) {
         console.error(`알림 전송 실패 (${user.id}):`, err.message);
       }
     }
+  }
+}
+
+// 급등락 예고 (6분 전): 마지막 공지 메시지 맨 아래에 덧붙입니다.
+// 덧붙일 공간이 없거나 공지가 없으면 새 메시지로 올리고, 공지 목록에 추가합니다.
+// 반환값: { sent: true, mode: "edit" | "new" } 또는 { sent: false, reason: "이유" }
+export async function announcePreAlert(env, slotLabel, leadMin) {
+  if (!env.DISCORD_BOT_TOKEN) {
+    return { sent: false, reason: "DISCORD_BOT_TOKEN 환경변수가 없어요" };
+  }
+  if (!env.ALLOWED_CHANNEL_ID) {
+    return { sent: false, reason: "ALLOWED_CHANNEL_ID 환경변수가 없어요" };
+  }
+
+  // 관리자 콘솔에서 체크를 끈 경우 예고도 보내지 않음
+  const doc = await readAnnounceDoc(env);
+  if (doc.enabled === false) {
+    return { sent: false, reason: "가격 변동 공지가 꺼져 있어요" };
+  }
+
+  const channel = env.ALLOWED_CHANNEL_ID;
+  const line = `⏰ **${leadMin}분 뒤 ${slotLabel}** (±100%) · 보유 종목을 확인해 주세요!`;
+
+  try {
+    const ids =
+      doc.channelId === channel ? String(doc.messageIds || "").split(",").filter(Boolean) : [];
+    const lastId = ids[ids.length - 1];
+
+    if (lastId) {
+      const msg = await discordRequest(env, "GET", `/channels/${channel}/messages/${lastId}`);
+      const merged = `${msg.content}\n\n${line}`;
+      if (merged.length <= 1900) {
+        await discordRequest(env, "PATCH", `/channels/${channel}/messages/${lastId}`, {
+          content: merged,
+        });
+        return { sent: true, mode: "edit" };
+      }
+    }
+
+    // 공지가 없거나 꽉 찼을 때: 새 메시지로 올리고 공지 목록에 추가
+    const message = await discordPost(env, `/channels/${channel}/messages`, {
+      content: line,
+      flags: 4096,
+    });
+    await setDoc(env, ANNOUNCE_PATH, {
+      messageIds: [...ids, message.id].join(","),
+      channelId: channel,
+    });
+    return { sent: true, mode: "new" };
+  } catch (err) {
+    console.error("급등락 예고 실패:", err.message);
+    return { sent: false, reason: err.message };
   }
 }

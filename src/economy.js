@@ -10,12 +10,12 @@ export const DELIST_PRICE = 100;
 // 디스코드 서버에 올린 커스텀 이모지(빨간 네모 위 화살표 / 파란 네모 아래 화살표)를 쓰려면
 // Vercel 환경변수 UP_EMOJI, DOWN_EMOJI에 `<:stock_up:123456789>` 형식으로 넣으세요.
 // 환경변수가 없으면 기본 이모지(🔺 / 🔽)로 보여요.
-export const UP_MARK = process.env.UP_EMOJI || "🔺";
-export const DOWN_MARK = process.env.DOWN_EMOJI || "🔽";
+export const UP_MARK = process.env.UP_EMOJI || "📈";
+export const DOWN_MARK = process.env.DOWN_EMOJI || "📉";
 
 // 자동완성 목록처럼 커스텀 이모지가 안 보이는 곳에서 쓰는 기본 이모지
-const UP_PLAIN = "🔺";
-const DOWN_PLAIN = "🔽";
+const UP_PLAIN = "📈";
+const DOWN_PLAIN = "📉";
 
 // 상장폐지 위기: 폐지 기준(DELIST_PRICE)보다 높고 이 가격 이하일 때 ⚠️ 표시 (300해정 이하)
 export const DANGER_PRICE = 300;
