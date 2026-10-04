@@ -1,4 +1,4 @@
-import { getAttendanceConfig, setAttendanceConfig } from "../../src/attendance.js";
+import { loadEnv } from "../../src/env.js";
 import {
   listStocks,
   upsertStock,
@@ -13,6 +13,7 @@ import {
   setUserItem,
 } from "../../src/economy.js";
 import { listCollection } from "../../src/firebase.js";
+import { getAttendanceConfig, setAttendanceConfig } from "../../src/attendance.js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -159,7 +160,7 @@ async function handler(request) {
         return json({ ok: true });
       }
 
-            // ----- 출석 -----
+      // ----- 출석 -----
       case "getAttendance":
         return json(await getAttendanceConfig(env));
 
