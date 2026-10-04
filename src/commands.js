@@ -24,12 +24,16 @@ import {
   getAttendanceConfig,
   setAttendanceConfig,
 } from "./attendance.js";
+import { mineOnce, upgradeMining, getMiningInfo } from "./mining.js";
 
 // ---- 1) Discord에 등록할 커맨드 정의 ----
 // autocomplete: true 인 옵션은 칸을 누르기만 해도 예시 목록이 떠요. 목록에 없는 값도 직접 입력할 수 있어요.
 export const commandDefinitions = [
   { name: "도움말", description: "사용할 수 있는 명령어 목록을 봅니다." },
   { name: "출석체크", description: "오늘 출석하고 해정을 받습니다. 하루 1회." },
+  { name: "채굴", description: "채굴장에서 노가다로 해정을 법니다. (체력 소모, 효율은 주식보다 낮아요)" },
+  { name: "채굴정보", description: "내 채굴 레벨, 체력, 다음 업그레이드 조건을 봅니다." },
+  { name: "채굴업그레이드", description: "채굴 장비를 업그레이드합니다. (해정 지불 또는 노가다 조건 달성)" },
   { name: "주식목록", description: "현재 거래 가능한 종목과 가격을 봅니다. (이름순)" },
   { name: "잔고", description: "내 해정 잔고와 보유 종목을 봅니다." },
   { name: "내정보", description: "내 잔고, 보유 종목 평가액, 총자산, 순위를 한 번에 봅니다." },
@@ -368,6 +372,23 @@ export const handlers = {
   출석체크: async (interaction, env) => {
     const userId = interaction.member.user.id;
     const result = await checkAttendance(env, userId);
+    return result.message;
+  },
+
+  채굴: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const result = await mineOnce(env, userId);
+    return result.message;
+  },
+
+  채굴정보: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    return getMiningInfo(env, userId);
+  },
+
+  채굴업그레이드: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const result = await upgradeMining(env, userId);
     return result.message;
   },
 

@@ -1,6 +1,7 @@
 import { verifyKey } from "discord-interactions";
 import { handlers, autocomplete } from "../src/commands.js";
 import { loadEnv } from "../src/env.js";
+import { touchUsername } from "../src/economy.js";
 
 // Node.js 런타임으로 동작 (Edge는 discord-interactions가 쓰는 Node crypto를 지원하지 않아 제외)
 // Node.js 런타임도 요청이 올 때만 실행되고 평소엔 대기 상태인 서버리스예요.
@@ -80,6 +81,12 @@ async function handler(request) {
     if (!handlerFn) {
       return reply("알 수 없는 명령어예요.");
     }
+
+    // 관리자 패널에 ID와 같이 표시할 닉네임을 최신으로 저장해둠
+    const userId = interaction.member?.user?.id;
+    const displayName =
+      interaction.member?.nick || interaction.member?.user?.global_name || interaction.member?.user?.username;
+    if (userId) await touchUsername(env, userId, displayName);
 
     try {
       const content = await handlerFn(interaction, env);

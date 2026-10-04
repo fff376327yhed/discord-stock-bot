@@ -112,6 +112,29 @@ export async function saveUser(env, userId, user) {
   await setDoc(env, `users/${userId}`, user);
 }
 
+// 관리자 패널에 ID와 같이 표시할 닉네임/이름을 최신으로 저장해둠.
+// 명령어를 쓸 때마다 호출하고, 실패해도 명령어 자체는 막지 않음.
+export async function touchUsername(env, userId, username) {
+  if (!username) return;
+  try {
+    const existing = await getDoc(env, `users/${userId}`);
+    if (!existing) {
+      // 신규 유저면 getUser와 동일한 기본값으로 생성
+      await setDoc(env, `users/${userId}`, {
+        balance: STARTING_BALANCE,
+        holdings: {},
+        items: {},
+        costs: {},
+        username,
+      });
+    } else if (existing.username !== username) {
+      await setDoc(env, `users/${userId}`, { username });
+    }
+  } catch (err) {
+    console.error(`유저 이름 저장 실패 (${userId}):`, err.message);
+  }
+}
+
 // ---------- 거래 기록 ----------
 // history/{userId} 문서의 entries 맵에 최근 기록을 저장합니다.
 // 키는 "시각_랜덤"이라 정렬하면 시간순이 됩니다. 기록 저장이 실패해도 거래 자체는 막지 않아요.
