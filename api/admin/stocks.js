@@ -205,6 +205,12 @@ async function handler(request) {
           patch[key] = v;
         }
         if (body.names !== undefined) patch.names = parseNames(body.names).join("\n");
+        if (body.keepNames !== undefined) {
+          if (typeof body.keepNames !== "boolean") {
+            return json({ error: "keepNames는 true/false여야 합니다." }, 400);
+          }
+          patch.keepNames = body.keepNames;
+        }
         return json(await setListingConfig(env, patch));
       }
 
