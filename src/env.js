@@ -37,11 +37,12 @@ function minutesFromSlot(hour, now) {
 }
 
 // 지금이 급등락 시각이면 { hour, label }, 아니면 null
-// 급등락은 슬롯 10분 전 ~ 30분 후 사이에 호출됐을 때만 실행돼요. (외부 스케줄러가 조금 늦거나 빨라도 허용)
+// 급등락은 슬롯 1분 전 ~ 30분 후 사이에 호출됐을 때만 실행돼요. (외부 스케줄러가 조금 늦거나 빨라도 허용)
+// 주의: 시작을 너무 일찍(예: 10분 전) 잡으면 5분 간격 호출 시 정각보다 먼저 급등락이 터져요.
 export function currentSurgeSlot(now = Date.now()) {
   for (const s of SURGE_SLOTS) {
     const diff = minutesFromSlot(s.hour, now);
-    if (diff >= -10 && diff <= 30) return s;
+    if (diff >= -1 && diff <= 30) return s;
   }
   return null;
 }
