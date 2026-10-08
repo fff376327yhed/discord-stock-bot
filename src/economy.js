@@ -554,12 +554,15 @@ export function getDelistedHistory(d) {
 // 반환: [{ name, before, after, pct, delisted, holders }]
 //   - delisted: 상장폐지 여부
 //   - holders: 상장폐지된 종목을 보유 중이던 유저 ID 목록 (아니면 빈 배열)
-export async function fluctuatePrices(env, { minPct, maxPct }) {
+// crashChance: 종목마다 이 확률로 crashPct(예: -100%)가 그대로 적용돼요. (0.005 = 0.5%)
+export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, crashPct = -100 }) {
   const stocks = await listStocks(env);
   const changes = [];
 
   for (const stock of stocks) {
-    const pct = minPct + Math.random() * (maxPct - minPct);
+    const pct = Math.random() < crashChance
+      ? crashPct
+      : minPct + Math.random() * (maxPct - minPct);
     const newPrice = Math.max(1, Math.round(stock.price * (1 + pct / 100)));
     // 최고가 기록이 없던 기존 종목은 지금 가격을 최고가로 시작
     const maxPrice = Math.max(Number.isFinite(stock.maxPrice) ? stock.maxPrice : stock.price, stock.price);

@@ -21,7 +21,7 @@ export function isAuthorizedCron(request, env) {
   const auth = request.headers.get("authorization");
   return auth === `Bearer ${env.CRON_SECRET}`;
 }
-// ---------- 급등락(±100%) 시각 ----------
+// ---------- 급등락 시각 ----------
 // 하루 딱 3번: 새벽 12시(0시), 오후 6시, 오후 9시 (한국시간)
 const SURGE_SLOTS = [
   { hour: 0, label: "새벽 12시 급등락" },
@@ -52,4 +52,11 @@ export function isSurgeMoment(now = Date.now()) {
     const diff = minutesFromSlot(s.hour, now);
     return diff >= -3 && diff <= 5;
   });
+}
+
+// 급등락 슬롯의 "그날 몇 시 슬롯" 고유 키. 예: "2026-10-08-18"
+// 새벽 12시 슬롯은 23:50~00:30에 걸쳐 있어서 날짜가 바뀌어도 같은 키가 나오도록 계산해요.
+export function surgeSlotKey(slot, now = Date.now()) {
+  const shifted = new Date(now + 9 * 60 * 60 * 1000 - slot.hour * 60 * 60 * 1000 + 12 * 60 * 60 * 1000);
+  return `${shifted.toISOString().slice(0, 10)}-${slot.hour}`;
 }
