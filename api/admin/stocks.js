@@ -12,10 +12,10 @@ import {
   getProduct,
   setUserItem,
 } from "../../src/economy.js";
-import { listCollection } from "../../src/firebase.js";
+import { listCollection, setDoc } from "../../src/firebase.js";
 import { getAttendanceConfig, setAttendanceConfig } from "../../src/attendance.js";
 import { getAnnounceConfig, setAnnounceConfig } from "../../src/notify.js";
-import { getListingConfig, setListingConfig, parseNames, ensureMinimumStocks } from "../../src/listing.js";
+import { getListingConfig, setListingConfig, parseNames, ensureMinimumStocks, LISTING_PRICE } from "../../src/listing.js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -92,6 +92,24 @@ async function handler(request) {
         await upsertStock(env, to, price);
         await removeStock(env, from);
         return json({ ok: true });
+      }
+
+      // 모든 종목을 1000해정으로 초기화 (최고가·시세 기록도 1000해정에서 새로 시작)
+      case "resetStocks": {
+        const stocks = await listStocks(env);
+        const at = String(Date.now()).padStart(13, "0");
+        await Promise.all(
+          stocks.map((s) =>
+            setDoc(env, `stocks/${encodeURIComponent(s.name)}`, {
+              name: s.name,
+              price: LISTING_PRICE,
+              maxPrice: LISTING_PRICE,
+              history: { [at]: LISTING_PRICE },
+              updatedAt: new Date(),
+            })
+          )
+        );
+        return json({ ok: true, count: stocks.length, price: LISTING_PRICE });
       }
 
       // ----- 상품 (가격 낮은 순) -----
