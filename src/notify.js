@@ -141,7 +141,12 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
     const chunks = [];
     let current = header;
 
-    for (const c of changes) {
+    // 변동 후 가격이 높은 순으로 정렬 (같으면 이름순). 낮은 순으로 바꾸려면 b.after - a.after 를 a.after - b.after 로
+    const sorted = [...changes].sort(
+      (a, b) => b.after - a.after || String(a.name).localeCompare(String(b.name), "ko")
+    );
+
+    for (const c of sorted) {
       const line = announceLine(c);
       // 디스코드 메시지 한도(2000자)를 넘지 않게 나눠서 보냄
       if (current.length + line.length + 1 > 1900) {

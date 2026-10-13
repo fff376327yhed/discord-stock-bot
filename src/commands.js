@@ -54,7 +54,25 @@ export const commandDefinitions = [
   { name: "채굴", description: "채굴장에서 노가다로 해정을 법니다. (체력 소모, 효율은 주식보다 낮아요)" },
   { name: "채굴정보", description: "내 채굴 레벨, 체력, 다음 업그레이드 조건을 봅니다." },
   { name: "채굴업그레이드", description: "채굴 장비를 업그레이드합니다. (해정 지불 또는 노가다 조건 달성)" },
-  { name: "주식목록", description: "현재 거래 가능한 종목과 가격을 봅니다. (이름순)" },
+  {
+    name: "주식목록",
+    description: "현재 거래 가능한 종목과 가격을 봅니다. (기본: 이름순)",
+    options: [
+      {
+        name: "정렬",
+        description: "정렬 방식 (안 고르면 이름순)",
+        type: 3,
+        required: false,
+        choices: [
+          { name: "이름순", value: "name" },
+          { name: "가격 낮은순 (오름차순)", value: "price_asc" },
+          { name: "가격 높은순 (내림차순)", value: "price_desc" },
+          { name: "변동 큰순 (상승률 높은순)", value: "change_desc" },
+          { name: "변동 낮은순 (하락률 큰순)", value: "change_asc" },
+        ],
+      },
+    ],
+  },
   {
     name: "그래프",
     description: "종목의 시세 그래프를 그립니다.",
@@ -549,20 +567,48 @@ export const handlers = {
     return result.message;
   },
 
-  // 이름순 (listStocks가 정렬해서 줌). 나만 보이는 응답이라 내가 보유한 종목만 ⭐로 표시
+  // 정렬: 이름순(기본) / 가격 오름·내림차순 / 변동순(직전 시세 대비 %). 같으면 이름순 유지.
+  // 나만 보이는 응답이라 내가 보유한 종목만 ⭐로 표시
   주식목록: async (interaction, env) => {
-    const stocks = await listStocks(env);
+    const stocks = await listStocks(env); // 이름순으로 이미 정렬돼 있음
     if (stocks.length === 0) return "등록된 종목이 없어요. 관리자가 `/종목추가`로 등록할 수 있어요.";
+
+    // 직전 시세 대비 변동률(%) 계산 (기록이 2개 미만이면 0)
+    for (const s of stocks) {
+      const points = getPriceHistory(s);
+      const prev = points.length >= 2 ? points[points.length - 2].p : s.price;
+      s.changePct = prev > 0 ? ((s.price - prev) / prev) * 100 : 0;
+    }
+
+    const sort = String(opt(interaction, "정렬") ?? "name");
+    const SORT_LABEL = {
+      name: "이름순",
+      price_asc: "가격 낮은순",
+      price_desc: "가격 높은순",
+      change_desc: "변동 큰순",
+      change_asc: "변동 낮은순",
+    };
+
+    // sort는 안정 정렬이라 값이 같으면 이름순이 유지돼요.
+    if (sort === "price_asc") stocks.sort((a, b) => a.price - b.price);
+    else if (sort === "price_desc") stocks.sort((a, b) => b.price - a.price);
+    else if (sort === "change_desc") stocks.sort((a, b) => b.changePct - a.changePct);
+    else if (sort === "change_asc") stocks.sort((a, b) => a.changePct - b.changePct);
 
     const userId = interaction.member.user.id;
     const user = await getUser(env, userId);
 
     return [
-      "**📈 주식 목록 (이름순)** · ⭐ = 내가 보유 중",
+      `**📈 주식 목록 (${SORT_LABEL[sort] ?? "이름순"})** · ⭐ = 내가 보유 중`,
       ...stocks.map((s) => {
         const held = user.holdings[s.name] || 0;
         const mark = held > 0 ? `⭐ (보유 ${held}주) ` : "";
-        return `${mark}**${s.name}**${dangerTag(s.price)} — ${s.price.toLocaleString()}해정`;
+        const pct = s.changePct;
+        const change =
+          pct === 0
+            ? "➖ 0.0%"
+            : `${pct > 0 ? UP_MARK : DOWN_MARK} ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
+        return `${mark}**${s.name}**${dangerTag(s.price)} — ${s.price.toLocaleString()}해정 (${change})`;
       }),
     ].join("\n");
   },
