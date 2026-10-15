@@ -45,6 +45,7 @@ import {
   orderText,
   sideText,
 } from "./orders.js";
+import { getCrowdStats } from "./crowd.js";
 
 // ---- 1) Discord에 등록할 커맨드 정의 ----
 // autocomplete: true 인 옵션은 칸을 누르기만 해도 예시 목록이 떠요. 목록에 없는 값도 직접 입력할 수 있어요.
@@ -90,6 +91,7 @@ export const commandDefinitions = [
   },
   { name: "잔고", description: "내 해정 잔고와 보유 종목을 봅니다." },
   { name: "내정보", description: "내 잔고, 보유 종목 평가액, 총자산, 순위를 한 번에 봅니다." },
+  { name: "봇현황", description: "시장에 참여 중인 AI 봇의 평균 자산과 인기 종목을 봅니다." },
   { name: "랭킹", description: "총 자산 기준 랭킹을 봅니다." },
   {
     name: "내역",
@@ -763,6 +765,9 @@ export const handlers = {
       holdingsText,
     ].join("\n");
   },
+
+  // AI 봇 현황 (봇은 랭킹에 포함되지 않고 여기서만 요약으로 보여줘요)
+  봇현황: async (_interaction, env) => getCrowdStats(env),
 
   랭킹: async (_interaction, env) => {
     const ranking = await getRanking(env);

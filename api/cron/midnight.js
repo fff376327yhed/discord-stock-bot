@@ -3,6 +3,7 @@ import { fluctuatePrices } from "../../src/economy.js";
 import { announcePriceChanges, notifyPriceChanges } from "../../src/notify.js";
 import { processOrders } from "../../src/orders.js";
 import { getDoc, setDoc } from "../../src/firebase.js";
+import { prepareCrowd, finishCrowd } from "../../src/crowd.js";
 
 // 급등락: -80% ~ +120% (+ 종목마다 0.5% 확률로 -100%) — 하루 딱 3번 (오후 6시, 오후 9시, 새벽 12시 / 한국시간)
 //  - -100%가 나오면 가격이 최저가로 떨어져 바로 상장폐지(100해정 이하)돼요.
@@ -14,6 +15,7 @@ import { getDoc, setDoc } from "../../src/firebase.js";
 //  - 오후 6시(UTC 09:00), 오후 9시(UTC 12:00): cron-job.org에서 이 주소를 호출하도록 등록
 //    (cron-job.org 시간대를 Asia/Seoul로 두고 매일 18:00 / 21:00 에 호출)
 //  - 평소 변동(-20% ~ +20%)은 fluctuate.js가 담당해요.
+//  - 봇 순매수 압력(crowd.js)도 변동률에 더해져요.
 
 // 급등락: -80% ~ +120%, 종목마다 0.5% 확률로 -100%
 const SURGE_RANGE = { minPct: -80, maxPct: 120, crashChance: 0.005, crashPct: -100 };
@@ -50,7 +52,22 @@ async function handler(request) {
   const range = surge ? SURGE_RANGE : NORMAL_RANGE;
   const label = surge ? slot.label : "평소 변동";
 
-  const changes = await fluctuatePrices(env, range);
+  // 봇 주문 수집 (실패해도 시세 변동은 그대로 진행)
+  let crowd = null;
+  try {
+    crowd = await prepareCrowd(env);
+  } catch (err) {
+    console.error("봇 준비 실패:", err.message);
+  }
+
+  const changes = await fluctuatePrices(env, { ...range, impact: crowd?.impact });
+
+  // 상장폐지 종목을 봇 보유분에서 지우고 봇 저장
+  try {
+    if (crowd) await finishCrowd(env, crowd, changes);
+  } catch (err) {
+    console.error("봇 저장 실패:", err.message);
+  }
 
   // 1) 주식채널에 변동 내역 공지 (알림 설정과 무관), 2) 알림을 켠 유저에게 DM
   const announce = await announcePriceChanges(env, changes, label);
@@ -69,6 +86,7 @@ async function handler(request) {
     ok: true,
     announce,
     orders,
+    crowd: crowd?.summary,
     mode: label,
     count: changes.length,
     delisted: changes.filter((c) => c.delisted).map((c) => c.name),

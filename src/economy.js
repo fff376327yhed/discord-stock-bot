@@ -555,14 +555,15 @@ export function getDelistedHistory(d) {
 //   - delisted: 상장폐지 여부
 //   - holders: 상장폐지된 종목을 보유 중이던 유저 ID 목록 (아니면 빈 배열)
 // crashChance: 종목마다 이 확률로 crashPct(예: -100%)가 그대로 적용돼요. (0.005 = 0.5%)
-export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, crashPct = -100 }) {
+// impact: { 종목이름: %p } 봇 순매수 압력 등 종목별로 변동률에 더해지는 값 (crowd.js 에서 계산)
+export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, crashPct = -100, impact = {} }) {
   const stocks = await listStocks(env);
   const changes = [];
 
   for (const stock of stocks) {
     const pct = Math.random() < crashChance
       ? crashPct
-      : minPct + Math.random() * (maxPct - minPct);
+      : minPct + Math.random() * (maxPct - minPct) + (impact[stock.name] || 0);
     const newPrice = Math.max(1, Math.round(stock.price * (1 + pct / 100)));
     // 최고가 기록이 없던 기존 종목은 지금 가격을 최고가로 시작
     const maxPrice = Math.max(Number.isFinite(stock.maxPrice) ? stock.maxPrice : stock.price, stock.price);
