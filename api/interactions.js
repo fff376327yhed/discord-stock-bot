@@ -17,7 +17,7 @@ const InteractionResponseType = {
 const EPHEMERAL = 64;
 
 // 여기에 적은 명령어는 예외로 모두에게 공개돼요. 예: new Set(["랭킹"])
-const PUBLIC_COMMANDS = new Set([]);
+const PUBLIC_COMMANDS = new Set(["봇현황"]);
 
 export default { fetch: handler };
 
