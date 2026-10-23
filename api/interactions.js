@@ -20,11 +20,13 @@ const EPHEMERAL = 64;
 // 응답을 "무음"(푸시 알림·소리 없음)으로 보내는 플래그
 const SUPPRESS_NOTIFICATIONS = 4096;
 
-// 여기에 적은 명령어는 예외로 모두에게 공개돼요. (알림도 평소처럼 감) 예: new Set(["랭킹"])
-const PUBLIC_COMMANDS = new Set([]);
+// 기본값은 "모두에게 보이지만 무음"이에요. 아래 두 목록은 예외로 쓰는 거예요.
 
-// 여기에 적은 명령어는 모두에게 공개되지만 "무음"이에요. (채널 사람들에게 알림이 안 가요)
-const SILENT_PUBLIC_COMMANDS = new Set(["그래프", "봇현황"]);
+// 여기에 적은 명령어는 "나만 보기"로 보내요. 예: new Set(["잔고", "내역"])
+const PRIVATE_COMMANDS = new Set([]);
+
+// 여기에 적은 명령어는 모두에게 공개 + 알림도 평소처럼 가요. 예: new Set(["랭킹"])
+const PUBLIC_COMMANDS = new Set([]);
 
 // 이 시간(ms) 안에 처리가 끝나면 바로 응답하고, 넘기면 "처리 중…"(지연 응답)으로 먼저 답한 뒤
 // 끝나는 대로 결과를 채워요. (디스코드는 3초 안에 첫 응답이 없으면 "응답하지 않았어요"를 띄워요)
@@ -33,14 +35,14 @@ const DEFER_AFTER_MS = 2000;
 export default { fetch: handler };
 
 // content: 문자열, 또는 { content?, embeds? } 같은 객체(그래프처럼 이미지 임베드를 보낼 때)
-// mode: "private"(나만 보임, 기본) | "public"(모두에게 보임) | "silent"(모두에게 보이지만 무음)
+// mode: "private"(나만 보임) | "public"(모두에게 보임) | "silent"(모두에게 보이지만 무음, 기본)
 function flagsOf(mode) {
   if (mode === "private") return EPHEMERAL;
   if (mode === "silent") return SUPPRESS_NOTIFICATIONS;
   return undefined;
 }
 
-function reply(content, mode = "private") {
+function reply(content, mode = "silent") {
   const data = typeof content === "string" ? { content } : { ...content };
   const flags = flagsOf(mode);
   if (flags !== undefined) data.flags = flags;
@@ -74,11 +76,11 @@ async function editOriginal(interaction, content) {
   if (!res.ok) console.error(`지연 응답 수정 실패(${res.status}):`, await res.text());
 }
 
-// 명령어 이름으로 공개 방식을 정해요.
+// 명령어 이름으로 공개 방식을 정해요. 기본값은 "무음 공개"예요.
 function modeOf(commandName) {
-  if (SILENT_PUBLIC_COMMANDS.has(commandName)) return "silent";
+  if (PRIVATE_COMMANDS.has(commandName)) return "private";
   if (PUBLIC_COMMANDS.has(commandName)) return "public";
-  return "private";
+  return "silent";
 }
 
 async function handler(request) {
@@ -124,7 +126,7 @@ async function handler(request) {
   if (interaction.type === InteractionType.APPLICATION_COMMAND) {
     // 주식채널에서만 명령어 허용 (나만 보이는 메시지로 안내)
     if (env.ALLOWED_CHANNEL_ID && interaction.channel_id !== env.ALLOWED_CHANNEL_ID) {
-      return reply(`이 명령어는 <#${env.ALLOWED_CHANNEL_ID}> 채널에서만 쓸 수 있어요.`);
+      return reply(`이 명령어는 <#${env.ALLOWED_CHANNEL_ID}> 채널에서만 쓸 수 있어요.`, "private");
     }
 
     const commandName = interaction.data.name;
@@ -132,7 +134,7 @@ async function handler(request) {
     const mode = modeOf(commandName);
 
     if (!handlerFn) {
-      return reply("알 수 없는 명령어예요.");
+      return reply("알 수 없는 명령어예요.", "private");
     }
 
     // 닉네임 저장 + 명령어 처리를 하나의 작업으로 묶어요.
