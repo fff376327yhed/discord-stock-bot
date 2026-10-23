@@ -29,18 +29,18 @@ export function crowdConfig() {
   };
 }
 
-// ---------- 봇 성격 ----------
-// 실제 사람들이 할 법한 다양한 투자 패턴을 흉내내요. 성격마다 "한 번 변동 때 행동할 확률"도 달라서
-// 어떤 성격은 자주 거래하고, 어떤 성격은 거의 안 움직여요.
-// 0 모멘텀      : 오르는 종목(상위권)을 쫓아 사고, 많이 떨어진 보유 종목은 손절
-// 1 역추세/줍줍 : 많이 떨어진 종목을 저가 매수하고, 많이 오른 보유 종목은 적당히 익절
-// 2 랜덤        : 별 생각 없이 아무 종목이나 사고팔아요
-// 3 존버(장기)  : 아주 가끔만 움직이고, 어지간해선 안 팔아요. 가끔 소액만 추가 매수
-// 4 공포매도    : 보유 종목이 조금만 떨어져도 바로 전부 손절 (패닉셀)
-// 5 추격매수(FOMO): 오르는 종목이면 상승폭이 작아도 크게 질러요. 과감하고 비합리적인 추격매수
-// 6 분산투자    : 아직 안 가진 종목 위주로 골고루 조금씩 사 모아요
-// 7 익절러      : 보유 종목이 조금만 올라도 바로 일부를 팔아 이익 실현
-const PERSONALITY_COUNT = 8;
+// 8 고가매수    : "비쌀수록 좋다"는 믿음으로, 추세와 무관하게 가장 비싼 종목 위주로 사요
+// 9 저가싹쓸이  : 추세와 무관하게 가장 싼 종목만 골라 양을 많이 사요
+// 10 올인러     : 거의 안 움직이다가, 가끔 한 종목에 현금 대부분을 몰빵해요
+// 11 소심이     : 아주 소액만 거래하고, 가진 건 거의 안 팔아요
+// 12 역발상     : 남들과 반대로 — 오른 보유 종목은 팔고, 떨어진 종목을 사요
+// 13 단타족     : 추세 상관없이 자주, 소액으로 사고팔기를 반복해요
+// 14 가치투자자 : 최고가 대비 많이 할인된 종목을 사서 오래 묵히고, 회복하면 서서히 정리해요
+// 15 도박꾼     : 방향(상승/하락) 상관없이 변동폭이 제일 큰 종목에 크게 베팅해요
+// 16 균형러     : 현금 비중이 너무 높으면 사고, 한 종목 비중이 너무 크면 정리해요
+// 17 관망러     : 웬만해선 안 움직이다가, 아주 큰 폭락·급등일 때만 확실하게 베팅해요
+// 18 컬렉터     : 안 가진 종목을 가격 안 가리고 1주씩이라도 모으는 수집가예요
+const PERSONALITY_COUNT = 19;
 const PERSONALITY_NAMES = [
   "모멘텀",
   "줍줍",
@@ -50,9 +50,20 @@ const PERSONALITY_NAMES = [
   "추격매수",
   "분산투자",
   "익절러",
+  "고가매수",
+  "저가싹쓸이",
+  "올인러",
+  "소심이",
+  "역발상",
+  "단타족",
+  "가치투자자",
+  "도박꾼",
+  "균형러",
+  "관망러",
+  "컬렉터",
 ];
 // 성격별 "행동 확률" 배율 (ACT_RATE에 곱해짐). 1보다 크면 더 자주, 작으면 덜 자주 움직여요.
-const ACT_RATE_MULT = [1, 1, 1, 0.25, 1.3, 1.4, 0.9, 1.2];
+const ACT_RATE_MULT = [1, 1, 1, 0.25, 1.3, 1.4, 0.9, 1.2, 0.8, 0.8, 0.15, 0.4, 1, 1.6, 0.5, 0.7, 0.6, 0.1, 0.5];
 
 // 봇 1명: c=현금, h=보유 {종목: 수량}, s=성격, k=민감도(0.5~1.5, 임계값 배율)
 function makeBot() {
@@ -210,6 +221,106 @@ function act(bot, ctx, tally) {
       doBuy(bot, pick(tradable), 0.1 + Math.random() * 0.2, ctx, tally);
       break;
     }
+    case 8: {
+      // 고가매수: 추세 무관, 가장 비싼 종목 위주로 매수
+      const expensive = pick([...tradable].sort((a, b) => b.price - a.price).slice(0, 5));
+      if (expensive) doBuy(bot, expensive, 0.1 + Math.random() * 0.2, ctx, tally);
+      break;
+    }
+    case 9: {
+      // 저가싹쓸이: 추세 무관, 가장 싼 종목을 많이 매수
+      const cheap = pick([...tradable].sort((a, b) => a.price - b.price).slice(0, 5));
+      if (cheap) doBuy(bot, cheap, 0.2 + Math.random() * 0.3, ctx, tally);
+      break;
+    }
+    case 10: {
+      // 올인러: 거의 안 움직이다가 가끔 한 종목에 현금 대부분을 몰빵
+      if (Math.random() < 0.9) break;
+      doBuy(bot, pick(tradable), 0.7 + Math.random() * 0.3, ctx, tally);
+      break;
+    }
+    case 11: {
+      // 소심이: 아주 소액만 거래, 거의 안 팔아요
+      if (held.length && Math.random() < 0.05) {
+        const sell = pick(held);
+        doSell(bot, sell, Math.max(1, Math.floor(bot.h[sell] * 0.1)), ctx, tally);
+        break;
+      }
+      doBuy(bot, pick(tradable), 0.02 + Math.random() * 0.03, ctx, tally);
+      break;
+    }
+    case 12: {
+      // 역발상: 오른 보유 종목은 팔고, 떨어진 종목을 사요 (모멘텀의 반대)
+      const sellWinner = held.find((n) => byName[n].pct > 5 * bot.k);
+      if (sellWinner) doSell(bot, sellWinner, bot.h[sellWinner], ctx, tally);
+      const buyLoser = pick(byDown.slice(0, 3));
+      if (buyLoser && buyLoser.pct < -3 * bot.k) doBuy(bot, buyLoser, 0.1 + Math.random() * 0.3, ctx, tally);
+      break;
+    }
+    case 13: {
+      // 단타족: 추세 상관없이 자주, 소액으로 사고팔기를 반복
+      if (held.length && Math.random() < 0.5) {
+        const sell = pick(held);
+        doSell(bot, sell, Math.max(1, Math.ceil(bot.h[sell] * (0.3 + Math.random() * 0.4))), ctx, tally);
+      } else {
+        doBuy(bot, pick(tradable), 0.05 + Math.random() * 0.15, ctx, tally);
+      }
+      break;
+    }
+    case 14: {
+      // 가치투자자: 최고가 대비 많이 할인된 종목을 저가매수, 거의 회복하면 일부 정리
+      const discounted = tradable.filter(
+        (s) => s.maxPrice > 0 && (s.maxPrice - s.price) / s.maxPrice > 0.4 * bot.k
+      );
+      const buy = pick(discounted);
+      if (buy) doBuy(bot, buy, 0.15 + Math.random() * 0.25, ctx, tally);
+      const recovered = held.find(
+        (n) => byName[n].maxPrice > 0 && (byName[n].maxPrice - byName[n].price) / byName[n].maxPrice < 0.1
+      );
+      if (recovered) doSell(bot, recovered, Math.ceil(bot.h[recovered] / 3), ctx, tally);
+      break;
+    }
+    case 15: {
+      // 도박꾼: 방향 상관없이 변동폭이 가장 큰 종목에 크게 베팅
+      const wild = pick([...tradable].sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct)).slice(0, 5));
+      if (wild) doBuy(bot, wild, 0.4 + Math.random() * 0.5, ctx, tally);
+      break;
+    }
+    case 16: {
+      // 균형러: 현금 비중이 너무 높으면 사고, 한 종목 비중이 너무 크면 정리
+      const stockValue = held.reduce((sum, nm) => sum + bot.h[nm] * (byName[nm]?.price || 0), 0);
+      const totalValue = bot.c + stockValue;
+      if (totalValue <= 0) break;
+      if (bot.c / totalValue > 0.6) {
+        doBuy(bot, pick(tradable), 0.2 + Math.random() * 0.2, ctx, tally);
+      } else {
+        const heavy = held.find((n) => (bot.h[n] * (byName[n]?.price || 0)) / totalValue > 0.4);
+        if (heavy) doSell(bot, heavy, Math.ceil(bot.h[heavy] / 2), ctx, tally);
+      }
+      break;
+    }
+    case 17: {
+      // 관망러: 웬만해선 안 움직이고, 아주 큰 폭락·급등일 때만 확실하게 베팅
+      const bigDrop = pick(byDown.filter((s) => s.pct < -20 * bot.k));
+      if (bigDrop) {
+        doBuy(bot, bigDrop, 0.3 + Math.random() * 0.3, ctx, tally);
+        break;
+      }
+      const bigRise = held.find((n) => byName[n].pct > 20 * bot.k);
+      if (bigRise) doSell(bot, bigRise, bot.h[bigRise], ctx, tally);
+      break;
+    }
+    case 18: {
+      // 컬렉터: 안 가진 종목을 가격 안 가리고 1주씩이라도 모아요
+      const notHeld = tradable.filter((s) => !bot.h[s.name] && s.price <= bot.c);
+      const target = pick(notHeld);
+      if (target) {
+        bot.c -= target.price;
+        bot.h[target.name] = (bot.h[target.name] || 0) + 1;
+        tally[target.name].buy++;
+      }
+      break;
+    }
     default:
       break;
   }
@@ -225,7 +336,7 @@ export async function prepareCrowd(env) {
   const [docs, stocks] = await Promise.all([loadBots(env, total), listStocks(env)]);
   if (stocks.length === 0) return null;
 
-  const rows = stocks.map((s) => ({ name: s.name, price: s.price, pct: changeOf(s) }));
+  const rows = stocks.map((s) => ({ name: s.name, price: s.price, pct: changeOf(s), maxPrice: s.maxPrice || s.price }));
   const byName = Object.fromEntries(rows.map((r) => [r.name, r]));
   const tradable = rows.filter((r) => r.price > DANGER_PRICE); // 폐지 위기 종목은 안 삼
   const ctx = {
@@ -276,7 +387,6 @@ export async function getCrowdStats(env) {
   const [docs, stocks] = await Promise.all([loadBots(env, total), listStocks(env)]);
   const price = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
   const held = {};
-  const personalityCount = Array(PERSONALITY_COUNT).fill(0);
   let sum = 0;
   let n = 0;
   for (const bots of docs) {
@@ -288,7 +398,6 @@ export async function getCrowdStats(env) {
       }
       sum += v;
       n++;
-      if (Number.isInteger(bot.s) && bot.s >= 0 && bot.s < PERSONALITY_COUNT) personalityCount[bot.s]++;
     }
   }
   const top = Object.entries(held)
@@ -297,13 +406,10 @@ export async function getCrowdStats(env) {
     .slice(0, 5)
     .map(([name, qty], i) => `${i + 1}. ${name} (${qty.toLocaleString()}주)`);
 
-  const personalityText = PERSONALITY_NAMES.map((label, i) => `${label} ${personalityCount[i].toLocaleString()}명`).join(" · ");
-
   return [
     "**🤖 AI 봇 현황**",
     `참여 봇: ${n.toLocaleString()}명 · 시세 영향 계수 ${influence}`,
     `봇 평균 총자산: ${Math.round(sum / Math.max(n, 1)).toLocaleString()}해정`,
-    `성격 분포: ${personalityText}`,
     "봇이 많이 들고 있는 종목:",
     ...(top.length ? top : ["(아직 없음)"]),
   ].join("\n");
