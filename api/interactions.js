@@ -15,20 +15,34 @@ const InteractionResponseType = {
 
 // 응답을 "명령어를 친 본인에게만" 보이게 하는 플래그
 const EPHEMERAL = 64;
+// 응답을 "무음"(푸시 알림·소리 없음)으로 보내는 플래그
+const SUPPRESS_NOTIFICATIONS = 4096;
 
-// 여기에 적은 명령어는 예외로 모두에게 공개돼요. 예: new Set(["랭킹"])
+// 여기에 적은 명령어는 예외로 모두에게 공개돼요. (알림도 평소처럼 감) 예: new Set(["랭킹"])
 const PUBLIC_COMMANDS = new Set(["봇현황"]);
+
+// 여기에 적은 명령어는 모두에게 공개되지만 "무음"이에요. (채널 사람들에게 알림이 안 가요)
+const SILENT_PUBLIC_COMMANDS = new Set(["그래프"]);
 
 export default { fetch: handler };
 
 // content: 문자열, 또는 { content?, embeds? } 같은 객체(그래프처럼 이미지 임베드를 보낼 때)
-function reply(content, ephemeral = true) {
+// mode: "private"(나만 보임, 기본) | "public"(모두에게 보임) | "silent"(모두에게 보이지만 무음)
+function reply(content, mode = "private") {
   const data = typeof content === "string" ? { content } : { ...content };
-  if (ephemeral) data.flags = EPHEMERAL;
+  if (mode === "private") data.flags = EPHEMERAL;
+  else if (mode === "silent") data.flags = SUPPRESS_NOTIFICATIONS;
   return Response.json({
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data,
   });
+}
+
+// 명령어 이름으로 공개 방식을 정해요.
+function modeOf(commandName) {
+  if (SILENT_PUBLIC_COMMANDS.has(commandName)) return "silent";
+  if (PUBLIC_COMMANDS.has(commandName)) return "public";
+  return "private";
 }
 
 async function handler(request) {
@@ -79,7 +93,7 @@ async function handler(request) {
 
     const commandName = interaction.data.name;
     const handlerFn = handlers[commandName];
-    const ephemeral = !PUBLIC_COMMANDS.has(commandName);
+    const mode = modeOf(commandName);
 
     if (!handlerFn) {
       return reply("알 수 없는 명령어예요.");
@@ -93,8 +107,9 @@ async function handler(request) {
 
     try {
       const content = await handlerFn(interaction, env);
-      return reply(content, ephemeral);
+      return reply(content, mode);
     } catch (err) {
+      // 오류 메시지는 항상 나만 보이게
       return reply(`오류가 발생했어요: ${err.message}`);
     }
   }
