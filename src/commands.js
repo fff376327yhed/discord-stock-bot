@@ -46,6 +46,7 @@ import {
   sideText,
 } from "./orders.js";
 import { getCrowdStats } from "./crowd.js";
+import { setDoc } from "./firebase.js";
 
 // ---- 1) Discord에 등록할 커맨드 정의 ----
 // autocomplete: true 인 옵션은 칸을 누르기만 해도 예시 목록이 떠요. 목록에 없는 값도 직접 입력할 수 있어요.
@@ -950,7 +951,8 @@ export const handlers = {
     // 상장 / 횟수 저장 / 기록을 동시에 처리 (upsertStock에 {}를 넘겨 이미 없는 걸 아니까 다시 읽지 않게 함)
     await Promise.all([
       upsertStock(env, name, LISTING_PRICE, {}),
-      saveUser(env, userId, user),
+      // 유저 문서 전체가 아니라 바뀐 두 필드만 저장 (쓰기 용량↓, 다른 필드 덮어쓰기 위험↓)
+      setDoc(env, `users/${userId}`, { listingDay: today, listingCount: used + 1 }),
       addHistory(env, userId, `종목 생성: ${name} (${LISTING_PRICE.toLocaleString()}해정 상장)`),
     ]);
 

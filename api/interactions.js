@@ -1,4 +1,5 @@
 import { verifyKey } from "discord-interactions";
+import { waitUntil } from "@vercel/functions";
 import { handlers, autocomplete } from "../src/commands.js";
 import { loadEnv } from "../src/env.js";
 import { touchUsername } from "../src/economy.js";
@@ -10,6 +11,7 @@ const InteractionType = { PING: 1, APPLICATION_COMMAND: 2, APPLICATION_COMMAND_A
 const InteractionResponseType = {
   PONG: 1,
   CHANNEL_MESSAGE_WITH_SOURCE: 4,
+  DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE: 5,
   APPLICATION_COMMAND_AUTOCOMPLETE_RESULT: 8,
 };
 
@@ -24,18 +26,52 @@ const PUBLIC_COMMANDS = new Set(["봇현황"]);
 // 여기에 적은 명령어는 모두에게 공개되지만 "무음"이에요. (채널 사람들에게 알림이 안 가요)
 const SILENT_PUBLIC_COMMANDS = new Set(["그래프"]);
 
+// 이 시간(ms) 안에 처리가 끝나면 바로 응답하고, 넘기면 "처리 중…"(지연 응답)으로 먼저 답한 뒤
+// 끝나는 대로 결과를 채워요. (디스코드는 3초 안에 첫 응답이 없으면 "응답하지 않았어요"를 띄워요)
+const DEFER_AFTER_MS = 2000;
+
 export default { fetch: handler };
 
 // content: 문자열, 또는 { content?, embeds? } 같은 객체(그래프처럼 이미지 임베드를 보낼 때)
 // mode: "private"(나만 보임, 기본) | "public"(모두에게 보임) | "silent"(모두에게 보이지만 무음)
+function flagsOf(mode) {
+  if (mode === "private") return EPHEMERAL;
+  if (mode === "silent") return SUPPRESS_NOTIFICATIONS;
+  return undefined;
+}
+
 function reply(content, mode = "private") {
   const data = typeof content === "string" ? { content } : { ...content };
-  if (mode === "private") data.flags = EPHEMERAL;
-  else if (mode === "silent") data.flags = SUPPRESS_NOTIFICATIONS;
+  const flags = flagsOf(mode);
+  if (flags !== undefined) data.flags = flags;
   return Response.json({
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data,
   });
+}
+
+// 지연 응답: 먼저 "처리 중…"을 띄움. 나만 보기/무음 여부는 이 첫 응답에서 정해지고, 나중에 바꿀 수 없어요.
+function deferReply(mode) {
+  const flags = flagsOf(mode);
+  return Response.json({
+    type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+    data: flags !== undefined ? { flags } : {},
+  });
+}
+
+// 지연 응답으로 띄운 "처리 중…" 메시지를 결과로 바꿈
+async function editOriginal(interaction, content) {
+  const data = typeof content === "string" ? { content } : { ...content };
+  delete data.flags; // 공개 방식은 첫 응답에서 이미 정해졌어요
+  const res = await fetch(
+    `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }
+  );
+  if (!res.ok) console.error(`지연 응답 수정 실패(${res.status}):`, await res.text());
 }
 
 // 명령어 이름으로 공개 방식을 정해요.
@@ -99,19 +135,40 @@ async function handler(request) {
       return reply("알 수 없는 명령어예요.");
     }
 
-    // 관리자 패널에 ID와 같이 표시할 닉네임을 최신으로 저장해둠
+    // 닉네임 저장 + 명령어 처리를 하나의 작업으로 묶어요.
+    // (닉네임 저장이 먼저 끝나야 신규 유저 문서가 겹쳐 쓰이지 않아서 순서는 그대로 유지)
     const userId = interaction.member?.user?.id;
     const displayName =
       interaction.member?.nick || interaction.member?.user?.global_name || interaction.member?.user?.username;
-    if (userId) await touchUsername(env, userId, displayName);
 
-    try {
-      const content = await handlerFn(interaction, env);
-      return reply(content, mode);
-    } catch (err) {
-      // 오류 메시지는 항상 나만 보이게
-      return reply(`오류가 발생했어요: ${err.message}`);
-    }
+    const work = (async () => {
+      try {
+        if (userId) await touchUsername(env, userId, displayName);
+        return { content: await handlerFn(interaction, env), mode };
+      } catch (err) {
+        // 오류 메시지는 항상 나만 보이게
+        console.error(`명령어 오류 (${commandName}):`, err.message);
+        return { content: `오류가 발생했어요: ${err.message}`, mode: "private", failed: true };
+      }
+    })();
+
+    // 2초 안에 끝나면 평소처럼 바로 응답
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), DEFER_AFTER_MS));
+    const quick = await Promise.race([work, timeout]);
+    if (quick) return reply(quick.content, quick.mode);
+
+    // 오래 걸리면 먼저 "처리 중…"으로 응답하고, 끝나면 결과로 바꿔요.
+    // waitUntil: 응답을 보낸 뒤에도 서버리스 함수가 작업이 끝날 때까지 살아 있게 해요.
+    waitUntil(
+      work.then(async (result) => {
+        try {
+          await editOriginal(interaction, result.content);
+        } catch (err) {
+          console.error("지연 응답 전송 실패:", err.message);
+        }
+      })
+    );
+    return deferReply(mode);
   }
 
   return new Response("지원하지 않는 요청입니다.", { status: 400 });
