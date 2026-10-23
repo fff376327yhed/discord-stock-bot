@@ -5,6 +5,7 @@
 // 환경변수 (Vercel):
 //   CROWD_BOTS       봇 수 (기본 200, 0이면 꺼짐)
 //   CROWD_INFLUENCE  시세 영향 계수 (기본 0). 봇 전체가 한 종목을 100% 순매수하면 +이 값(%p)만큼 더해져요. 상한 ±IMPACT_CAP
+//                    (IMPACT_CAP 35 기준 추천: 500 — 봇 200명 중 순매수 14명이면 상한)
 
 import { listStocks, getPriceHistory, DANGER_PRICE, compareKo } from "./economy.js";
 import { getDoc, setDoc } from "./firebase.js";
@@ -12,7 +13,7 @@ import { getDoc, setDoc } from "./firebase.js";
 const BOTS_PER_DOC = 1700; // 문서 1개당 봇 수 (5000명이면 문서 3개)
 const START_CASH = 1000; // 봇 시작/재지급 해정 (유저 시작 잔고와 동일)
 const ACT_RATE = 0.3; // 한 번 변동 때 행동하는 봇 비율 (성격별로 이 값에 배율을 곱해요)
-const IMPACT_CAP = 10; // 봇이 한 번에 줄 수 있는 최대 영향 (%p)
+const IMPACT_CAP = 35; // 봇이 한 번에 줄 수 있는 최대 영향 (%p)
 
 const docPath = (i) => `bots/crowd_${i + 1}`;
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
@@ -40,7 +41,14 @@ export function crowdConfig() {
 // 16 균형러     : 현금 비중이 너무 높으면 사고, 한 종목 비중이 너무 크면 정리해요
 // 17 관망러     : 웬만해선 안 움직이다가, 아주 큰 폭락·급등일 때만 확실하게 베팅해요
 // 18 컬렉터     : 안 가진 종목을 가격 안 가리고 1주씩이라도 모으는 수집가예요
-const PERSONALITY_COUNT = 19;
+// 19 물타기     : 떨어진 보유 종목을 더 사서 평단을 낮춰요
+// 20 돌파매매   : 최고가에 근접한 종목을 사고, 최고가 대비 15% 빠지면 정리해요
+// 21 신상털이   : 시세 기록이 적은(갓 상장된) 종목 위주로 사요
+// 22 시장추종   : 시장 평균이 오르면 사고, 내리면 일부 정리해요
+// 23 짝사랑     : 본명 종목 하나를 정해 두고 계속 사 모아요 (폐지되면 새로 정함)
+// 24 펌프앤덤프 : 평소엔 조용하다가 싼 종목에 몰빵, 오르면 전량 매도해요
+// 25 복권러     : 폐지 위기 종목에 소액으로 한 방을 노려요
+const PERSONALITY_COUNT = 26;
 const PERSONALITY_NAMES = [
   "모멘텀",
   "줍줍",
@@ -61,11 +69,18 @@ const PERSONALITY_NAMES = [
   "균형러",
   "관망러",
   "컬렉터",
+  "물타기",
+  "돌파매매",
+  "신상털이",
+  "시장추종",
+  "짝사랑",
+  "펌프앤덤프",
+  "복권러",
 ];
 // 성격별 "행동 확률" 배율 (ACT_RATE에 곱해짐). 1보다 크면 더 자주, 작으면 덜 자주 움직여요.
-const ACT_RATE_MULT = [1, 1, 1, 0.25, 1.3, 1.4, 0.9, 1.2, 0.8, 0.8, 0.15, 0.4, 1, 1.6, 0.5, 0.7, 0.6, 0.1, 0.5];
+const ACT_RATE_MULT = [1, 1, 1, 0.25, 1.3, 1.4, 0.9, 1.2, 0.8, 0.8, 0.15, 0.4, 1, 1.6, 0.5, 0.7, 0.6, 0.1, 0.5, 0.8, 0.9, 0.9, 1.0, 0.7, 0.3, 0.6];
 
-// 봇 1명: c=현금, h=보유 {종목: 수량}, s=성격, k=민감도(0.5~1.5, 임계값 배율)
+// 봇 1명: c=현금, h=보유 {종목: 수량}, s=성격, k=민감도(0.5~1.5, 임계값 배율), f=짝사랑 종목(선택)
 function makeBot() {
   return {
     c: START_CASH,
@@ -321,6 +336,64 @@ function act(bot, ctx, tally) {
       }
       break;
     }
+    case 19: {
+      // 물타기: 떨어진 보유 종목을 더 사서 평단을 낮춰요
+      const dipped = held.filter((n) => byName[n].pct < -5 * bot.k && byName[n].price > DANGER_PRICE);
+      if (dipped.length) doBuy(bot, byName[pick(dipped)], 0.2 + Math.random() * 0.2, ctx, tally);
+      break;
+    }
+    case 20: {
+      // 돌파매매: 최고가에 근접한 종목을 사고, 최고가 대비 15% 빠지면 정리
+      const sell = held.find((n) => (byName[n].maxPrice - byName[n].price) / byName[n].maxPrice > 0.15);
+      if (sell) {
+        doSell(bot, sell, bot.h[sell], ctx, tally);
+        break;
+      }
+      const near = tradable.filter((s) => s.price >= s.maxPrice * 0.95);
+      const buy = pick(near);
+      if (buy) doBuy(bot, buy, 0.15 + Math.random() * 0.25, ctx, tally);
+      break;
+    }
+    case 21: {
+      // 신상털이: 시세 기록이 적은(갓 상장된) 종목 위주로 매수
+      const fresh = [...tradable].sort((a, b) => a.age - b.age).slice(0, 4);
+      const buy = pick(fresh);
+      if (buy) doBuy(bot, buy, 0.1 + Math.random() * 0.2, ctx, tally);
+      break;
+    }
+    case 22: {
+      // 시장추종: 시장 평균이 오르면 사고, 내리면 일부 정리
+      if (ctx.avgPct > 0) {
+        doBuy(bot, pick(tradable), 0.1 + Math.random() * 0.2, ctx, tally);
+      } else if (held.length) {
+        const sell = pick(held);
+        doSell(bot, sell, Math.ceil(bot.h[sell] / 2), ctx, tally);
+      }
+      break;
+    }
+    case 23: {
+      // 짝사랑: 본명 종목 하나를 정해 두고 계속 사 모아요 (폐지되면 새로 정함)
+      if (!bot.f || !byName[bot.f]) bot.f = pick(tradable)?.name;
+      if (bot.f && byName[bot.f]) doBuy(bot, byName[bot.f], 0.05 + Math.random() * 0.15, ctx, tally);
+      break;
+    }
+    case 24: {
+      // 펌프앤덤프: 평소엔 조용하다가 싼 종목에 몰빵, 오르면 전량 매도
+      const pumped = held.find((n) => byName[n].pct > 10 * bot.k);
+      if (pumped) {
+        doSell(bot, pumped, bot.h[pumped], ctx, tally);
+        break;
+      }
+      const cheap = [...tradable].sort((a, b) => a.price - b.price)[0];
+      if (cheap && held.length === 0) doBuy(bot, cheap, 0.8, ctx, tally);
+      break;
+    }
+    case 25: {
+      // 복권러: 폐지 위기 종목에 소액으로 한 방을 노려요
+      const lotto = pick(ctx.danger);
+      if (lotto) doBuy(bot, lotto, 0.03 + Math.random() * 0.05, ctx, tally);
+      break;
+    }
     default:
       break;
   }
@@ -336,12 +409,20 @@ export async function prepareCrowd(env) {
   const [docs, stocks] = await Promise.all([loadBots(env, total), listStocks(env)]);
   if (stocks.length === 0) return null;
 
-  const rows = stocks.map((s) => ({ name: s.name, price: s.price, pct: changeOf(s), maxPrice: s.maxPrice || s.price }));
+  const rows = stocks.map((s) => ({
+    name: s.name,
+    price: s.price,
+    pct: changeOf(s),
+    maxPrice: s.maxPrice || s.price,
+    age: getPriceHistory(s).length, // 시세 기록 수 (적을수록 신규 상장)
+  }));
   const byName = Object.fromEntries(rows.map((r) => [r.name, r]));
   const tradable = rows.filter((r) => r.price > DANGER_PRICE); // 폐지 위기 종목은 안 삼
   const ctx = {
     byName,
     tradable,
+    danger: rows.filter((r) => r.price <= DANGER_PRICE), // 폐지 위기 종목 (복권러용)
+    avgPct: rows.reduce((sum, r) => sum + r.pct, 0) / rows.length, // 시장 평균 변동률
     byUp: [...tradable].sort((a, b) => b.pct - a.pct),
     byDown: [...tradable].sort((a, b) => a.pct - b.pct),
   };
