@@ -14,6 +14,9 @@ const BOTS_PER_DOC = 1700; // 문서 1개당 봇 수 (5000명이면 문서 3개)
 const START_CASH = 1000; // 봇 시작/재지급 해정 (유저 시작 잔고와 동일)
 const ACT_RATE = 0.3; // 한 번 변동 때 행동하는 봇 비율 (성격별로 이 값에 배율을 곱해요)
 const IMPACT_CAP = 35; // 봇이 한 번에 줄 수 있는 최대 영향 (%p)
+// 한 종목을 "한 번 변동 때" 살 수 있는 봇의 최대 비율 (전체 봇 수 기준). 예: 0.03 이면 봇 5000명 중 150명까지.
+// 싼 종목에 봇이 우르르 몰리는 걸 막아줘요. 더 줄이려면 숫자를 낮추고(0.02), 풀려면 높여요(0.05). 0이면 제한 없음.
+const MAX_BUY_SHARE = 0.03;
 
 const docPath = (i) => `bots/crowd_${i + 1}`;
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
@@ -78,7 +81,7 @@ const PERSONALITY_NAMES = [
   "복권러",
 ];
 // 성격별 "행동 확률" 배율 (ACT_RATE에 곱해짐). 1보다 크면 더 자주, 작으면 덜 자주 움직여요.
-const ACT_RATE_MULT = [1, 1, 1, 0.25, 1.3, 1.4, 0.9, 1.2, 0.8, 0.8, 0.15, 0.4, 1, 1.6, 0.5, 0.7, 0.6, 0.1, 0.5, 0.8, 0.9, 0.9, 1.0, 0.7, 0.3, 0.6];
+const ACT_RATE_MULT = [1, 1, 1, 0.25, 1.3, 1.4, 0.9, 1.2, 0.8, 0.4, 0.15, 0.4, 1, 1.6, 0.5, 0.7, 0.6, 0.1, 0.5, 0.8, 0.9, 0.9, 1.0, 0.7, 0.3, 0.6];
 
 // 봇 1명: c=현금, h=보유 {종목: 수량}, s=성격, k=민감도(0.5~1.5, 임계값 배율), f=짝사랑 종목(선택)
 function makeBot() {
@@ -141,6 +144,7 @@ function doSell(bot, name, qty, ctx, tally) {
 // cashFraction 만큼의 현금으로 매수하고 tally에 기록
 function doBuy(bot, stock, cashFraction, ctx, tally) {
   if (!stock) return;
+  if (ctx.maxBuy > 0 && tally[stock.name].buy >= ctx.maxBuy) return; // 이 종목은 이번에 살 봇이 꽉 참
   const qty = Math.floor((bot.c * cashFraction) / stock.price);
   if (qty < 1) return;
   bot.c -= qty * stock.price;
@@ -244,8 +248,8 @@ function act(bot, ctx, tally) {
     }
     case 9: {
       // 저가싹쓸이: 추세 무관, 가장 싼 종목을 많이 매수
-      const cheap = pick([...tradable].sort((a, b) => a.price - b.price).slice(0, 5));
-      if (cheap) doBuy(bot, cheap, 0.2 + Math.random() * 0.3, ctx, tally);
+      const cheap = pick([...tradable].sort((a, b) => a.price - b.price).slice(0, 8));
+      if (cheap) doBuy(bot, cheap, 0.1 + Math.random() * 0.15, ctx, tally);
       break;
     }
     case 10: {
@@ -329,7 +333,7 @@ function act(bot, ctx, tally) {
       // 컬렉터: 안 가진 종목을 가격 안 가리고 1주씩이라도 모아요
       const notHeld = tradable.filter((s) => !bot.h[s.name] && s.price <= bot.c);
       const target = pick(notHeld);
-      if (target) {
+      if (target && !(ctx.maxBuy > 0 && tally[target.name].buy >= ctx.maxBuy)) {
         bot.c -= target.price;
         bot.h[target.name] = (bot.h[target.name] || 0) + 1;
         tally[target.name].buy++;
@@ -384,7 +388,7 @@ function act(bot, ctx, tally) {
         doSell(bot, pumped, bot.h[pumped], ctx, tally);
         break;
       }
-      const cheap = [...tradable].sort((a, b) => a.price - b.price)[0];
+      const cheap = pick([...tradable].sort((a, b) => a.price - b.price).slice(0, 5));
       if (cheap && held.length === 0) doBuy(bot, cheap, 0.8, ctx, tally);
       break;
     }
@@ -425,6 +429,7 @@ export async function prepareCrowd(env) {
     avgPct: rows.reduce((sum, r) => sum + r.pct, 0) / rows.length, // 시장 평균 변동률
     byUp: [...tradable].sort((a, b) => b.pct - a.pct),
     byDown: [...tradable].sort((a, b) => a.pct - b.pct),
+    maxBuy: Math.floor(total * MAX_BUY_SHARE), // 한 종목당 한 번에 살 수 있는 봇 수 (0이면 제한 없음)
   };
   const tally = Object.fromEntries(rows.map((r) => [r.name, { buy: 0, sell: 0 }]));
 
