@@ -21,10 +21,10 @@ const EPHEMERAL = 64;
 const SUPPRESS_NOTIFICATIONS = 4096;
 
 // 여기에 적은 명령어는 예외로 모두에게 공개돼요. (알림도 평소처럼 감) 예: new Set(["랭킹"])
-const PUBLIC_COMMANDS = new Set(["봇현황"]);
+const PUBLIC_COMMANDS = new Set([]);
 
 // 여기에 적은 명령어는 모두에게 공개되지만 "무음"이에요. (채널 사람들에게 알림이 안 가요)
-const SILENT_PUBLIC_COMMANDS = new Set(["그래프"]);
+const SILENT_PUBLIC_COMMANDS = new Set(["그래프", "봇현황"]);
 
 // 이 시간(ms) 안에 처리가 끝나면 바로 응답하고, 넘기면 "처리 중…"(지연 응답)으로 먼저 답한 뒤
 // 끝나는 대로 결과를 채워요. (디스코드는 3초 안에 첫 응답이 없으면 "응답하지 않았어요"를 띄워요)
