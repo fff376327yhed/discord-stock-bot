@@ -20,6 +20,9 @@ const EPHEMERAL = 64;
 // 응답을 "무음"(푸시 알림·소리 없음)으로 보내는 플래그
 const SUPPRESS_NOTIFICATIONS = 4096;
 
+// 멘션(<@유저ID>)이 글자로는 보이지만 알림은 보내지 않게 하는 설정 (랭킹처럼 멘션이 들어간 응답용)
+const NO_PING = { parse: [] };
+
 // 기본값은 "모두에게 보이지만 무음"이에요. 아래 두 목록은 예외로 쓰는 거예요.
 
 // 여기에 적은 명령어는 "나만 보기"로 보내요. 예: new Set(["잔고", "내역"])
@@ -46,6 +49,7 @@ function reply(content, mode = "silent") {
   const data = typeof content === "string" ? { content } : { ...content };
   const flags = flagsOf(mode);
   if (flags !== undefined) data.flags = flags;
+  data.allowed_mentions = NO_PING; // 메시지 안의 <@유저> 멘션이 실제 알림을 보내지 않게 함
   return Response.json({
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data,
@@ -54,6 +58,10 @@ function reply(content, mode = "silent") {
 
 // 지연 응답: 먼저 "처리 중…"을 띄움. 나만 보기/무음 여부는 이 첫 응답에서 정해지고, 나중에 바꿀 수 없어요.
 function deferReply(mode) {
+  // 디스코드의 "생각 중…" 지연 응답(type 5)은 무음 표시가 적용되지 않아요.
+  // 그래서 무음 명령어는 지연 응답 대신 "처리 중" 메시지를 무음으로 바로 보내고, 나중에 결과로 바꿔요.
+  if (mode === "silent") return reply("⏳ 처리 중이에요…", "silent");
+
   const flags = flagsOf(mode);
   return Response.json({
     type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
@@ -65,6 +73,8 @@ function deferReply(mode) {
 async function editOriginal(interaction, content) {
   const data = typeof content === "string" ? { content } : { ...content };
   delete data.flags; // 공개 방식은 첫 응답에서 이미 정해졌어요
+  data.allowed_mentions = NO_PING;
+  if (data.content === undefined) data.content = ""; // 임베드만 보낼 때 "처리 중" 글자를 지움
   const res = await fetch(
     `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`,
     {
