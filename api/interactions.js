@@ -23,13 +23,16 @@ const SUPPRESS_NOTIFICATIONS = 4096;
 // 멘션(<@유저ID>)이 글자로는 보이지만 알림은 보내지 않게 하는 설정 (랭킹처럼 멘션이 들어간 응답용)
 const NO_PING = { parse: [] };
 
-// 기본값은 "모두에게 보이지만 무음"이에요. 아래 두 목록은 예외로 쓰는 거예요.
+// 기본값은 "나만 보기"예요. 아래 목록들은 예외로 쓰는 거예요.
 
 // 여기에 적은 명령어는 "나만 보기"로 보내요. 예: new Set(["잔고", "내역"])
 const PRIVATE_COMMANDS = new Set([]);
 
 // 여기에 적은 명령어는 모두에게 공개 + 알림도 평소처럼 가요. 예: new Set(["랭킹"])
 const PUBLIC_COMMANDS = new Set([]);
+
+// 기본값은 "나만 보기"예요. 여기에 적은 명령어만 채널에 모두에게 보이게(무음) 보내요.
+const SILENT_COMMANDS = new Set(["랭킹", "그래프", "봇현황", "매수", "매도"]);
 
 // 이 시간(ms) 안에 처리가 끝나면 바로 응답하고, 넘기면 "처리 중…"(지연 응답)으로 먼저 답한 뒤
 // 끝나는 대로 결과를 채워요. (디스코드는 3초 안에 첫 응답이 없으면 "응답하지 않았어요"를 띄워요)
@@ -86,11 +89,11 @@ async function editOriginal(interaction, content) {
   if (!res.ok) console.error(`지연 응답 수정 실패(${res.status}):`, await res.text());
 }
 
-// 명령어 이름으로 공개 방식을 정해요. 기본값은 "무음 공개"예요.
+// 명령어 이름으로 공개 방식을 정해요. 기본값은 "나만 보기"예요.
 function modeOf(commandName) {
-  if (PRIVATE_COMMANDS.has(commandName)) return "private";
-  if (PUBLIC_COMMANDS.has(commandName)) return "public";
-  return "silent";
+  if (PUBLIC_COMMANDS.has(commandName)) return "public"; // 모두에게 공개 + 알림도 평소처럼
+  if (SILENT_COMMANDS.has(commandName)) return "silent"; // 모두에게 공개, 무음
+  return "private"; // 나머지는 나에게만 보임
 }
 
 async function handler(request) {
