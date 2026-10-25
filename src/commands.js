@@ -12,6 +12,7 @@ import {
   buyStock,
   sellStock,
   getRanking,
+  getAllHoldings,
   getUserDetail,
   listProducts,
   buyProduct,
@@ -90,6 +91,7 @@ export const commandDefinitions = [
       { name: "개수", description: "볼 종목 개수 (기본 10, 최대 20)", type: 4, required: false, autocomplete: true },
     ],
   },
+  { name: "보유종목", description: "유저들이 어떤 주식을 보유 중인지 모두에게 보여줍니다. (알림 없이 표시)" },
   { name: "잔고", description: "내 해정 잔고와 보유 종목을 봅니다." },
   { name: "내정보", description: "내 잔고, 보유 종목 평가액, 총자산, 순위를 한 번에 봅니다." },
   { name: "봇현황", description: "시장에 참여 중인 AI 봇의 평균 자산과 인기 종목을 봅니다." },
@@ -223,6 +225,9 @@ function formatKST(ms) {
 function formatKSTFull(ms) {
   return new Date(ms + 9 * 60 * 60 * 1000).toISOString().slice(0, 16).replace("T", " ");
 }
+
+// 상장일 표시 (기록이 없는 예전 종목은 "기록 없음")
+const listedText = (ms) => (Number.isFinite(ms) ? `\`${formatKSTFull(ms)}\`` : "기록 없음");
 
 function notifyStatusText(s, title) {
   const mark = (on) => (on ? "✅ 켜짐" : "❌ 꺼짐");
@@ -637,6 +642,11 @@ export const handlers = {
           {
             title: `🚫 ${d.name} 상장폐지`,
             description: [
+              `🗓️ 상장일: ${listedText(d.listedAt)}${
+                Number.isFinite(d.listedAt)
+                  ? ` · 생존 ${Math.max(0, Math.floor((d.delistedAt - d.listedAt) / 86400000))}일`
+                  : ""
+              }`,
               `폐지 시각: \`${formatKSTFull(d.delistedAt)}\` (한국시간)`,
               `${DOWN_MARK} 폐지된 변동: ${(d.lastPrice || 0).toLocaleString()} → ${(d.finalPrice || 0).toLocaleString()}해정 (**-${((d.lastPrice || 0) - (d.finalPrice || 0)).toLocaleString()}해정, -${d.dropPct}%**)`,
               `📉 역대 최고가 ${(d.maxPrice || 0).toLocaleString()}해정 대비 **-${d.peakDropPct}%**`,
@@ -708,6 +718,7 @@ export const handlers = {
         {
           title: `${name} 시세 그래프`,
           description: [
+            `🗓️ 상장일: ${listedText(stock.listedAt)} (한국시간)`,
             `${mark} 현재가 **${stock.price.toLocaleString()}해정**${dangerTag(stock.price) ? `${dangerTag(stock.price)} 상장폐지 위기` : ""}`,
             `구간 변동: ${mark} ${fmtSigned(diff)}해정 (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%) · ${formatKST(first.t)} 시작가 ${first.p.toLocaleString()}해정 대비`,
             `구간 최고 ${high.toLocaleString()} / 최저 ${low.toLocaleString()}해정`,
@@ -719,6 +730,31 @@ export const handlers = {
         },
       ],
     };
+  },
+
+  // 전체 유저의 보유 종목 (모두에게 보이는 무음 응답 — interactions.js의 SILENT_COMMANDS에 등록)
+  // 닉네임이 저장돼 있으면 닉네임, 없으면 멘션으로 표시해요. (멘션은 알림이 가지 않아요)
+  보유종목: async (_interaction, env) => {
+    const list = await getAllHoldings(env);
+    if (list.length === 0) return "보유 중인 종목이 있는 유저가 아직 없어요.";
+
+    let text = `**📦 유저별 보유 종목 (${list.length}명, 평가액 높은 순)**`;
+    let shown = 0;
+    for (const u of list) {
+      const who = u.username || `<@${u.id}>`;
+      const stocksText = u.holdings
+        .map((h) => `${h.name}${dangerTag(h.price)} ${h.qty.toLocaleString()}주`)
+        .join(", ");
+      const line = `• **${who}** — ${stocksText}`.slice(0, 500);
+      // 디스코드 메시지 한도(2000자) 보호
+      if (text.length + line.length + 1 > 1900) {
+        text += `\n…외 ${list.length - shown}명 생략`;
+        break;
+      }
+      text += `\n${line}`;
+      shown++;
+    }
+    return text;
   },
 
   잔고: async (interaction, env) => {

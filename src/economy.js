@@ -123,12 +123,16 @@ export async function upsertStock(env, name, price, known) {
   const keys = Object.keys(history).sort();
   while (keys.length > PRICE_HISTORY_POINTS) delete history[keys.shift()];
 
+  // 처음 만들어지는 종목일 때만 상장일(listedAt)을 기록 (기존 종목의 상장일은 건드리지 않음)
+  const isNew = !Number.isFinite(base.price);
+
   await setDoc(env, `stocks/${encodeURIComponent(name)}`, {
     name,
     price,
     maxPrice,
     history,
     updatedAt: new Date(),
+    ...(isNew ? { listedAt: Date.now() } : {}),
   });
 }
 
@@ -437,7 +441,7 @@ export async function getUserDetail(env, userId) {
 // info: { lastPrice: 폐지 직전 가격, finalPrice: 폐지를 일으킨 변동 후 가격, maxPrice: 역대 최고가, history: 시세 기록 맵 }
 // 반환값: 영향받은 유저 ID 목록 (알림 DM용)
 export async function delistStock(env, stockName, info) {
-  const { lastPrice, finalPrice, maxPrice, history } = info;
+  const { lastPrice, finalPrice, maxPrice, history, listedAt } = info;
   await removeStock(env, stockName);
 
   const users = await listCollection(env, "users");
@@ -488,6 +492,7 @@ export async function delistStock(env, stockName, info) {
     await setDoc(env, `delisted/${key}`, {
       name: stockName,
       delistedAt,
+      ...(Number.isFinite(listedAt) ? { listedAt } : {}), // 상장일 (기록이 있는 종목만)
       lastPrice,
       finalPrice,
       maxPrice: peak,
@@ -574,6 +579,7 @@ export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, cr
         finalPrice: newPrice,
         maxPrice,
         history: stock.history,
+        listedAt: stock.listedAt,
       });
       changes.push({ name: stock.name, before: stock.price, after: newPrice, pct, delisted: true, holders });
       continue;
@@ -593,4 +599,31 @@ export async function setNotify(env, userId, notify) {
   const user = await getUser(env, userId);
   user.notify = notify;
   await saveUser(env, userId, user);
+}
+
+// ---------- 전체 유저 보유 종목 (/보유종목 용) ----------
+// 보유 종목이 있는 유저만, 보유 평가액 높은 순으로 돌려줘요. 상장폐지된 종목은 제외.
+// [{ id, username, holdings: [{ name, qty, price, value }], total }]
+export async function getAllHoldings(env) {
+  const [users, stocks] = await Promise.all([
+    listCollection(env, "users"),
+    listCollection(env, "stocks"),
+  ]);
+  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+
+  return users
+    .map((u) => {
+      const holdings = Object.entries(u.holdings || {})
+        .filter(([name, qty]) => qty > 0 && priceMap[name] !== undefined)
+        .map(([name, qty]) => ({ name, qty, price: priceMap[name], value: priceMap[name] * qty }))
+        .sort((a, b) => compareKo(a.name, b.name));
+      return {
+        id: u.id,
+        username: u.username,
+        holdings,
+        total: holdings.reduce((sum, h) => sum + h.value, 0),
+      };
+    })
+    .filter((u) => u.holdings.length > 0)
+    .sort((a, b) => b.total - a.total);
 }

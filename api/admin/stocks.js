@@ -89,7 +89,11 @@ async function handler(request) {
         if (from === to) return json({ error: "새 이름이 기존 이름과 같습니다." }, 400);
         const exists = await getStock(env, to);
         if (exists) return json({ error: `"${to}" 종목이 이미 있습니다.` }, 400);
+        const old = await getStock(env, from); // 이름만 바꾸는 거라 상장일은 원래 종목 것을 이어받음
         await upsertStock(env, to, price);
+        if (old && Number.isFinite(old.listedAt)) {
+          await setDoc(env, `stocks/${encodeURIComponent(to)}`, { listedAt: old.listedAt });
+        }
         await removeStock(env, from);
         return json({ ok: true });
       }

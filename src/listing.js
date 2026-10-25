@@ -34,6 +34,7 @@ async function createStock(env, name, price) {
     name,
     price,
     maxPrice: price,
+    listedAt: Date.now(),
     history: { [String(Date.now()).padStart(13, "0")]: price },
     updatedAt: new Date(),
   });
