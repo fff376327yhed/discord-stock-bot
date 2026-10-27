@@ -13,6 +13,8 @@ import {
   setUserItem,
 } from "../../src/economy.js";
 import { listCollection, setDoc } from "../../src/firebase.js";
+import { DELIST_PRICE } from "../../src/economy.js";
+import { resetBots } from "../../src/crowd.js";
 import { getAttendanceConfig, setAttendanceConfig } from "../../src/attendance.js";
 import { getAnnounceConfig, setAnnounceConfig } from "../../src/notify.js";
 import { getListingConfig, setListingConfig, parseNames, ensureMinimumStocks, LISTING_PRICE } from "../../src/listing.js";
@@ -27,6 +29,13 @@ export default { fetch: handler };
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: CORS });
+}
+
+// 많은 문서를 고칠 때 20개씩 나눠서 처리해요 (한꺼번에 너무 많이 보내면 실패할 수 있어서)
+async function inChunks(list, fn, size = 20) {
+  for (let i = 0; i < list.length; i += size) {
+    await Promise.all(list.slice(i, i + size).map(fn));
+  }
 }
 
 function isAdminRequest(request, env) {
@@ -98,22 +107,78 @@ async function handler(request) {
         return json({ ok: true });
       }
 
-      // 모든 종목을 1000해정으로 초기화 (최고가·시세 기록도 1000해정에서 새로 시작)
+      // 모든 종목을 정한 가격(해정)으로 초기화 (최고가·시세 기록도 그 가격에서 새로 시작)
+      // price를 안 보내면 예전처럼 LISTING_PRICE(1000해정)로 해요.
       case "resetStocks": {
+        const price = body.price === undefined ? LISTING_PRICE : Number(body.price);
+        if (!Number.isInteger(price) || price <= DELIST_PRICE) {
+          return json({ error: `종목 가격은 ${DELIST_PRICE + 1} 이상의 정수여야 합니다. (${DELIST_PRICE}해정 이하는 바로 상장폐지돼요)` }, 400);
+        }
         const stocks = await listStocks(env);
         const at = String(Date.now()).padStart(13, "0");
-        await Promise.all(
-          stocks.map((s) =>
-            setDoc(env, `stocks/${encodeURIComponent(s.name)}`, {
-              name: s.name,
-              price: LISTING_PRICE,
-              maxPrice: LISTING_PRICE,
-              history: { [at]: LISTING_PRICE },
-              updatedAt: new Date(),
-            })
-          )
+        await inChunks(stocks, (s) =>
+          setDoc(env, `stocks/${encodeURIComponent(s.name)}`, {
+            name: s.name,
+            price,
+            maxPrice: price,
+            history: { [at]: price },
+            updatedAt: new Date(),
+          })
         );
-        return json({ ok: true, count: stocks.length, price: LISTING_PRICE });
+        return json({ ok: true, count: stocks.length, price });
+      }
+
+      // 모든 유저의 잔고를 정한 금액(해정)으로 초기화
+      case "resetBalances": {
+        const balance = Number(body.balance);
+        if (!Number.isInteger(balance) || balance < 0) {
+          return json({ error: "잔고는 0 이상의 정수여야 합니다." }, 400);
+        }
+        const users = await listCollection(env, "users");
+        await inChunks(users, (u) => setDoc(env, `users/${u.id}`, { balance }));
+        return json({ ok: true, count: users.length, balance });
+      }
+
+      // AI 봇 초기화: 현금을 정한 금액으로, 보유 종목은 비움 (newPersonality=true면 성격도 새로 뽑기)
+      // 봇은 users 컬렉션에 없어서 잔고 초기화와는 따로 해야 해요.
+      case "resetBots": {
+        const cash = Number(body.cash);
+        if (!Number.isInteger(cash) || cash < 100) {
+          return json({ error: "봇 현금은 100 이상의 정수여야 합니다. (100 미만이면 봇이 알아서 1000해정으로 다시 채워져요)" }, 400);
+        }
+        const result = await resetBots(env, cash, { newPersonality: body.newPersonality === true });
+        return json({ ok: true, ...result });
+      }
+
+      // 모든 유저의 보유 상품 수량을 정한 개수로 맞춤 (0이면 제거)
+      // name: 상품 이름 또는 "all"(전체 상품). all + 0 = 모든 보유 상품 비우기
+      case "resetItems": {
+        const name = String(body.name || "").trim();
+        const count = body.count === undefined ? 0 : Number(body.count);
+        if (!name) return json({ error: "상품을 골라주세요." }, 400);
+        if (!Number.isInteger(count) || count < 0) {
+          return json({ error: "수량은 0 이상의 정수여야 합니다." }, 400);
+        }
+        const users = await listCollection(env, "users");
+        let products = [];
+        if (name === "all" && count > 0) products = await listProducts(env);
+
+        let changed = 0;
+        await inChunks(users, async (u) => {
+          let items = { ...(u.items || {}) };
+          if (name === "all") {
+            if (count === 0) items = {};
+            else for (const p of products) items[p.name] = count;
+          } else if (count === 0) {
+            if (!(name in items)) return; // 원래 없던 유저는 건드리지 않음
+            delete items[name];
+          } else {
+            items[name] = count;
+          }
+          await setDoc(env, `users/${u.id}`, { items });
+          changed++;
+        });
+        return json({ ok: true, users: users.length, changed });
       }
 
       // ----- 상품 (가격 낮은 순) -----

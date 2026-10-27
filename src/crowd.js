@@ -500,3 +500,19 @@ export async function getCrowdStats(env) {
     ...(top.length ? top : ["(아직 없음)"]),
   ].join("\n");
 }
+
+// ---------- 관리자 콘솔: 봇 초기화 ----------
+// 모든 봇의 현금을 cash로 맞추고 보유 종목·짝사랑을 비워요.
+// newPersonality=true 면 성격·민감도도 새로 뽑고, false(기본)면 기존 성격은 그대로 둬요.
+// 반환: { count, cash }  (봇이 꺼져 있으면 count 0)
+export async function resetBots(env, cash = START_CASH, { newPersonality = false } = {}) {
+  const { total } = crowdConfig();
+  if (total <= 0) return { count: 0, cash };
+
+  const docs = await loadBots(env, total);
+  const next = docs.map((bots) =>
+    bots.map((b) => (newPersonality ? { ...makeBot(), c: cash } : { c: cash, h: {}, s: b.s, k: b.k }))
+  );
+  await saveBots(env, next);
+  return { count: total, cash };
+}
