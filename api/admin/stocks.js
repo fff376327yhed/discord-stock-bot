@@ -15,6 +15,7 @@ import {
 import { listCollection, setDoc, getDoc, deleteDoc } from "../../src/firebase.js";
 import { DELIST_PRICE } from "../../src/economy.js";
 import { resetBots } from "../../src/crowd.js";
+import { logAction, listLogs, purgeLogs } from "../../src/actionlog.js";
 import { getAttendanceConfig, setAttendanceConfig } from "../../src/attendance.js";
 import { getAnnounceConfig, setAnnounceConfig } from "../../src/notify.js";
 import { getListingConfig, setListingConfig, parseNames, ensureMinimumStocks, LISTING_PRICE } from "../../src/listing.js";
@@ -24,6 +25,34 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type, x-admin-password",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
+
+// 관리자 콘솔에서 한 작업(데이터를 바꾸는 것만)을 활동 로그에 남겨요.
+const ADMIN_LABELS = {
+  upsertStock: "종목 저장", removeStock: "종목 삭제", renameStock: "종목 이름 변경", resetStocks: "종목 가격 초기화",
+  upsertProduct: "상품 저장", removeProduct: "상품 삭제", renameProduct: "상품 이름 변경",
+  setBalance: "유저 잔고 수정", setUserItem: "유저 보유 상품 수정",
+  resetBalances: "잔고 초기화", resetBots: "봇 초기화", resetItems: "보유 상품 초기화",
+  setAttendance: "출석 설정", setAnnounce: "가격 변동 알림 설정", setListing: "자동 상장 설정",
+  setPassword: "관리자 비밀번호 변경", clearPassword: "관리자 비밀번호 되돌리기", purgeLogs: "오래된 로그 삭제",
+};
+
+async function handler(request) {
+  const copy = request.clone(); // 본문은 한 번만 읽을 수 있어서 복사본으로 기록용 내용을 읽어요
+  const response = await handle(request);
+  try {
+    const action = new URL(request.url).searchParams.get("action");
+    if (request.method === "POST" && response.status === 200 && ADMIN_LABELS[action]) {
+      const body = await copy.json().catch(() => ({}));
+      const safe = action === "setPassword" || action === "clearPassword" ? "" : JSON.stringify(body).slice(0, 200);
+      await logAction(env0(), { u: "admin", n: "관리자", cmd: ADMIN_LABELS[action], k: "관리자", a: safe, r: "성공" });
+    }
+  } catch (err) {
+    console.error("관리자 작업 로그 실패:", err.message);
+  }
+  return response;
+}
+
+const env0 = () => loadEnv();
 
 export default { fetch: handler };
 
@@ -87,7 +116,7 @@ async function isAdminRequest(request, env) {
   return safeEqual(given, env.ADMIN_PANEL_PASSWORD);
 }
 
-async function handler(request) {
+async function handle(request) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS });
   }
@@ -128,6 +157,20 @@ async function handler(request) {
       case "clearPassword": {
         await deleteDoc(env, AUTH_PATH);
         return json({ ok: true });
+      }
+
+      // ----- 활동 로그 -----
+      // 최근 days일(1~7)의 로그를 최신순으로
+      case "listLogs":
+        return json(await listLogs(env, url.searchParams.get("days")));
+
+      // keepDays일보다 오래된 로그 삭제
+      case "purgeLogs": {
+        const keepDays = Number(body.keepDays);
+        if (!Number.isInteger(keepDays) || keepDays < 1 || keepDays > 365) {
+          return json({ error: "보관 일수는 1~365 사이의 정수여야 합니다." }, 400);
+        }
+        return json({ ok: true, deleted: await purgeLogs(env, keepDays) });
       }
 
       // ----- 종목 (이름순) -----

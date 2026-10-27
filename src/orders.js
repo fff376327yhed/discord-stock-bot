@@ -1,6 +1,7 @@
 import { getDoc, setDoc, listCollection } from "./firebase.js";
 import { listStocks, buyStock, sellStock, addHistory } from "./economy.js";
 import { sendDM } from "./notify.js";
+import { logAction } from "./actionlog.js";
 
 // ---------- 예약 매수/매도 (지정가 주문) ----------
 // orders/{유저ID} 문서: { items: { [예약번호]: { stock, side, qty, price, at } } }
@@ -116,6 +117,7 @@ export async function processOrders(env) {
           if (h.gone) {
             summary.cancelled++;
             await addHistory(env, userId, `예약 취소: ${label} (상장폐지)`);
+            await logAction(env, { u: userId, cmd: "예약취소", a: label, r: "자동 취소: 상장폐지" });
             await safeDM(env, userId, `⚠️ **[예약 취소]** ${label} 예약이 취소됐어요.\n사유: 상장폐지된 종목이에요.`);
             continue;
           }
@@ -127,6 +129,12 @@ export async function processOrders(env) {
 
           if (result.ok) {
             summary.filled++;
+            await logAction(env, {
+              u: userId,
+              cmd: "예약체결",
+              a: label,
+              r: `예약가 ${h.o.price.toLocaleString()} → 체결가 ${h.price.toLocaleString()}해정`,
+            });
             const cond = h.o.side === "buy" ? "이하" : "이상";
             await safeDM(
               env,
@@ -140,6 +148,7 @@ export async function processOrders(env) {
           } else {
             summary.cancelled++;
             await addHistory(env, userId, `예약 취소: ${label} (${result.message.split("\n")[0]})`);
+            await logAction(env, { u: userId, cmd: "예약취소", a: label, r: `자동 취소: ${result.message.split("\n")[0]}`.slice(0, 160) });
             await safeDM(env, userId, `⚠️ **[예약 취소]** ${label} 예약이 조건에 도달했지만 체결하지 못했어요.\n사유: ${result.message}`);
           }
         } catch (err) {

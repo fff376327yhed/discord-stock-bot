@@ -3,6 +3,7 @@ import { waitUntil } from "@vercel/functions";
 import { handlers, autocomplete } from "../src/commands.js";
 import { loadEnv } from "../src/env.js";
 import { touchUsername } from "../src/economy.js";
+import { logAction, summarizeOptions, firstLine, VIEW_ONLY } from "../src/actionlog.js";
 
 // Node.js 런타임으로 동작 (Edge는 discord-interactions가 쓰는 Node crypto를 지원하지 않아 제외)
 // Node.js 런타임도 요청이 올 때만 실행되고 평소엔 대기 상태인 서버리스예요.
@@ -159,10 +160,34 @@ async function handler(request) {
     const work = (async () => {
       try {
         if (userId) await touchUsername(env, userId, displayName);
-        return { content: await handlerFn(interaction, env), mode };
+        const content = await handlerFn(interaction, env);
+        // 활동 로그 (응답을 늦추지 않게 뒤에서 저장)
+        if (userId && !VIEW_ONLY.has(commandName)) {
+          waitUntil(
+            logAction(env, {
+              u: userId,
+              n: displayName,
+              cmd: commandName,
+              a: summarizeOptions(interaction.data.options),
+              r: firstLine(content),
+            })
+          );
+        }
+        return { content, mode };
       } catch (err) {
         // 오류 메시지는 항상 나만 보이게
         console.error(`명령어 오류 (${commandName}):`, err.message);
+        if (userId) {
+          waitUntil(
+            logAction(env, {
+              u: userId,
+              n: displayName,
+              cmd: commandName,
+              a: summarizeOptions(interaction.data.options),
+              r: `오류: ${err.message}`.slice(0, 160),
+            })
+          );
+        }
         return { content: `오류가 발생했어요: ${err.message}`, mode: "private", failed: true };
       }
     })();
