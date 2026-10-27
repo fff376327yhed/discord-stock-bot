@@ -1135,6 +1135,7 @@ const collectionOf = (day) => `logs_${day}`;
 export const VIEW_ONLY = new Set([
   "도움말", "주식목록", "그래프", "상장폐지종류", "보유종목", "잔고", "내정보",
   "봇현황", "랭킹", "내역", "예약목록", "보유상품", "알림확인", "채굴정보", "주식상점",
+  "선물목록", "선물설명",
 ]);
 
 // 명령어 이름 -> 분류 (관리자 콘솔의 분류 선택칸에 그대로 나와요)
@@ -1142,6 +1143,8 @@ const CATEGORY = {
   매수: "매수",
   매도: "매도",
   구입: "상품구입",
+  선물: "선물",
+  선물청산: "선물",
   예약매수: "예약",
   예약매도: "예약",
   예약취소: "예약",
@@ -2556,6 +2559,224 @@ export async function processOrders(env) {
 }
 
 // ============================================================
+// [futures.js]
+// ============================================================
+// ---------- 주식 선물 (롱/숏 + 배율) ----------
+// 증거금을 걸고 종목이 오를지(롱) 내릴지(숏)에 배율을 곱해 베팅해요.
+//  - 평가금 = 증거금 + 증거금 × 배율 × 방향 × (현재가 - 진입가) / 진입가   (롱 +1, 숏 -1)
+//  - 평가금이 0이 되면 강제청산(증거금 전액 손실). 정산하면 평가금을 해정으로 돌려받아요.
+//  - 저장: futures/{유저ID} 문서의 items 맵 { 번호: { stock, side, margin, lev, entry, t } }
+export const MAX_FUTURES_PER_USER = 3;
+export const MIN_FUTURES_MARGIN = 100;
+export const FUTURES_LEVERAGES = [2, 3, 5];
+
+const futuresPath = (userId) => `futures/${userId}`;
+
+export async function getFutureItems(env, userId) {
+  const doc = await getDoc(env, futuresPath(userId));
+  return { ...((doc && doc.items) || {}) };
+}
+
+export async function saveFutureItems(env, userId, items) {
+  await setDoc(env, futuresPath(userId), { items });
+}
+
+// 오래된 포지션부터: [{ id, stock, side, margin, lev, entry, t }]
+export function futureList(items) {
+  return Object.entries(items)
+    .map(([id, f]) => ({ id, ...f }))
+    .sort((a, b) => (a.t || 0) - (b.t || 0));
+}
+
+function newFutureId(items) {
+  let id;
+  do {
+    id = Math.random().toString(36).slice(2, 6);
+  } while (!id || items[id]);
+  return id;
+}
+
+// 평가금 (0 아래로는 내려가지 않아요)
+export function futureEquity(f, price) {
+  const dir = f.side === "long" ? 1 : -1;
+  const pnl = (f.margin * f.lev * dir * (price - f.entry)) / f.entry;
+  return Math.max(0, Math.round(f.margin + pnl));
+}
+
+// 강제청산가: 롱은 이 가격 이하, 숏은 이 가격 이상이 되면 증거금을 전부 잃어요
+export function futureLiqPrice(f) {
+  return f.side === "long" ? Math.ceil(f.entry * (1 - 1 / f.lev)) : Math.floor(f.entry * (1 + 1 / f.lev));
+}
+
+const sideLabel = (side) => (side === "long" ? "롱" : "숏");
+
+// 예: **종목A** 📈 롱 x3 · 증거금 1,000해정 · 진입가 1,000해정
+export function futureText(f) {
+  return `**${f.stock}** ${f.side === "long" ? "📈" : "📉"} ${sideLabel(f.side)} x${f.lev} · 증거금 ${f.margin.toLocaleString()}해정 · 진입가 ${f.entry.toLocaleString()}해정`;
+}
+
+// 선물 시작
+export async function openFuture(env, userId, { stock: stockName, side, margin, lev }) {
+  if (side !== "long" && side !== "short") return { ok: false, message: "방향은 롱 또는 숏 중에서 골라 주세요." };
+  if (!FUTURES_LEVERAGES.includes(lev)) {
+    return { ok: false, message: `배율은 ${FUTURES_LEVERAGES.join(", ")}배 중에서 골라 주세요.` };
+  }
+  if (!Number.isSafeInteger(margin) || margin < MIN_FUTURES_MARGIN) {
+    return { ok: false, message: `증거금은 ${MIN_FUTURES_MARGIN.toLocaleString()}해정 이상 정수로 입력해 주세요.` };
+  }
+
+  const stock = await getStock(env, stockName);
+  if (!stock) return { ok: false, message: `"${stockName}" 종목을 찾을 수 없어요.` };
+
+  const items = await getFutureItems(env, userId);
+  if (Object.keys(items).length >= MAX_FUTURES_PER_USER) {
+    return { ok: false, message: `선물은 최대 ${MAX_FUTURES_PER_USER}개까지 열 수 있어요. \`/선물청산\`으로 먼저 정산해 주세요.` };
+  }
+
+  const user = await getUser(env, userId);
+  if (user.balance < margin) {
+    return { ok: false, message: `잔고가 부족해요. (필요: ${margin.toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정)` };
+  }
+
+  const balanceBefore = user.balance;
+  user.balance -= margin;
+  const id = newFutureId(items);
+  const f = { stock: stockName, side, margin, lev, entry: stock.price, t: Date.now() };
+  items[id] = f;
+
+  // 증거금 차감을 먼저 저장하고 포지션을 저장해요. 포지션 저장이 실패하면 증거금을 돌려줘요.
+  await saveUser(env, userId, user);
+  try {
+    await saveFutureItems(env, userId, items);
+  } catch (err) {
+    console.error(`선물 저장 실패 (${userId}):`, err.message);
+    user.balance += margin;
+    await saveUser(env, userId, user).catch(() => {});
+    return { ok: false, message: "선물을 여는 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
+  }
+
+  await addHistory(env, userId, `선물 시작: ${stockName} ${sideLabel(side)} x${lev} · 증거금 ${margin.toLocaleString()}해정 (진입가 ${f.entry.toLocaleString()})`);
+
+  const liq = futureLiqPrice(f);
+  return {
+    ok: true,
+    message: [
+      `${side === "long" ? "📈" : "📉"} **선물 시작!** ${stockName} ${sideLabel(side)} x${lev}`,
+      `- 증거금 ${margin.toLocaleString()}해정 · 진입가 ${f.entry.toLocaleString()}해정`,
+      `- 💥 강제청산가: ${liq.toLocaleString()}해정 ${side === "long" ? "이하" : "이상"} (증거금 전부 잃어요)`,
+      balanceLine(balanceBefore, user.balance),
+    ].join("\n"),
+  };
+}
+
+// 정산(청산): targets = 포지션 번호들 또는 ["all"]. 평가금을 해정으로 돌려받아요.
+export async function closeFutures(env, userId, targets) {
+  const [items, stocks] = await Promise.all([getFutureItems(env, userId), listStocks(env)]);
+  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const ids = targets.includes("all") ? Object.keys(items) : [...new Set(targets)].filter((t) => items[t]);
+  if (ids.length === 0) {
+    return { ok: false, message: "정산할 선물 포지션을 찾지 못했어요. 칸을 눌러 목록에서 골라 주세요." };
+  }
+
+  const user = await getUser(env, userId);
+  const balanceBefore = user.balance;
+  const lines = [];
+  const closed = [];
+  let payout = 0;
+  let pnlSum = 0;
+
+  for (const id of ids) {
+    const f = items[id];
+    const price = priceMap[f.stock] ?? f.entry; // 폐지돼서 남은 포지션이면 증거금 그대로 돌려줘요
+    const equity = futureEquity(f, price);
+    const pnl = equity - f.margin;
+    payout += equity;
+    pnlSum += pnl;
+    delete items[id];
+    lines.push(`- ${futureText(f)}\n  진입 ${f.entry.toLocaleString()} → 정산 ${price.toLocaleString()}해정 · ${profitLabel(pnl, f.margin)}`);
+    closed.push(`${f.stock} ${sideLabel(f.side)} x${f.lev} ${fmtSigned(pnl)}해정`);
+  }
+
+  // 포지션을 먼저 지워서 같은 포지션이 두 번 정산되지 않게 해요
+  await saveFutureItems(env, userId, items);
+  user.balance += payout;
+  user.realizedProfit = (user.realizedProfit || 0) + pnlSum;
+  await Promise.all([
+    saveUser(env, userId, user),
+    addHistory(env, userId, `선물 정산: ${closed.join(", ")} → 잔고 ${user.balance.toLocaleString()}해정`),
+  ]);
+
+  return {
+    ok: true,
+    message: [`**선물 ${ids.length}건 정산 완료**`, ...lines, balanceLine(balanceBefore, user.balance)].join("\n"),
+  };
+}
+
+// 시세 변동 직후에 호출: 증거금이 바닥난 포지션은 강제청산, 폐지된 종목은 폐지 가격으로 정산
+// 반환: { liquidated: 강제청산 수, settled: 폐지 정산 수 }
+export async function processFutures(env, changes = []) {
+  const [docs, stocks] = await Promise.all([listCollection(env, "futures"), listStocks(env)]);
+  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const delistedAfter = Object.fromEntries(changes.filter((c) => c.delisted).map((c) => [c.name, c.after]));
+  const summary = { liquidated: 0, settled: 0 };
+
+  await Promise.all(
+    docs.map(async (doc) => {
+      const userId = doc.id;
+      const hits = [];
+      for (const [id, f] of Object.entries(doc.items || {})) {
+        const gone = priceMap[f.stock] === undefined;
+        const price = priceMap[f.stock] ?? delistedAfter[f.stock] ?? f.entry;
+        const equity = futureEquity(f, price);
+        if (gone || equity <= 0) hits.push({ id, f, price, equity, gone });
+      }
+      if (hits.length === 0) return;
+
+      // 포지션을 먼저 지우고, 그 사이 유저가 직접 정산한 건은 건너뛰어요 (이중 지급 방지)
+      let live;
+      try {
+        const fresh = await getFutureItems(env, userId);
+        live = hits.filter((h) => fresh[h.id]);
+        for (const h of live) delete fresh[h.id];
+        await saveFutureItems(env, userId, fresh);
+      } catch (err) {
+        console.error(`선물 정리 실패 (${userId}):`, err.message);
+        return;
+      }
+      if (live.length === 0) return;
+
+      try {
+        const user = await getUser(env, userId);
+        const lines = [];
+        for (const h of live) {
+          const pnl = h.equity - h.f.margin;
+          user.balance += h.equity;
+          user.realizedProfit = (user.realizedProfit || 0) + pnl;
+          const label = `${h.f.stock} ${sideLabel(h.f.side)} x${h.f.lev}`;
+          if (h.gone) {
+            summary.settled++;
+            lines.push(`🏁 ${label} — 상장폐지로 ${h.price.toLocaleString()}해정에 정산 (${fmtSigned(pnl)}해정)`);
+          } else {
+            summary.liquidated++;
+            lines.push(`💥 ${label} — 시세가 ${h.price.toLocaleString()}해정이 되어 강제청산 (-${h.f.margin.toLocaleString()}해정)`);
+          }
+        }
+        await saveUser(env, userId, user);
+        await Promise.all([
+          addHistory(env, userId, `선물 자동 정산 ${live.length}건 → 잔고 ${user.balance.toLocaleString()}해정`),
+          logAction(env, { u: userId, cmd: "선물청산", a: `${live.length}건`, r: "자동 정산: 강제청산/상장폐지" }),
+          safeDM(env, userId, [`⚠️ **[선물 자동 정산]**`, ...lines].join("\n")),
+        ]);
+      } catch (err) {
+        console.error(`선물 정산 실패 (${userId}):`, err.message);
+      }
+    })
+  );
+
+  return summary;
+}
+
+// ============================================================
 // [commands.js]
 // ============================================================
 // ---- 1) Discord에 등록할 커맨드 정의 ----
@@ -2668,6 +2889,41 @@ export const commandDefinitions = [
       { name: "예약", description: "취소할 예약 (목록에서 선택, '전체 취소'도 가능)", type: 3, required: true, autocomplete: true },
     ]),
   },
+  {
+    name: "선물",
+    description: "주식 선물: 오를지(롱) 내릴지(숏)에 배율을 걸고 베팅합니다. (사용법은 /선물설명)",
+    options: [
+      { name: "종목", description: "베팅할 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+      {
+        name: "방향",
+        description: "오를 것 같으면 롱, 내릴 것 같으면 숏",
+        type: 3,
+        required: true,
+        choices: [
+          { name: "📈 롱 (오르면 이득)", value: "long" },
+          { name: "📉 숏 (내리면 이득)", value: "short" },
+        ],
+      },
+      { name: "증거금", description: "걸 해정 (최소 100, 잃어도 이만큼만 잃어요)", type: 4, required: true, autocomplete: true, min_value: 100 },
+      {
+        name: "배율",
+        description: "배율 (클수록 많이 벌고, 많이 잃어요)",
+        type: 4,
+        required: true,
+        choices: FUTURES_LEVERAGES.map((n) => ({ name: `${n}배`, value: n })),
+      },
+    ],
+  },
+  { name: "선물목록", description: "내 선물 포지션과 현재 손익을 봅니다." },
+  {
+    name: "선물청산",
+    description: "선물 포지션을 정산하고 해정을 받습니다. 포지션2~3으로 여러 건을 한 번에 정산해요.",
+    options: multi(
+      [{ name: "포지션", description: "정산할 포지션 (목록에서 선택, '전체 정산'도 가능)", type: 3, required: true, autocomplete: true }],
+      MAX_FUTURES_PER_USER
+    ),
+  },
+  { name: "선물설명", description: "선물이 뭔지, 어떻게 쓰는지 쉽게 알려줍니다." },
   { name: "주식상점", description: "구입할 수 있는 상품 목록을 모두에게 보여줍니다. (가격 낮은 순, 알림 없이 표시)" },
   {
     name: "구입",
@@ -3012,7 +3268,7 @@ export async function autocomplete(interaction, env) {
 
   // 같은 명령어의 다른 칸에 이미 고른 값은 목록에서 빼요 (그래프/삭제/시세설정/폐지 조회/예약취소)
   const taken = new Set();
-  if (["그래프", "종목삭제", "시세설정", "상장폐지종류", "예약취소"].includes(command)) {
+  if (["그래프", "종목삭제", "시세설정", "상장폐지종류", "예약취소", "선물청산"].includes(command)) {
     for (const o of interaction.data.options || []) {
       if (o.focused || o.name === focused.name) continue;
       if (o.name.replace(/\d+$/, "") === base) taken.add(String(o.value).trim());
@@ -3088,6 +3344,32 @@ export async function autocomplete(interaction, env) {
       })),
       keyword
     );
+  }
+
+  // ----- 선물청산: 내 선물 포지션 (현재 손익 표시) -----
+  if (base === "포지션") {
+    const userId = interaction.member?.user?.id;
+    const [items, stocks] = await Promise.all([userId ? getFutureItems(env, userId) : {}, listStocks(env)]);
+    const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+    const list = futureList(items).map((f) => {
+      const price = priceMap[f.stock];
+      const pnlText = price === undefined ? "상장폐지" : profitLabel(futureEquity(f, price) - f.margin, f.margin, true);
+      return { label: `[${f.id}] ${f.stock} ${sideLabel(f.side)} x${f.lev} · ${pnlText}`, value: f.id };
+    });
+    const left = pickable(list);
+    if (left.length > 1 && taken.size === 0) left.push({ label: "전체 정산", value: "all" }); // 전체 정산은 첫 칸에서만
+    return textChoices(left, keyword);
+  }
+
+  // ----- 선물 증거금 예시 -----
+  if (base === "증거금") {
+    const userId = interaction.member?.user?.id;
+    const user = userId ? await getUser(env, userId) : { balance: 0 };
+    const list = [100, 500, 1000, 5000, 10000]
+      .filter((n) => n <= user.balance)
+      .map((n) => ({ label: `${n.toLocaleString()}해정`, value: n }));
+    if (user.balance >= MIN_FUTURES_MARGIN) list.push({ label: `전액 ${user.balance.toLocaleString()}해정`, value: user.balance });
+    return numberChoices(list, keyword);
   }
 
   // ----- 예약취소: 내 예약 목록 -----
@@ -3270,6 +3552,35 @@ async function stockChart(env, name) {
 }
 
 // ---- 4) 커맨드별 핸들러: (interaction, env) => Promise<string> ----
+// /선물설명: 처음 보는 사람도 바로 이해하도록 짧게
+function futuresHelpText() {
+  return [
+    "**📈 주식 선물 사용법**",
+    "\"이 주식이 오를까, 내릴까?\"를 **배율**을 걸고 맞히는 게임이에요.",
+    "`/선물 종목 방향 증거금 배율` 칸 4개만 채우면 시작!",
+    "",
+    "**용어는 3개만 알면 돼요**",
+    "- 📈 **롱**: 오르면 이득, 내리면 손해",
+    "- 📉 **숏**: 내리면 이득, 오르면 손해",
+    "- **증거금**: 걸어두는 해정이에요. 잃어도 이만큼만 잃어요",
+    "",
+    "**예시** — 증거금 1,000해정 · 롱 · 3배",
+    "- 가격 +10% → 🔺 +300해정 (3배라서 +30%)",
+    "- 가격 -10% → 🔽 -300해정",
+    "- 가격 약 -33% → 💥 강제청산 (증거금 전부 잃어요)",
+    "",
+    "**명령어**",
+    "`/선물` 시작 · `/선물목록` 내 손익 보기 · `/선물청산` 정산하고 해정 받기",
+    "",
+    "**꼭 알아두세요**",
+    "- 시세는 15분마다 크게 움직여요. 배율이 높을수록 한 번에 강제청산되기 쉬워요",
+    "- 급등락 시간(18시/21시/0시)에는 변동이 훨씬 커서 더 위험해요",
+    "- 강제청산은 시세가 바뀔 때 자동으로 돼요. 시작할 때 강제청산가를 알려줘요",
+    "- 상장폐지되면 폐지 가격으로 자동 정산돼요",
+    `- 최대 ${MAX_FUTURES_PER_USER}개까지 열 수 있고, 증거금은 ${MIN_FUTURES_MARGIN}해정부터예요`,
+  ].join("\n");
+}
+
 export const handlers = {
   도움말: async () => helpText(),
 
@@ -3580,6 +3891,49 @@ export const handlers = {
       ...(missing.length ? [`(찾지 못한 예약: ${missing.map((m) => `\`${m}\``).join(", ")})`] : []),
     ].join("\n");
   },
+
+  선물: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const result = await openFuture(env, userId, {
+      stock: String(opt(interaction, "종목") ?? "").trim(),
+      side: opt(interaction, "방향"),
+      margin: opt(interaction, "증거금"),
+      lev: opt(interaction, "배율"),
+    });
+    return result.message;
+  },
+
+  선물목록: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const [items, stocks] = await Promise.all([getFutureItems(env, userId), listStocks(env)]);
+    const list = futureList(items);
+    if (list.length === 0) return "열어둔 선물이 없어요. `/선물`로 시작하거나 `/선물설명`을 읽어 보세요.";
+    const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+    return [
+      `**📊 내 선물 (${list.length}/${MAX_FUTURES_PER_USER}개)**`,
+      ...list.map((f) => {
+        const price = priceMap[f.stock];
+        if (price === undefined) return `\`${f.id}\` ${futureText(f)}\n  상장폐지`;
+        const equity = futureEquity(f, price);
+        return [
+          `\`${f.id}\` ${futureText(f)}`,
+          `  현재가 ${price.toLocaleString()}해정 · 평가금 ${equity.toLocaleString()}해정 · ${profitLabel(equity - f.margin, f.margin)}`,
+          `  💥 강제청산가 ${futureLiqPrice(f).toLocaleString()}해정 ${f.side === "long" ? "이하" : "이상"}`,
+        ].join("\n");
+      }),
+    ].join("\n");
+  },
+
+  선물청산: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const { slots, error } = readSlots(interaction, "포지션");
+    if (error) return error;
+    const targets = slots.map((s) => s.name);
+    if (!targets.length) return "정산할 포지션을 골라 주세요.";
+    return (await closeFutures(env, userId, targets)).message;
+  },
+
+  선물설명: async () => futuresHelpText(),
 
   // 가격 낮은 순 (listProducts가 정렬해서 줌)
   // 모두에게 보이는 무음 응답 (interactions.js의 SILENT_COMMANDS에 "주식상점" 등록)
