@@ -2834,8 +2834,17 @@ const bankRatePath = "config/bankRate";
 export async function getBankRate(env) {
   const doc = await getDoc(env, bankRatePath);
   if (doc?.index) return doc;
-  // 아직 한 번도 안 돌았으면 배율 1.0(=기존 고정금리)으로 초기화
-  return { mult: 1, depositRate: DEPOSIT_RATE, loanRates: { ...LOAN_TERMS }, index: 1, indexAt: Date.now() };
+  // 아직 한 번도 안 돌았으면 배율 1.0(=기존 고정금리)으로 초기화하고 "저장"해요.
+  // (저장하지 않으면 indexAt이 매번 지금 시각으로 바뀌어서 예금 이자가 쌓이지 않아요)
+  const init = { mult: 1, depositRate: DEPOSIT_RATE, loanRates: { ...LOAN_TERMS }, index: 1, indexAt: Date.now() };
+  await setDoc(env, bankRatePath, init);
+  return init;
+}
+
+// 지금 시각의 누적 예금 지수 = 마지막 금리 변경 때까지의 index × 그 이후 현재 금리로 쌓인 만큼
+function indexNow(rate, now) {
+  const days = Math.max(0, now - rate.indexAt) / DAY_MS;
+  return rate.index * (1 + rate.depositRate * days);
 }
 
 function randomMult() {
@@ -2947,9 +2956,10 @@ function creditLine(bank) {
 }
 
 export async function getBank(env, userId) {
-  const doc = await getDoc(env, bankPath(userId));
-  const bank = { deposit: 0, depositAt: 0, earned: 0, loans: {}, credit: { score: CREDIT_START, onTime: 0, late: 0 }, ...(doc || {}) };
+  const [doc, rate] = await Promise.all([getDoc(env, bankPath(userId)), getBankRate(env)]);
+  const bank = { deposit: 0, depositAt: 0, depositIndex: 0, earned: 0, loans: {}, credit: { score: CREDIT_START, onTime: 0, late: 0 }, ...(doc || {}) };
   if (!bank.loans) bank.loans = {};
+  bank.rate = rate; // accrueBank이 예금 이자를 계산할 때 써요 (DB에는 저장 안 됨)
   return bank;
 }
 
@@ -2957,6 +2967,7 @@ async function saveBank(env, userId, bank) {
   await setDoc(env, bankPath(userId), {
     deposit: bank.deposit,
     depositAt: bank.depositAt,
+    depositIndex: Number.isFinite(bank.depositIndex) ? bank.depositIndex : 0,
     earned: bank.earned || 0,
     loans: bank.loans,
     credit: bank.credit || { score: CREDIT_START, onTime: 0, late: 0 },
@@ -2976,11 +2987,20 @@ function accrueLoan(loan, now) {
 
 // 예금 이자 + 모든 대출 이자를 now까지 계산 (bank를 직접 바꿔요. 조회만 할 때는 복사본을 넘기세요)
 function accrueBank(bank, now) {
-  if (bank.deposit > 0 && bank.depositAt && now > bank.depositAt) {
-    const gain = (bank.deposit * DEPOSIT_RATE * (now - bank.depositAt)) / DAY_MS;
+  const idx = indexNow(bank.rate, now);
+  if (bank.deposit > 0) {
+    let gain = 0;
+    if (Number.isFinite(bank.depositIndex) && bank.depositIndex > 0) {
+      // 새 방식: 마지막 정산 때의 지수 대비 지금 지수의 비율만큼 불어나요 (구간별 금리가 전부 반영됨)
+      gain = bank.deposit * Math.max(0, idx / bank.depositIndex - 1);
+    } else if (bank.depositAt && now > bank.depositAt) {
+      // 마이그레이션: depositIndex가 없는 예전 계정은 지금까지를 예전 고정금리로 정산해요 (딱 한 번)
+      gain = (bank.deposit * DEPOSIT_RATE * (now - bank.depositAt)) / DAY_MS;
+    }
     bank.deposit += gain;
     bank.earned = (bank.earned || 0) + gain;
   }
+  bank.depositIndex = idx; // 예금이 0원이어도 기록해서, 새로 맡길 때 그 시점부터 계산되게 해요
   bank.depositAt = now;
   for (const loan of Object.values(bank.loans)) accrueLoan(loan, now);
   return bank;
@@ -3033,11 +3053,11 @@ function loanLimitOf(net, bank) {
 
 // 랭킹/총자산용: 예금 + 선물 평가금 - 대출. { 유저ID: 해정 }
 export async function extraAssets(env, priceMap) {
-  const [banks, futs] = await Promise.all([listCollection(env, "bank"), listCollection(env, "futures")]);
+  const [banks, futs, rate] = await Promise.all([listCollection(env, "bank"), listCollection(env, "futures"), getBankRate(env)]);
   const now = Date.now();
   const extra = {};
   for (const b of banks) {
-    const bank = accrueBank({ deposit: b.deposit || 0, depositAt: b.depositAt || 0, earned: 0, loans: structuredClone(b.loans || {}) }, now);
+    const bank = accrueBank({ deposit: b.deposit || 0, depositAt: b.depositAt || 0, depositIndex: b.depositIndex || 0, earned: 0, loans: structuredClone(b.loans || {}), rate }, now);
     const debt = Object.values(bank.loans).reduce((sum, l) => sum + loanOwed(l), 0);
     extra[b.id] = (extra[b.id] || 0) + depositOf(bank) - debt;
   }
