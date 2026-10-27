@@ -2870,12 +2870,46 @@ export async function rollBankRate(env) {
 
   const next = { mult, depositRate, loanRates, index, indexAt: now };
   await setDoc(env, bankRatePath, next);
+
+  // 주식채널에 무음 한 줄 공지 (실패해도 금리 변경 자체는 그대로)
+  if (BANK_RATE_ANNOUNCE && env.ALLOWED_CHANNEL_ID && env.DISCORD_BOT_TOKEN) {
+    try {
+      const arrow = mult > prev.mult ? "📈" : mult < prev.mult ? "📉" : "➖";
+      await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, {
+        content:
+          `🏦 **은행 금리 변경** ${arrow} 시장금리 ×${prev.mult ?? 1} → ×${mult}\n` +
+          `예금 일 ${pctText(depositRate)} · 대출 ${loanRatesText(next)} (신용등급 B 기준)`,
+        flags: 4096,
+        allowed_mentions: { parse: [] },
+      });
+    } catch (err) {
+      console.error("은행 금리 공지 실패:", err.message);
+    }
+  }
   return next;
 }
 
 const bankPath = (userId) => `bank/${userId}`;
 const pctText = (r) => `${+(r * 100).toFixed(2)}%`;
 const unixOf = (ms) => Math.floor(ms / 1000);
+
+// ---------- 시장금리 표시용 도우미 ----------
+const BANK_RATE_ANNOUNCE = true; // false로 바꾸면 금리 변경 공지를 안 올려요
+// 대출 이자율(일): 시장금리 × 신용등급 배율, 단 하한(LOAN_RATE_FLOOR) 아래로는 안 내려가요 (takeLoan과 같은 계산)
+const loanRateOf = (base, mul = 1) => +Math.max(base * mul, LOAN_RATE_FLOOR).toFixed(4);
+// 다음 금리 변경 시각 = 다음 정각 (크론이 매시 정각에 돌아요)
+const nextRateChangeMs = (now) => Math.ceil((now + 1) / BANK_HOUR_MS) * BANK_HOUR_MS;
+const nextChangeText = (now) => `<t:${unixOf(nextRateChangeMs(now))}:t> (<t:${unixOf(nextRateChangeMs(now))}:R>)`;
+function loanRatesText(rate, mul = 1) {
+  return Object.keys(LOAN_TERMS)
+    .map((d) => `${d}일 ${pctText(loanRateOf(rate?.loanRates?.[d] ?? LOAN_TERMS[d], mul))}`)
+    .join(" / ");
+}
+// 한 줄 요약: 현재 시장금리 (배율 · 예금 · 대출 3종 · 다음 변경)
+function marketRateLine(rate, now, mul = 1) {
+  const depositRate = rate?.depositRate ?? DEPOSIT_RATE;
+  return `🏦 **현재 시장금리** ×${rate?.mult ?? 1} · 예금 일 ${pctText(depositRate)} · 대출 ${loanRatesText(rate, mul)} · 다음 변경 ${nextChangeText(now)}`;
+}
 // 디스코드가 알아서 "3일 뒤"처럼 실시간으로 바꿔 보여주는 시각 표시
 const dueText = (ms) => `<t:${unixOf(ms)}:f> (<t:${unixOf(ms)}:R>)`;
 const depositOf = (bank) => Math.floor(bank.deposit + 1e-9);
@@ -3114,7 +3148,9 @@ export async function depositMoney(env, userId, amount) {
     message: [
       `🏦 **예금 완료** +${amount.toLocaleString()}해정`,
       balanceLine(balanceBefore, user.balance),
-      `🐷 예금 총액: **${depositOf(bank).toLocaleString()}해정** (일 ${pctText(DEPOSIT_RATE)} · 하루에 약 +${Math.floor(bank.deposit * DEPOSIT_RATE).toLocaleString()}해정)`,
+      `🐷 예금 총액: **${depositOf(bank).toLocaleString()}해정** (지금 일 ${pctText(bank.rate.depositRate)} · 이 금리가 이어지면 하루 약 +${Math.floor(bank.deposit * bank.rate.depositRate).toLocaleString()}해정)`,
+      marketRateLine(bank.rate, Date.now()),
+      "- 예금 금리는 매시 정각에 바뀌고, 이자는 바뀐 금리대로 구간마다 쌓여요.",
     ].join("\n"),
   };
 }
@@ -3296,7 +3332,7 @@ export async function bankStatus(env, userId) {
   const limit = loanLimitOf(net, bank);
 
   const lines = ["**🏦 내 은행 현황** (지금 이 순간 기준, 이자는 계속 쌓여요)", ""];
-  lines.push(`🐷 **예금**: ${deposit.toLocaleString()}해정 (일 ${pctText(DEPOSIT_RATE)} · 지금까지 받은 이자 +${Math.floor(bank.earned || 0).toLocaleString()}해정)`);
+  lines.push(`🐷 **예금**: ${deposit.toLocaleString()}해정 (지금 일 ${pctText(bank.rate.depositRate)} · 지금까지 받은 이자 +${Math.floor(bank.earned || 0).toLocaleString()}해정)`);
 
   const loans = loansByDue(bank);
   if (loans.length === 0) {
@@ -3315,6 +3351,7 @@ export async function bankStatus(env, userId) {
   }
   lines.push("", `📋 **대출 한도**: 남은 ${limit.available.toLocaleString()}해정 / 전체 ${limit.total.toLocaleString()}해정 (순자산 ${net.toLocaleString()}해정의 ${Math.round(limit.ratio * 100)}%, 최소 ${LOAN_LIMIT_MIN.toLocaleString()})`);
   lines.push(creditLine(bank));
+  lines.push(marketRateLine(bank.rate, now, creditGrade(bank.credit).rateMul) + " (내 신용등급 배율 적용)");
   return lines.join("\n");
 }
 
@@ -4150,10 +4187,11 @@ export const commandDefinitions = [
       { name: "금액", description: "빌릴 해정 (칸을 누르면 한도 안의 예시가 떠요)", type: 4, required: true, autocomplete: true, min_value: LOAN_MIN },
       {
         name: "기간",
-        description: "갚을 기간 (길수록 하루 이자는 낮아요)",
+        description: "갚을 기간 (칸을 누르면 지금 시장금리가 떠요. 이자율은 빌린 순간에 고정돼요)",
         type: 4,
         required: true,
-        choices: Object.entries(LOAN_TERMS).map(([d, r]) => ({ name: `${d}일 (이자 하루 ${+(r * 100).toFixed(2)}%)`, value: Number(d) })),
+        autocomplete: true, // 금리가 매시 바뀌어서, 이름에 금리를 박아두지 않고 누를 때마다 실시간으로 보여줘요
+        min_value: 1,
       },
     ],
   },
@@ -4673,6 +4711,17 @@ export async function autocomplete(interaction, env) {
       return numberChoices(list, keyword);
     }
 
+    // 대출 기간: 지금 시장금리 × 내 신용등급 배율 (빌리는 순간 이 이자율로 고정돼요)
+    if (focused.name === "기간") {
+      const bank = await getBank(env, userId);
+      const grade = creditGrade(bank.credit);
+      const choices = Object.keys(LOAN_TERMS).map((d) => ({
+        name: `${d}일 (지금 이자 하루 ${pctText(loanRateOf(bank.rate?.loanRates?.[d] ?? LOAN_TERMS[d], grade.rateMul))} · 시장금리 ×${bank.rate?.mult ?? 1})`,
+        value: Number(d),
+      }));
+      return choices.filter((c) => !keyword || String(c.value).startsWith(keyword));
+    }
+
     // 대출: 남은 한도 안의 예시
     const [user, bank0, stocks] = await Promise.all([getUser(env, userId), getBank(env, userId), listStocks(env)]);
     const bank = accrueBank(bank0, now);
@@ -4921,27 +4970,31 @@ function futuresHelpText() {
 }
 
 // /은행설명: 처음 보는 사람도 바로 이해하도록 짧게
-function bankHelpText() {
-  const terms = Object.entries(LOAN_TERMS)
-    .map(([d, r]) => `${d}일(하루 ${pctText(r)})`)
-    .join(" / ");
+function bankHelpText(rate) {
+  const now = Date.now();
+  const depositRate = rate?.depositRate ?? DEPOSIT_RATE;
+  const rate3 = loanRateOf(rate?.loanRates?.[3] ?? LOAN_TERMS[3]);
   return [
     "**🏦 해정 은행 사용법**",
     "맡기면 **이자를 받고**, 빌리면 **이자를 내요.** 이자는 시간이 흐르는 대로 실시간으로 쌓여요.",
     "",
-    "**🐷 예금** — 하루 " + pctText(DEPOSIT_RATE),
+    marketRateLine(rate, now),
+    `금리는 **매시 정각**에 랜덤으로 바뀌어요 (배율 ×${MARKET_RATE_MIN_MULT}~×${MARKET_RATE_MAX_MULT}). 예금 하루 ${pctText(DEPOSIT_RATE * MARKET_RATE_MIN_MULT)}~${pctText(DEPOSIT_RATE * MARKET_RATE_MAX_MULT)}, 대출은 하루 ${pctText(LOAN_RATE_FLOOR)} 밑으로는 안 내려가요.`,
+    "",
+    "**🐷 예금** — 지금 하루 " + pctText(depositRate) + " (이자는 바뀐 금리대로 구간마다 쌓여요)",
     "`/예금 금액` 맡기기 · `/출금` 찾기 (금액을 안 적으면 전액)",
     "",
     "**💸 대출**",
-    "`/대출 금액 기간` — 기간: " + terms,
+    "`/대출 금액 기간` — 기간: 1일 / 3일 / 7일 (지금 이자율은 기간 칸을 누르면 보여요)",
+    "- 이자율은 **빌린 순간의 시장금리**로 정해지고, **만기까지 안 바뀌어요** (신용등급 배율도 그때 기준)",
     "- 이자는 빌린 순간부터 시간 단위로 계속 쌓여요",
     "- 일찍 갚으면 **그때까지 쌓인 이자만** 내요",
     `- 한도: 내 순자산(해정+주식+예금+선물-빚)의 ${LOAN_LIMIT_RATIO * 100}%(신용등급에 따라 달라져요), 최소 ${LOAN_LIMIT_MIN.toLocaleString()}해정`,
     `- 동시에 최대 ${MAX_LOANS_PER_USER}건`,
     "",
-    "**예시** 1,000해정을 3일로 빌리면?",
-    "- 하루 " + pctText(LOAN_TERMS[3]) + " → 3일 꽉 채우면 이자 약 " + Math.round(1000 * LOAN_TERMS[3] * 3) + "해정",
-    "- 1일 만에 갚으면 이자 약 " + Math.round(1000 * LOAN_TERMS[3]) + "해정",
+    "**예시** 지금 1,000해정을 3일로 빌리면? (신용등급 B 기준)",
+    "- 하루 " + pctText(rate3) + " → 3일 꽉 채우면 이자 약 " + Math.round(1000 * rate3 * 3) + "해정",
+    "- 1일 만에 갚으면 이자 약 " + Math.round(1000 * rate3) + "해정",
     "",
     "**💳 상환**",
     "`/상환 대출 금액` — 금액을 안 적으면 전액. 일부만 갚아도 돼요 (이자 먼저, 그다음 원금)",
@@ -5346,7 +5399,7 @@ export const handlers = {
 
   공시목록: async (_interaction, env) => newsListText(env),
 
-  은행설명: async () => bankHelpText(),
+  은행설명: async (interaction, env) => bankHelpText(await getBankRate(env)),
 
   예금: async (interaction, env) => (await depositMoney(env, interaction.member.user.id, opt(interaction, "금액"))).message,
 
