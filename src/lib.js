@@ -2828,6 +2828,9 @@ const BANK_HOUR_MS = 60 * 60 * 1000;
 //  - 저장: config/bankRate = { mult, depositRate, loanRates, index, indexAt }
 export const MARKET_RATE_MIN_MULT = 0.2;
 export const MARKET_RATE_MAX_MULT = 2.0;
+// 대출 금리 하한(일): 예금이 가장 높을 때(0.5% × 2.0배 = 1.0%)보다 항상 비싸게 해서
+// "싸게 빌려서 예금" 차익거래를 막아요. 신용등급 배율까지 곱한 뒤에도 이 아래로는 안 내려가요.
+export const LOAN_RATE_FLOOR = +(DEPOSIT_RATE * MARKET_RATE_MAX_MULT * 1.2).toFixed(4); // 일 1.2%
 
 const bankRatePath = "config/bankRate";
 
@@ -3154,17 +3157,22 @@ export async function withdrawMoney(env, userId, amount) {
 
 // ---------- 대출 ----------
 export async function takeLoan(env, userId, amount, termDays) {
-  const baseRate = LOAN_TERMS[termDays];
-  if (baseRate === undefined) return { ok: false, message: `기간은 ${Object.keys(LOAN_TERMS).join(", ")}일 중에서 골라 주세요.` };
+  if (LOAN_TERMS[termDays] === undefined) return { ok: false, message: `기간은 ${Object.keys(LOAN_TERMS).join(", ")}일 중에서 골라 주세요.` };
   if (!Number.isSafeInteger(amount) || amount < LOAN_MIN) {
     return { ok: false, message: `대출은 ${LOAN_MIN.toLocaleString()}해정 이상 정수로 신청해 주세요.` };
   }
 
   const now = Date.now();
-  const [user, bank0, stocks] = await Promise.all([getUser(env, userId), getBank(env, userId), listStocks(env)]);
+  const [user, bank0, stocks, market] = await Promise.all([
+    getUser(env, userId), getBank(env, userId), listStocks(env), getBankRate(env),
+  ]);
   const bank = accrueBank(bank0, now);
   const grade = creditGrade(bank.credit);
-  const rate = +(baseRate * grade.rateMul).toFixed(4); // 신용등급이 좋을수록 싸고, 나쁠수록 비싸요
+  // 신청한 "지금" 시장금리를 기준으로 삼아요. (금리 정보가 없으면 예전 고정금리로 대신)
+  const baseRate = market?.loanRates?.[termDays] ?? LOAN_TERMS[termDays];
+  const marketMult = market?.mult ?? 1;
+  // 신용등급이 좋을수록 싸고, 나쁠수록 비싸요. 단, 하한(LOAN_RATE_FLOOR) 밑으로는 안 내려가요.
+  const rate = +Math.max(baseRate * grade.rateMul, LOAN_RATE_FLOOR).toFixed(4);
 
   if (Object.values(bank.loans).some((l) => isOverdue(l, now))) {
     return { ok: false, message: "🚨 연체 중인 대출이 있어서 새로 빌릴 수 없어요. `/상환`으로 먼저 갚아 주세요." };
@@ -3207,7 +3215,7 @@ export async function takeLoan(env, userId, amount, termDays) {
       `💸 **대출 실행!** \`${id}\` ${amount.toLocaleString()}해정 (${termDays}일)`,
       balanceLine(balanceBefore, user.balance),
       `- 이자: 하루 ${pctText(rate)} (${termDays}일 꽉 채우면 약 ${expected.toLocaleString()}해정, 시간 단위로 계속 쌓여요)`,
-      `- 💳 신용등급 ${grade.name}: 기본 이자의 ×${grade.rateMul}가 적용됐어요`,
+      `- 🏦 신청 시점 시장금리 ×${marketMult} · 💳 신용등급 ${grade.name} ×${grade.rateMul} → 이 이자율은 만기까지 **고정**이에요 (이후 시장금리가 바뀌어도 그대로)`,
       `- 📅 갚을 날: ${dueText(due)}`,
       `- 일찍 갚으면 그때까지 쌓인 이자만 내요. 만기가 지나면 하루 ${pctText(rate + LOAN_PENALTY_RATE)}로 연체 이자가 붙어요.`,
     ].join("\n"),
