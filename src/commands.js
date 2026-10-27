@@ -145,12 +145,13 @@ export const commandDefinitions = [
       { name: "예약", description: "취소할 예약 (목록에서 선택, '전체 취소'도 가능)", type: 3, required: true, autocomplete: true },
     ],
   },
-  { name: "상점", description: "구입할 수 있는 상품 목록을 봅니다. (가격 낮은 순)" },
+  { name: "주식상점", description: "구입할 수 있는 상품 목록을 모두에게 보여줍니다. (가격 낮은 순, 알림 없이 표시)" },
   {
     name: "구입",
-    description: "상점에서 상품을 구입합니다.",
+    description: "주식상점에서 상품을 구입합니다. 수량을 안 쓰면 1개예요.",
     options: [
       { name: "상품", description: "상품 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+      { name: "수량", description: "구입할 개수 (기본 1, 칸을 누르면 살 수 있는 최대 개수가 떠요)", type: 4, required: false, autocomplete: true },
     ],
   },
   { name: "보유상품", description: "내가 구입한 상품 목록을 봅니다." },
@@ -305,6 +306,34 @@ const HOURS = Array.from({ length: 24 }, (_, h) => ({
 // 수량 칸을 누르면 "이 수량으로 사고팔면 잔고가 얼마가 되는지, 이득/손해가 얼마인지"가 항목마다 보여요.
 async function quantityChoices(command, interaction, env, keyword) {
   const defaults = [1, 5, 10];
+
+  // 구입: 고른 상품 가격으로 "몇 개 사면 잔고가 얼마가 되는지" 미리 보여줘요.
+  if (command === "구입") {
+    const plainItems = () => numberChoices(defaults.map((n) => ({ label: `${n}개`, value: n })), keyword);
+    const productName = String(opt(interaction, "상품") ?? "").trim();
+    const buyerId = interaction.member?.user?.id;
+    if (!productName || !buyerId) return plainItems();
+
+    const [products, buyer] = await Promise.all([listProducts(env), getUser(env, buyerId)]);
+    const product = products.find((p) => p.name === productName);
+    if (!product) return plainItems();
+
+    const maxQty = product.price > 0 ? Math.floor(buyer.balance / product.price) : 0;
+    const itemLabel = (q) => {
+      if (q <= 0) return "1개 이상 입력해 주세요";
+      const cost = product.price * q;
+      return buyer.balance >= cost
+        ? `${q.toLocaleString()}개 구입 → -${cost.toLocaleString()}해정 · 잔고 ${(buyer.balance - cost).toLocaleString()}해정`
+        : `${q.toLocaleString()}개 구입 불가 (필요 ${cost.toLocaleString()} / 잔고 ${buyer.balance.toLocaleString()}해정)`;
+    };
+    const itemValues = maxQty > 0 ? [...defaults.filter((n) => n < maxQty), maxQty] : defaults;
+    return numberChoices(
+      itemValues.map((v) => ({ label: (v === maxQty && maxQty > 0 ? "최대 " : "") + itemLabel(v), value: v })),
+      keyword,
+      itemLabel
+    );
+  }
+
   const plain = () => numberChoices(defaults.map((n) => ({ label: `${n}주`, value: n })), keyword);
 
   const stockName = String(opt(interaction, "종목") ?? "").trim();
@@ -876,11 +905,12 @@ export const handlers = {
   },
 
   // 가격 낮은 순 (listProducts가 정렬해서 줌)
-  상점: async (_interaction, env) => {
+  // 모두에게 보이는 무음 응답 (interactions.js의 SILENT_COMMANDS에 "주식상점" 등록)
+  주식상점: async (_interaction, env) => {
     const products = await listProducts(env);
     if (products.length === 0) return "판매 중인 상품이 없어요.";
     return [
-      "**🛒 상점 (가격 낮은 순)**",
+      "**🛒 주식상점 (가격 낮은 순)**",
       ...products.map(
         (p) => `**${p.name}** — ${p.price.toLocaleString()}해정${p.description ? `\n> ${p.description}` : ""}`
       ),
@@ -890,7 +920,8 @@ export const handlers = {
   구입: async (interaction, env) => {
     const userId = interaction.member.user.id;
     const name = opt(interaction, "상품");
-    const result = await buyProduct(env, userId, name);
+    const qty = opt(interaction, "수량") ?? 1;
+    const result = await buyProduct(env, userId, name, qty);
     return result.message;
   },
 
@@ -898,7 +929,7 @@ export const handlers = {
     const userId = interaction.member.user.id;
     const user = await getUser(env, userId);
     const entries = Object.entries(user.items).sort(([a], [b]) => compareKo(a, b));
-    if (entries.length === 0) return "보유한 상품이 없어요. `/상점`에서 구경해 보세요.";
+    if (entries.length === 0) return "보유한 상품이 없어요. `/주식상점`에서 구경해 보세요.";
     return entries.map(([name, count]) => `- ${name} x${count}`).join("\n");
   },
 

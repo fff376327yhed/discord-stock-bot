@@ -331,27 +331,35 @@ export async function sellStock(env, userId, stockName, qty) {
 }
 
 // ---------- 상품 구입 ----------
-// 구입 시점의 상품 가격만큼 잔고에서 차감하고, 보유 수량을 1 늘립니다.
-export async function buyProduct(env, userId, productName) {
+// 구입 시점의 상품 가격 x 수량만큼 잔고에서 차감하고, 보유 수량을 qty만큼 늘립니다.
+export async function buyProduct(env, userId, productName, qty = 1) {
+  if (!Number.isSafeInteger(qty) || qty < 1) {
+    return { ok: false, message: "수량은 1 이상의 정수로 입력해 주세요." };
+  }
+
   const product = await getProduct(env, productName);
   if (!product) return { ok: false, message: `"${productName}" 상품을 찾을 수 없어요.` };
 
   const user = await getUser(env, userId);
-  if (user.balance < product.price) {
-    return { ok: false, message: `잔고가 부족해요. (필요: ${product.price.toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정)` };
+  const cost = product.price * qty;
+  if (user.balance < cost) {
+    return { ok: false, message: `잔고가 부족해요. (필요: ${cost.toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정)` };
   }
 
   const balanceBefore = user.balance;
-  user.balance -= product.price;
-  user.items[productName] = (user.items[productName] || 0) + 1;
+  user.balance -= cost;
+  user.items[productName] = (user.items[productName] || 0) + qty;
 
-  const summary = `"${productName}" 구입 완료 (-${product.price.toLocaleString()}해정)`;
+  const summary = `"${productName}" ${qty.toLocaleString()}개 구입 완료 (-${cost.toLocaleString()}해정)`;
   await Promise.all([
     saveUser(env, userId, user),
     addHistory(env, userId, `구입: ${summary} → 잔고 ${user.balance.toLocaleString()}해정`),
   ]);
 
-  return { ok: true, message: `${summary}\n${balanceLine(balanceBefore, user.balance)}` };
+  return {
+    ok: true,
+    message: `${summary}\n${balanceLine(balanceBefore, user.balance)}\n🎒 보유: ${user.items[productName].toLocaleString()}개`,
+  };
 }
 
 // 관리자용: 보유 수량을 직접 설정 (0이면 목록에서 제거)
