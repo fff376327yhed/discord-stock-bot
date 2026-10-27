@@ -12,7 +12,7 @@ import {
   getProduct,
   setUserItem,
 } from "../../src/economy.js";
-import { listCollection, setDoc } from "../../src/firebase.js";
+import { listCollection, setDoc, getDoc, deleteDoc } from "../../src/firebase.js";
 import { DELIST_PRICE } from "../../src/economy.js";
 import { resetBots } from "../../src/crowd.js";
 import { getAttendanceConfig, setAttendanceConfig } from "../../src/attendance.js";
@@ -38,9 +38,53 @@ async function inChunks(list, fn, size = 20) {
   }
 }
 
-function isAdminRequest(request, env) {
+// ---------- 관리자 비밀번호 ----------
+// 관리자 콘솔에서 바꾼 비밀번호는 Firebase(config/adminAuth)에 "암호화(해시)"해서 저장해요.
+//  - 저장된 비밀번호가 있으면 그것만 통과해요. (Vercel의 ADMIN_PANEL_PASSWORD는 쓰지 않아요)
+//  - 저장된 게 없으면 Vercel의 ADMIN_PANEL_PASSWORD 를 써요. (처음 상태, 또는 "기본으로 되돌리기" 한 뒤)
+//  - 비밀번호를 잊었으면 Firebase에서 config/adminAuth 문서를 지우면 Vercel 값으로 돌아가요.
+const AUTH_PATH = "config/adminAuth";
+const PBKDF2_ROUNDS = 100_000;
+// HTTP 헤더로 보내기 때문에 영문·숫자·기호(공백 없이)만 쓸 수 있어요. 한글은 안 돼요.
+const PASSWORD_RULE = /^[\x21-\x7E]{6,64}$/;
+
+const toHex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+async function hashPassword(password, saltHex) {
+  const salt = Uint8Array.from(saltHex.match(/../g).map((h) => parseInt(h, 16)));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: PBKDF2_ROUNDS, hash: "SHA-256" }, key, 256);
+  return toHex(bits);
+}
+
+// 길이가 달라도 같은 시간이 걸리게 비교해요
+function safeEqual(a, b) {
+  const x = String(a);
+  const y = String(b);
+  let diff = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    diff |= (x.charCodeAt(i) || 0) ^ (y.charCodeAt(i) || 0);
+  }
+  return diff === 0;
+}
+
+async function isAdminRequest(request, env) {
+  const given = request.headers.get("x-admin-password");
+  if (!given) return false;
+
+  let saved = null;
+  try {
+    saved = await getDoc(env, AUTH_PATH);
+  } catch (err) {
+    console.error("관리자 비밀번호 조회 실패:", err.message);
+    return false; // 확인할 수 없으면 들여보내지 않아요
+  }
+
+  if (saved && saved.hash && saved.salt) {
+    return safeEqual(await hashPassword(given, saved.salt), saved.hash);
+  }
   if (!env.ADMIN_PANEL_PASSWORD) return false;
-  return request.headers.get("x-admin-password") === env.ADMIN_PANEL_PASSWORD;
+  return safeEqual(given, env.ADMIN_PANEL_PASSWORD);
 }
 
 async function handler(request) {
@@ -49,7 +93,7 @@ async function handler(request) {
   }
 
   const env = loadEnv();
-  if (!isAdminRequest(request, env)) {
+  if (!(await isAdminRequest(request, env))) {
     return json({ error: "unauthorized" }, 401);
   }
 
@@ -67,6 +111,25 @@ async function handler(request) {
 
   try {
     switch (action) {
+      // ----- 관리자 비밀번호 -----
+      // 새 비밀번호로 바꿔요. (이 요청을 보낸 사람은 이미 현재 비밀번호로 통과한 상태)
+      case "setPassword": {
+        const next = String(body.newPassword ?? "");
+        if (!PASSWORD_RULE.test(next)) {
+          return json({ error: "비밀번호는 영문·숫자·기호 6~64자(공백·한글 불가)여야 합니다." }, 400);
+        }
+        const salt = toHex(crypto.getRandomValues(new Uint8Array(16)));
+        const hash = await hashPassword(next, salt);
+        await setDoc(env, AUTH_PATH, { salt, hash, updatedAt: new Date() });
+        return json({ ok: true });
+      }
+
+      // 콘솔에서 바꾼 비밀번호를 지우고, Vercel의 ADMIN_PANEL_PASSWORD 로 되돌려요.
+      case "clearPassword": {
+        await deleteDoc(env, AUTH_PATH);
+        return json({ ok: true });
+      }
+
       // ----- 종목 (이름순) -----
       case "listStocks":
         return json(await listStocks(env));
