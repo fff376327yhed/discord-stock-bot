@@ -1138,7 +1138,7 @@ const collectionOf = (day) => `logs_${day}`;
 export const VIEW_ONLY = new Set([
   "도움말", "주식목록", "그래프", "상장폐지종류", "보유종목", "잔고", "내정보",
   "봇현황", "랭킹", "내역", "예약목록", "보유상품", "알림확인", "채굴정보", "주식상점",
-  "선물목록", "선물설명", "은행", "은행설명",
+  "선물목록", "선물설명", "은행", "은행설명", "배당",
 ]);
 
 // 명령어 이름 -> 분류 (관리자 콘솔의 분류 선택칸에 그대로 나와요)
@@ -2815,9 +2815,87 @@ const unixOf = (ms) => Math.floor(ms / 1000);
 const dueText = (ms) => `<t:${unixOf(ms)}:f> (<t:${unixOf(ms)}:R>)`;
 const depositOf = (bank) => Math.floor(bank.deposit + 1e-9);
 
+// ---------- 신용등급 ----------
+// 신용점수(0~1000, 처음 600점)가 등급(S~F)을 정하고, 등급이 대출 한도와 이자를 바꿔요.
+//  - 제때 완납: +25점 (500해정 이상 빌렸고 6시간 이상 쓴 대출만 인정 → 빌리자마자 갚는 점수 노가다 방지)
+//  - 연체 시작: -100점 (대출 1건당 1번), 강제 매도 발생: -150점 (대출 1건당 1번), 연체 후 완납: +5점
+//  - 저장: bank/{유저ID}.credit = { score, onTime, late }
+export const CREDIT_START = 600;
+export const CREDIT_MAX = 1000;
+export const CREDIT_ON_TIME = 25;
+export const CREDIT_AFTER_LATE = 5;
+export const CREDIT_LATE_PENALTY = -100;
+export const CREDIT_LIQUIDATE_PENALTY = -150;
+export const CREDIT_MIN_LOAN = 500;
+export const CREDIT_MIN_HOLD_HOURS = 6;
+export const CREDIT_GRADES = [
+  { name: "S", min: 900, limitMul: 1.2, rateMul: 0.8 },
+  { name: "A", min: 750, limitMul: 1.1, rateMul: 0.9 },
+  { name: "B", min: 600, limitMul: 1.0, rateMul: 1.0 },
+  { name: "C", min: 450, limitMul: 0.8, rateMul: 1.1 },
+  { name: "D", min: 300, limitMul: 0.6, rateMul: 1.25 },
+  { name: "F", min: 0, limitMul: 0.4, rateMul: 1.5 },
+];
+
+export function creditGrade(credit) {
+  const score = credit?.score ?? CREDIT_START;
+  return CREDIT_GRADES.find((g) => score >= g.min) || CREDIT_GRADES[CREDIT_GRADES.length - 1];
+}
+
+function addCredit(bank, delta) {
+  const c = (bank.credit = { score: CREDIT_START, onTime: 0, late: 0, ...(bank.credit || {}) });
+  c.score = Math.max(0, Math.min(CREDIT_MAX, c.score + delta));
+  return c.score;
+}
+
+const creditText = (bank, delta) => {
+  const score = bank.credit.score;
+  return `💳 신용점수 ${delta > 0 ? "+" : ""}${delta} → **${score}점** (등급 ${creditGrade(bank.credit).name})`;
+};
+
+// 완납했을 때 점수 (loan은 완납된 대출). 점수 변화가 없으면 null
+function creditOnRepaid(bank, loan, now) {
+  if (loan.lateMarked) {
+    addCredit(bank, CREDIT_AFTER_LATE);
+    return creditText(bank, CREDIT_AFTER_LATE);
+  }
+  const heldHours = (now - loan.takenAt) / BANK_HOUR_MS;
+  if ((loan.borrowed || 0) >= CREDIT_MIN_LOAN && heldHours >= CREDIT_MIN_HOLD_HOURS && now <= loan.due) {
+    addCredit(bank, CREDIT_ON_TIME);
+    bank.credit.onTime++;
+    return creditText(bank, CREDIT_ON_TIME);
+  }
+  return null;
+}
+
+// 연체가 처음 확인될 때 한 번만 깎아요
+function markLate(bank, loan) {
+  if (loan.lateMarked) return "";
+  loan.lateMarked = true;
+  addCredit(bank, CREDIT_LATE_PENALTY);
+  bank.credit.late++;
+  return `\n${creditText(bank, CREDIT_LATE_PENALTY)} — 연체 기록이 남았어요. 대출 한도가 줄고 이자가 비싸질 수 있어요.`;
+}
+
+// 강제 매도가 일어났을 때 한 번만 깎아요
+function markLiquidated(bank, loan) {
+  if (loan.liqMarked) return "";
+  loan.liqMarked = true;
+  addCredit(bank, CREDIT_LIQUIDATE_PENALTY);
+  return creditText(bank, CREDIT_LIQUIDATE_PENALTY) + " (강제 매도)";
+}
+
+function creditLine(bank) {
+  const g = creditGrade(bank.credit);
+  const score = bank.credit?.score ?? CREDIT_START;
+  const next = [...CREDIT_GRADES].reverse().find((x) => x.min > score);
+  const hint = next ? ` · ${next.name}등급까지 ${next.min - score}점` : " · 최고 등급!";
+  return `💳 **신용등급 ${g.name}** (${score}점${hint}) · 대출 한도 ×${g.limitMul} · 대출 이자 ×${g.rateMul}`;
+}
+
 export async function getBank(env, userId) {
   const doc = await getDoc(env, bankPath(userId));
-  const bank = { deposit: 0, depositAt: 0, earned: 0, loans: {}, ...(doc || {}) };
+  const bank = { deposit: 0, depositAt: 0, earned: 0, loans: {}, credit: { score: CREDIT_START, onTime: 0, late: 0 }, ...(doc || {}) };
   if (!bank.loans) bank.loans = {};
   return bank;
 }
@@ -2828,6 +2906,7 @@ async function saveBank(env, userId, bank) {
     depositAt: bank.depositAt,
     earned: bank.earned || 0,
     loans: bank.loans,
+    credit: bank.credit || { score: CREDIT_START, onTime: 0, late: 0 },
   });
 }
 
@@ -2893,9 +2972,10 @@ async function netWorthOf(env, userId, user, bank, stocks) {
 
 // 대출 한도: 순자산의 50% (최소 1,000해정). 이미 빌린 원금은 빼요.
 function loanLimitOf(net, bank) {
-  const total = Math.max(LOAN_LIMIT_MIN, Math.floor(Math.max(net, 0) * LOAN_LIMIT_RATIO));
+  const ratio = LOAN_LIMIT_RATIO * creditGrade(bank.credit).limitMul;
+  const total = Math.max(LOAN_LIMIT_MIN, Math.floor(Math.max(net, 0) * ratio));
   const used = Object.values(bank.loans).reduce((sum, l) => sum + l.principal, 0);
-  return { total, used, available: Math.max(0, total - used) };
+  return { total, used, available: Math.max(0, total - used), ratio };
 }
 
 // 랭킹/총자산용: 예금 + 선물 평가금 - 대출. { 유저ID: 해정 }
@@ -3001,8 +3081,8 @@ export async function withdrawMoney(env, userId, amount) {
 
 // ---------- 대출 ----------
 export async function takeLoan(env, userId, amount, termDays) {
-  const rate = LOAN_TERMS[termDays];
-  if (rate === undefined) return { ok: false, message: `기간은 ${Object.keys(LOAN_TERMS).join(", ")}일 중에서 골라 주세요.` };
+  const baseRate = LOAN_TERMS[termDays];
+  if (baseRate === undefined) return { ok: false, message: `기간은 ${Object.keys(LOAN_TERMS).join(", ")}일 중에서 골라 주세요.` };
   if (!Number.isSafeInteger(amount) || amount < LOAN_MIN) {
     return { ok: false, message: `대출은 ${LOAN_MIN.toLocaleString()}해정 이상 정수로 신청해 주세요.` };
   }
@@ -3010,6 +3090,8 @@ export async function takeLoan(env, userId, amount, termDays) {
   const now = Date.now();
   const [user, bank0, stocks] = await Promise.all([getUser(env, userId), getBank(env, userId), listStocks(env)]);
   const bank = accrueBank(bank0, now);
+  const grade = creditGrade(bank.credit);
+  const rate = +(baseRate * grade.rateMul).toFixed(4); // 신용등급이 좋을수록 싸고, 나쁠수록 비싸요
 
   if (Object.values(bank.loans).some((l) => isOverdue(l, now))) {
     return { ok: false, message: "🚨 연체 중인 대출이 있어서 새로 빌릴 수 없어요. `/상환`으로 먼저 갚아 주세요." };
@@ -3052,6 +3134,7 @@ export async function takeLoan(env, userId, amount, termDays) {
       `💸 **대출 실행!** \`${id}\` ${amount.toLocaleString()}해정 (${termDays}일)`,
       balanceLine(balanceBefore, user.balance),
       `- 이자: 하루 ${pctText(rate)} (${termDays}일 꽉 채우면 약 ${expected.toLocaleString()}해정, 시간 단위로 계속 쌓여요)`,
+      `- 💳 신용등급 ${grade.name}: 기본 이자의 ×${grade.rateMul}가 적용됐어요`,
       `- 📅 갚을 날: ${dueText(due)}`,
       `- 일찍 갚으면 그때까지 쌓인 이자만 내요. 만기가 지나면 하루 ${pctText(rate + LOAN_PENALTY_RATE)}로 연체 이자가 붙어요.`,
     ].join("\n"),
@@ -3091,12 +3174,15 @@ export async function repayLoans(env, userId, target, amount) {
 
   const balanceBefore = user.balance;
   const lines = [];
+  const creditLines = [];
   let total = 0;
   for (const { id, pay } of plan) {
     const loan = bank.loans[id];
     const { toInterest, toPrincipal } = payLoan(loan, pay);
     total += pay;
     if (loan.principal <= 0) {
+      const cn = creditOnRepaid(bank, loan, now);
+      if (cn) creditLines.push(cn);
       delete bank.loans[id];
       lines.push(`- \`${id}\` 이자 ${toInterest.toLocaleString()} + 원금 ${toPrincipal.toLocaleString()} 상환 → ✅ **완납!**`);
     } else {
@@ -3117,7 +3203,7 @@ export async function repayLoans(env, userId, target, amount) {
   }
   await addHistory(env, userId, `대출 상환: ${total.toLocaleString()}해정 → 잔고 ${user.balance.toLocaleString()}해정`);
 
-  return { ok: true, message: [`💳 **상환 완료** -${total.toLocaleString()}해정`, ...lines, balanceLine(balanceBefore, user.balance)].join("\n") };
+  return { ok: true, message: [`💳 **상환 완료** -${total.toLocaleString()}해정`, ...lines, ...creditLines, balanceLine(balanceBefore, user.balance)].join("\n") };
 }
 
 // ---------- /은행 : 내 현황 (조회하는 순간 기준) ----------
@@ -3146,7 +3232,8 @@ export async function bankStatus(env, userId) {
       );
     }
   }
-  lines.push("", `📋 **대출 한도**: 남은 ${limit.available.toLocaleString()}해정 / 전체 ${limit.total.toLocaleString()}해정 (순자산 ${net.toLocaleString()}해정의 ${LOAN_LIMIT_RATIO * 100}%, 최소 ${LOAN_LIMIT_MIN.toLocaleString()})`);
+  lines.push("", `📋 **대출 한도**: 남은 ${limit.available.toLocaleString()}해정 / 전체 ${limit.total.toLocaleString()}해정 (순자산 ${net.toLocaleString()}해정의 ${Math.round(limit.ratio * 100)}%, 최소 ${LOAN_LIMIT_MIN.toLocaleString()})`);
+  lines.push(creditLine(bank));
   return lines.join("\n");
 }
 
@@ -3244,6 +3331,8 @@ export async function processBank(env) {
               user.balance -= pay;
               paid += pay;
               summary.liquidated++;
+              const cl = markLiquidated(bank, l);
+              if (cl) notes.push(cl);
             }
           }
 
@@ -3253,11 +3342,13 @@ export async function processBank(env) {
             notes.push(`🏦 **[대출 자동 상환]** \`${id}\` 대출이 만기가 되어 ${paid.toLocaleString()}해정이 자동으로 상환됐어요.${soldLines.length ? `\n보유 주식을 강제로 팔았어요: ${soldLines.join(", ")}` : ""}`);
           } else {
             summary.overdue++;
+            const lateCredit = markLate(bank, l);
             notes.push(
               `🚨 **[연체]** \`${id}\` 대출이 만기를 넘겼어요. 남은 빚 ${loanOwed(l).toLocaleString()}해정 (하루 ${pctText(l.rate + LOAN_PENALTY_RATE)}씩 연체 이자)` +
                 (paid > 0 ? `\n자동으로 ${paid.toLocaleString()}해정을 회수했어요.` : "") +
                 (soldLines.length ? `\n보유 주식을 강제로 팔았어요: ${soldLines.join(", ")}` : "") +
-                `\n해정이 들어오면 자동으로 갚아지고, ${LIQUIDATE_AFTER_HOURS}시간이 지나면 보유 주식이 강제로 팔려요.`
+                `\n해정이 들어오면 자동으로 갚아지고, ${LIQUIDATE_AFTER_HOURS}시간이 지나면 보유 주식이 강제로 팔려요.` +
+                lateCredit
             );
           }
         }
@@ -3357,6 +3448,124 @@ export async function transferMoney(env, fromId, toId, amount, { toIsBot = false
       balanceLine(balanceBefore, sender.balance),
     ].join("\n"),
   };
+}
+
+// ---------- 배당금 (보유 종목 가치의 일정 %를 매일 지급) ----------
+//  - 매일 한국시간 DIVIDEND_HOUR시 이후 첫 시세 변동(크론) 때 한 번만 지급해요. (지급 기록: config/dividend)
+//  - 지급 시점에 가지고 있는 주식 기준으로, 종목 가치(가격×수량)의 DIVIDEND_RATE만큼 받아요.
+//  - 위기 종목(300해정 이하)은 무배당이에요. 한 명이 하루에 받는 합계는 DIVIDEND_MAX_PER_USER까지예요.
+export const DIVIDEND_RATE = 0.003; // 하루 0.3%
+export const DIVIDEND_HOUR = 9; // 한국시간 오전 9시
+export const DIVIDEND_MAX_PER_USER = 5000;
+const DIVIDEND_PATH = "config/dividend";
+
+export const dividendOf = (price, qty) => (price > DANGER_PRICE ? Math.floor(price * qty * DIVIDEND_RATE) : 0);
+
+export async function processDividends(env) {
+  if (currentHourKST() < DIVIDEND_HOUR) return { ran: false, reason: "아직 배당 시각이 아니에요" };
+  const day = todayKST();
+  const state = (await getDoc(env, DIVIDEND_PATH)) || {};
+  if (state.lastDay === day) return { ran: false, reason: "오늘은 이미 지급했어요" };
+  // 지급 전에 먼저 기록해서 크론이 겹쳐도 두 번 주지 않게 해요
+  await setDoc(env, DIVIDEND_PATH, { lastDay: day });
+
+  const [users, stocks] = await Promise.all([listCollection(env, "users"), listStocks(env)]);
+  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const targets = [];
+  for (const u of users) {
+    let sum = 0;
+    const parts = [];
+    for (const [name, qty] of Object.entries(u.holdings || {})) {
+      const price = priceMap[name];
+      if (!(qty > 0) || price === undefined) continue;
+      const pay = dividendOf(price, qty);
+      if (pay > 0) {
+        sum += pay;
+        parts.push(`${name} +${pay.toLocaleString()}`);
+      }
+    }
+    sum = Math.min(sum, DIVIDEND_MAX_PER_USER);
+    if (sum > 0) targets.push({ id: u.id, sum, parts, balance: u.balance || 0, total: u.totalDividend || 0 });
+  }
+
+  let paid = 0;
+  let total = 0;
+  for (let i = 0; i < targets.length; i += 10) {
+    await Promise.all(
+      targets.slice(i, i + 10).map(async (t) => {
+        try {
+          await setDoc(env, `users/${t.id}`, {
+            balance: t.balance + t.sum,
+            lastDividend: { day, amount: t.sum },
+            totalDividend: t.total + t.sum,
+          });
+          await addHistory(env, t.id, `배당금: +${t.sum.toLocaleString()}해정 (${t.parts.join(", ")})`);
+          paid++;
+          total += t.sum;
+        } catch (err) {
+          console.error(`배당금 지급 실패 (${t.id}):`, err.message);
+        }
+      })
+    );
+  }
+
+  // 주식채널에 무음으로 한 줄 공지 (실패해도 지급은 끝난 상태)
+  if (paid > 0 && env.ALLOWED_CHANNEL_ID) {
+    try {
+      await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, {
+        content: `💰 **오늘의 배당금 지급!** ${paid.toLocaleString()}명에게 총 ${total.toLocaleString()}해정을 나눠줬어요. (자세한 내용은 \`/배당\`)`,
+        flags: 4096,
+        allowed_mentions: { parse: [] },
+      });
+    } catch (err) {
+      console.error("배당금 공지 실패:", err.message);
+    }
+  }
+  return { ran: true, day, paid, total };
+}
+
+// /배당 : 내 예상 배당금과 받은 내역
+export async function dividendInfo(env, userId) {
+  const [user, stocks, state] = await Promise.all([getUser(env, userId), listStocks(env), getDoc(env, DIVIDEND_PATH)]);
+  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const rows = [];
+  let sum = 0;
+  for (const [name, qty] of Object.entries(user.holdings)) {
+    const price = priceMap[name];
+    if (!(qty > 0) || price === undefined) continue;
+    const pay = dividendOf(price, qty);
+    sum += pay;
+    rows.push({ name, qty, pay, danger: price <= DANGER_PRICE });
+  }
+  rows.sort((a, b) => b.pay - a.pay || compareKo(a.name, b.name));
+  const capped = Math.min(sum, DIVIDEND_MAX_PER_USER);
+
+  const kstNow = Date.now() + 9 * 60 * 60 * 1000;
+  const dayStart = Math.floor(kstNow / DAY_MS) * DAY_MS;
+  const paidToday = state?.lastDay === todayKST();
+  const nextKst = dayStart + (currentHourKST() < DIVIDEND_HOUR && !paidToday ? 0 : DAY_MS) + DIVIDEND_HOUR * 60 * 60 * 1000;
+  const nextUnix = Math.floor((nextKst - 9 * 60 * 60 * 1000) / 1000);
+
+  const lines = [
+    "**💰 내 배당금**",
+    `보유 종목 가치의 하루 ${pctText(DIVIDEND_RATE)}를 매일 오전 ${DIVIDEND_HOUR}시(한국시간) 이후 첫 시세 변동 때 줘요. 위기 종목(⚠️ ${DANGER_PRICE}해정 이하)은 무배당이에요.`,
+    `⏰ 다음 지급: <t:${nextUnix}:f> (<t:${nextUnix}:R>)`,
+    "",
+  ];
+  if (rows.length === 0) {
+    lines.push("지금 보유한 주식이 없어요. 주식을 사면 배당을 받을 수 있어요!");
+  } else {
+    lines.push("**지금 지급한다면**");
+    for (const r of rows) {
+      lines.push(`- ${r.name} ${r.qty.toLocaleString()}주 → ${r.danger ? "무배당 (위기 종목)" : `+${r.pay.toLocaleString()}해정`}`);
+    }
+    lines.push(`합계 **+${capped.toLocaleString()}해정**${sum > capped ? ` (하루 상한 ${DIVIDEND_MAX_PER_USER.toLocaleString()}해정 적용)` : ""}`);
+  }
+  if (user.lastDividend) {
+    lines.push("", `🧾 마지막으로 받은 배당: ${user.lastDividend.day} · +${Number(user.lastDividend.amount).toLocaleString()}해정`);
+  }
+  if (user.totalDividend) lines.push(`📈 지금까지 받은 배당 합계: ${Number(user.totalDividend).toLocaleString()}해정`);
+  return lines.join("\n");
 }
 
 // 디스코드는 같은 이름의 옵션을 반복할 수 없어서 종목2, 수량2 … 처럼 이름을 나눠요.
@@ -3501,7 +3710,8 @@ export const commandDefinitions = [
     ),
   },
   { name: "선물설명", description: "선물이 뭔지, 어떻게 쓰는지 쉽게 알려줍니다." },
-  { name: "은행", description: "내 예금·대출·이자·대출 한도를 지금 이 순간 기준으로 봅니다." },
+  { name: "은행", description: "내 예금·대출·이자·대출 한도·신용등급을 지금 이 순간 기준으로 봅니다." },
+  { name: "배당", description: "내 보유 종목의 배당금 예상액과 받은 내역을 봅니다." },
   { name: "은행설명", description: "은행 이용법을 쉽게 알려줍니다. (예금·대출·이자·연체)" },
   {
     name: "예금",
@@ -4290,7 +4500,7 @@ function bankHelpText() {
     "`/대출 금액 기간` — 기간: " + terms,
     "- 이자는 빌린 순간부터 시간 단위로 계속 쌓여요",
     "- 일찍 갚으면 **그때까지 쌓인 이자만** 내요",
-    `- 한도: 내 순자산(해정+주식+예금+선물-빚)의 ${LOAN_LIMIT_RATIO * 100}%, 최소 ${LOAN_LIMIT_MIN.toLocaleString()}해정`,
+    `- 한도: 내 순자산(해정+주식+예금+선물-빚)의 ${LOAN_LIMIT_RATIO * 100}%(신용등급에 따라 달라져요), 최소 ${LOAN_LIMIT_MIN.toLocaleString()}해정`,
     `- 동시에 최대 ${MAX_LOANS_PER_USER}건`,
     "",
     "**예시** 1,000해정을 3일로 빌리면?",
@@ -4306,6 +4516,13 @@ function bankHelpText() {
     `3. 연체 ${LIQUIDATE_AFTER_HOURS}시간 뒤에도 못 갚으면 **보유 주식이 강제로 팔려요** (큰 종목부터)`,
     "4. 그래도 빚이 남으면 해정이 들어올 때마다 자동으로 갚아져요",
     `⏰ 만기 ${REMIND_BEFORE_HOURS}시간 전에 DM으로 알려줘요`,
+    "",
+    "**💳 신용등급** (S · A · B · C · D · F)",
+    `처음엔 ${CREDIT_START}점(B). 제때 갚으면 오르고, 연체하면 크게 떨어져요.`,
+    `- 제때 완납 +${CREDIT_ON_TIME}점 (${CREDIT_MIN_LOAN.toLocaleString()}해정 이상, ${CREDIT_MIN_HOLD_HOURS}시간 이상 쓴 대출만)`,
+    `- 연체 ${CREDIT_LATE_PENALTY}점 · 강제 매도 ${CREDIT_LIQUIDATE_PENALTY}점`,
+    "- 등급이 높으면 대출 한도↑ 이자↓, 낮으면 한도↓ 이자↑",
+    CREDIT_GRADES.map((g) => `${g.name}(${g.min}점~) 한도×${g.limitMul}·이자×${g.rateMul}`).join(" / "),
     "",
     "**💸 송금**",
     `\`/송금 받는사람 금액\` — 다른 유저에게 해정 보내기. 은행 수수료 ${pctText(TRANSFER_FEE_RATE)}(최소 ${TRANSFER_FEE_MIN}해정)는 보내는 사람이 따로 내고, 받는 사람은 금액을 그대로 받아요`,
@@ -4670,6 +4887,8 @@ export const handlers = {
   선물설명: async () => futuresHelpText(),
 
   은행: async (interaction, env) => bankStatus(env, interaction.member.user.id),
+
+  배당: async (interaction, env) => dividendInfo(env, interaction.member.user.id),
 
   은행설명: async () => bankHelpText(),
 
