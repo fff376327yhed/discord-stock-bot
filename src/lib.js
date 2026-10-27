@@ -2820,6 +2820,47 @@ export const LIQUIDATE_AFTER_HOURS = 24; // 연체 후 이 시간이 지나면 �
 export const REMIND_BEFORE_HOURS = 6; // 만기 이 시간 전에 DM으로 알려줘요
 const BANK_HOUR_MS = 60 * 60 * 1000;
 
+// ---------- 시장 금리 (은행 이자 랜덤화) ----------
+// 매시 정각 크론이 배율(0.2~2.0배)을 하나 뽑아서 예금/대출 기준금리에 함께 곱해요.
+//  - 예금 0.5% 기준 → 0.1%~1.0% 사이에서 움직여요.
+//  - index: 예금 복리 계산용 누적 지수. 금리가 바뀔 때마다 그 구간만큼 곱해서 쌓아요.
+//    (유저가 오래 안 들어와도 index 비율 하나로 정확히 계산 가능)
+//  - 저장: config/bankRate = { mult, depositRate, loanRates, index, indexAt }
+export const MARKET_RATE_MIN_MULT = 0.2;
+export const MARKET_RATE_MAX_MULT = 2.0;
+
+const bankRatePath = "config/bankRate";
+
+export async function getBankRate(env) {
+  const doc = await getDoc(env, bankRatePath);
+  if (doc?.index) return doc;
+  // 아직 한 번도 안 돌았으면 배율 1.0(=기존 고정금리)으로 초기화
+  return { mult: 1, depositRate: DEPOSIT_RATE, loanRates: { ...LOAN_TERMS }, index: 1, indexAt: Date.now() };
+}
+
+function randomMult() {
+  return +(MARKET_RATE_MIN_MULT + Math.random() * (MARKET_RATE_MAX_MULT - MARKET_RATE_MIN_MULT)).toFixed(3);
+}
+
+// 매시 1번 호출: 지난 구간 이자를 index에 반영하고 새 배율을 뽑아 저장해요
+export async function rollBankRate(env) {
+  const now = Date.now();
+  const prev = await getBankRate(env);
+
+  const elapsedDays = Math.max(0, now - prev.indexAt) / DAY_MS;
+  const index = prev.index * (1 + prev.depositRate * elapsedDays);
+
+  const mult = randomMult();
+  const depositRate = +(DEPOSIT_RATE * mult).toFixed(5);
+  const loanRates = Object.fromEntries(
+    Object.entries(LOAN_TERMS).map(([term, base]) => [term, +(base * mult).toFixed(5)])
+  );
+
+  const next = { mult, depositRate, loanRates, index, indexAt: now };
+  await setDoc(env, bankRatePath, next);
+  return next;
+}
+
 const bankPath = (userId) => `bank/${userId}`;
 const pctText = (r) => `${+(r * 100).toFixed(2)}%`;
 const unixOf = (ms) => Math.floor(ms / 1000);

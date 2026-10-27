@@ -2,10 +2,11 @@ import {
   loadEnv, isAuthorizedCron, currentSurgeSlot, surgeSlotKey, isSurgeMoment,
   fluctuatePrices, announcePriceChanges, notifyPriceChanges, announcePreAlert,
   processOrders, processFutures, processBank, processDividends, takeNews, finishNews, publishNews, prepareCrowd, finishCrowd, getDoc, setDoc,
+  rollBankRate,
 } from "../src/lib.js";
 
 // 크론 엔드포인트 3개(fluctuate / midnight / prealert)를 한 함수로 합친 파일이에요.
-// 호출: /api/cron?task=fluctuate | midnight | prealert | news
+// 호출: /api/cron?task=fluctuate | midnight | prealert | news | bankRate
 //  - vercel.json의 rewrites 덕분에 예전 주소(/api/cron/fluctuate 등)도 그대로 동작해요.
 //  - 인증: Authorization: Bearer <CRON_SECRET>
 
@@ -174,7 +175,13 @@ async function newsTask(env) {
   return Response.json({ ok: true, ...result });
 }
 
-const TASKS = { fluctuate: fluctuateTask, midnight: midnightTask, prealert: prealertTask, news: newsTask };
+// ---------- 5) 은행 금리 변동 (1시간마다, cron-job.org: 0 * * * *) ----------
+async function bankRateTask(env) {
+  const rate = await rollBankRate(env);
+  return Response.json({ ok: true, ...rate });
+}
+
+const TASKS = { fluctuate: fluctuateTask, midnight: midnightTask, prealert: prealertTask, news: newsTask, bankRate: bankRateTask };
 
 export default {
   fetch: async function handler(request) {
