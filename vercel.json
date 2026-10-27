@@ -1,5 +1,10 @@
 {
+  "rewrites": [
+    { "source": "/api/cron/fluctuate", "destination": "/api/cron?task=fluctuate" },
+    { "source": "/api/cron/midnight", "destination": "/api/cron?task=midnight" },
+    { "source": "/api/cron/prealert", "destination": "/api/cron?task=prealert" }
+  ],
   "crons": [
-    { "path": "/api/cron/midnight", "schedule": "0 15 * * *" }
+    { "path": "/api/cron?task=midnight", "schedule": "0 15 * * *" }
   ]
 }

@@ -1,9 +1,9 @@
 import { verifyKey } from "discord-interactions";
 import { waitUntil } from "@vercel/functions";
-import { handlers, autocomplete } from "../src/commands.js";
-import { loadEnv } from "../src/env.js";
-import { touchUsername } from "../src/economy.js";
-import { logAction, summarizeOptions, firstLine, VIEW_ONLY } from "../src/actionlog.js";
+import {
+  handlers, autocomplete, loadEnv, touchUsername,
+  logAction, summarizeOptions, firstLine, VIEW_ONLY,
+} from "../src/lib.js";
 
 // Node.js 런타임으로 동작 (Edge는 discord-interactions가 쓰는 Node crypto를 지원하지 않아 제외)
 // Node.js 런타임도 요청이 올 때만 실행되고 평소엔 대기 상태인 서버리스예요.
