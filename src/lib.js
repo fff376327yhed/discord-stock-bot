@@ -706,6 +706,142 @@ export async function buyProduct(env, userId, productName, qty = 1) {
   };
 }
 
+// ---------- 여러 개 한 번에 (매수/매도/구입) ----------
+// 유저를 한 번만 읽고, 전부 가능할 때만 한 번에 저장해요. 하나라도 안 되면 아무것도 체결하지 않아요.
+// items: [{ name, qty }] (이름 중복 없음, qty는 1 이상의 정수)
+const fmt = (n) => n.toLocaleString();
+
+export async function buyStocks(env, userId, items) {
+  const [user, ...stocks] = await Promise.all([getUser(env, userId), ...items.map((i) => getStock(env, i.name))]);
+
+  const missing = items.filter((_, i) => !stocks[i]);
+  if (missing.length) {
+    return { ok: false, message: `찾을 수 없는 종목이 있어요: ${missing.map((i) => `"${i.name}"`).join(", ")}\n(아무것도 매수하지 않았어요.)` };
+  }
+
+  const rows = items.map((it, i) => ({ name: it.name, qty: it.qty, price: stocks[i].price, cost: stocks[i].price * it.qty }));
+  const total = rows.reduce((sum, r) => sum + r.cost, 0);
+  if (!Number.isSafeInteger(total)) return { ok: false, message: "금액이 너무 커서 처리할 수 없어요. 수량을 줄여 주세요." };
+  if (user.balance < total) {
+    return {
+      ok: false,
+      message: [
+        `잔고가 부족해요. (합계 필요: ${fmt(total)}해정, 보유: ${fmt(user.balance)}해정, 부족: ${fmt(total - user.balance)}해정)`,
+        ...rows.map((r) => `- ${r.name} ${fmt(r.qty)}주 × ${fmt(r.price)} = ${fmt(r.cost)}해정`),
+        "(아무것도 매수하지 않았어요.)",
+      ].join("\n"),
+    };
+  }
+
+  const balanceBefore = user.balance;
+  const lines = rows.map((r) => {
+    const prevCost = costOf(user, r.name, r.price); // 수량을 늘리기 전에 기존 원가를 먼저 구함
+    user.holdings[r.name] = (user.holdings[r.name] || 0) + r.qty;
+    user.costs[r.name] = prevCost + r.cost;
+    const avg = Math.round(user.costs[r.name] / user.holdings[r.name]);
+    return `- ${r.name} ${fmt(r.qty)}주 (-${fmt(r.cost)}해정) · 평균 매수가 ${fmt(avg)}해정 (보유 ${fmt(user.holdings[r.name])}주)`;
+  });
+  user.balance -= total;
+
+  const summary = `${rows.length}종목 매수 완료 (-${fmt(total)}해정)`;
+  await Promise.all([
+    saveUser(env, userId, user),
+    addHistory(env, userId, `매수: ${rows.map((r) => `${r.name} ${fmt(r.qty)}주`).join(", ")} (-${fmt(total)}해정) → 잔고 ${fmt(user.balance)}해정`),
+  ]);
+  return { ok: true, message: [summary, ...lines, balanceLine(balanceBefore, user.balance)].join("\n"), user };
+}
+
+export async function sellStocks(env, userId, items) {
+  const [user, ...stocks] = await Promise.all([getUser(env, userId), ...items.map((i) => getStock(env, i.name))]);
+
+  const problems = [];
+  items.forEach((it, i) => {
+    if (!stocks[i]) problems.push(`"${it.name}" 종목을 찾을 수 없어요.`);
+    else if ((user.holdings[it.name] || 0) < it.qty) {
+      problems.push(`${it.name}: 보유 수량이 부족해요. (요청 ${fmt(it.qty)}주 / 보유 ${fmt(user.holdings[it.name] || 0)}주)`);
+    }
+  });
+  if (problems.length) return { ok: false, message: [...problems, "(아무것도 매도하지 않았어요.)"].join("\n") };
+
+  const balanceBefore = user.balance;
+  let totalEarned = 0;
+  let totalProfit = 0;
+  let totalBasis = 0;
+  const lines = items.map((it, i) => {
+    const price = stocks[i].price;
+    const held = user.holdings[it.name];
+    const prevCost = costOf(user, it.name, price);
+    const basis = Math.round((prevCost * it.qty) / held);
+    const earned = price * it.qty;
+    const profit = earned - basis;
+
+    user.holdings[it.name] = held - it.qty;
+    if (user.holdings[it.name] === 0) {
+      delete user.holdings[it.name];
+      delete user.costs[it.name];
+    } else {
+      user.costs[it.name] = prevCost - basis;
+    }
+    totalEarned += earned;
+    totalProfit += profit;
+    totalBasis += basis;
+    return `- ${it.name} ${fmt(it.qty)}주 (+${fmt(earned)}해정) · ${profitLabel(profit, basis)}`;
+  });
+  user.balance += totalEarned;
+  user.realizedProfit = (user.realizedProfit || 0) + totalProfit;
+
+  const summary = `${items.length}종목 매도 완료 (+${fmt(totalEarned)}해정)`;
+  await Promise.all([
+    saveUser(env, userId, user),
+    addHistory(
+      env,
+      userId,
+      `매도: ${items.map((it) => `${it.name} ${fmt(it.qty)}주`).join(", ")} (+${fmt(totalEarned)}해정) · ${profitLabel(totalProfit, totalBasis)} → 잔고 ${fmt(user.balance)}해정`
+    ),
+  ]);
+  return {
+    ok: true,
+    message: [summary, ...lines, balanceLine(balanceBefore, user.balance), `📊 이번 매도 손익 합계: ${profitLabel(totalProfit, totalBasis)}`].join("\n"),
+    user,
+  };
+}
+
+export async function buyProducts(env, userId, items) {
+  const [user, ...products] = await Promise.all([getUser(env, userId), ...items.map((i) => getProduct(env, i.name))]);
+
+  const missing = items.filter((_, i) => !products[i]);
+  if (missing.length) {
+    return { ok: false, message: `찾을 수 없는 상품이 있어요: ${missing.map((i) => `"${i.name}"`).join(", ")}\n(아무것도 구입하지 않았어요.)` };
+  }
+
+  const rows = items.map((it, i) => ({ name: it.name, qty: it.qty, price: products[i].price, cost: products[i].price * it.qty }));
+  const total = rows.reduce((sum, r) => sum + r.cost, 0);
+  if (!Number.isSafeInteger(total)) return { ok: false, message: "금액이 너무 커서 처리할 수 없어요. 수량을 줄여 주세요." };
+  if (user.balance < total) {
+    return {
+      ok: false,
+      message: [
+        `잔고가 부족해요. (합계 필요: ${fmt(total)}해정, 보유: ${fmt(user.balance)}해정, 부족: ${fmt(total - user.balance)}해정)`,
+        ...rows.map((r) => `- ${r.name} ${fmt(r.qty)}개 × ${fmt(r.price)} = ${fmt(r.cost)}해정`),
+        "(아무것도 구입하지 않았어요.)",
+      ].join("\n"),
+    };
+  }
+
+  const balanceBefore = user.balance;
+  user.balance -= total;
+  const lines = rows.map((r) => {
+    user.items[r.name] = (user.items[r.name] || 0) + r.qty;
+    return `- "${r.name}" ${fmt(r.qty)}개 (-${fmt(r.cost)}해정) · 보유 ${fmt(user.items[r.name])}개`;
+  });
+
+  await Promise.all([
+    saveUser(env, userId, user),
+    addHistory(env, userId, `구입: ${rows.map((r) => `"${r.name}" ${fmt(r.qty)}개`).join(", ")} (-${fmt(total)}해정) → 잔고 ${fmt(user.balance)}해정`),
+  ]);
+  return { ok: true, message: [`${rows.length}종 구입 완료 (-${fmt(total)}해정)`, ...lines, balanceLine(balanceBefore, user.balance)].join("\n") };
+}
+
 // 관리자용: 보유 수량을 직접 설정 (0이면 목록에서 제거)
 export async function setUserItem(env, userId, productName, count) {
   const user = await getUser(env, userId);
@@ -2310,6 +2446,21 @@ export async function cancelOrder(env, userId, target) {
   return removed;
 }
 
+// 여러 건 취소: targets = 예약번호들 또는 "all". 한 번만 읽고 한 번만 저장해요.
+// 반환: { removed: 취소된 예약들, missing: 못 찾은 번호들 }
+async function cancelOrders(env, userId, targets) {
+  const items = await getOrderItems(env, userId);
+  const wantsAll = targets.includes("all");
+  const ids = wantsAll ? Object.keys(items) : [...new Set(targets)].filter((id) => items[id]);
+  const missing = wantsAll ? [] : [...new Set(targets)].filter((id) => !items[id]);
+  if (ids.length === 0) return { removed: [], missing };
+
+  const removed = ids.map((id) => ({ id, ...items[id] }));
+  for (const id of ids) delete items[id];
+  await saveOrderItems(env, userId, items);
+  return { removed, missing };
+}
+
 async function safeDM(env, userId, content) {
   try {
     await sendDM(env, userId, content);
@@ -2409,6 +2560,20 @@ export async function processOrders(env) {
 // ============================================================
 // ---- 1) Discord에 등록할 커맨드 정의 ----
 // autocomplete: true 인 옵션은 칸을 누르기만 해도 예시 목록이 떠요. 목록에 없는 값도 직접 입력할 수 있어요.
+// 여러 종목/상품을 한 번에: 첫 번째 칸(종목, 수량 …) 뒤에 [2번째]~[5번째] 칸을 자동으로 붙여요.
+// 디스코드는 같은 이름의 옵션을 반복할 수 없어서 종목2, 수량2 … 처럼 이름을 나눠요.
+const MAX_SLOTS = 5;
+const slotSuffix = (i) => (i <= 1 ? "" : String(i));
+function multi(base, count = MAX_SLOTS) {
+  const out = [...base];
+  for (let i = 2; i <= count; i++) {
+    for (const o of base) {
+      out.push({ ...o, name: o.name + i, required: false, description: `[${i}번째] ${o.description}`.slice(0, 100) });
+    }
+  }
+  return out;
+}
+
 export const commandDefinitions = [
   { name: "도움말", description: "사용할 수 있는 명령어 목록을 봅니다." },
   { name: "출석체크", description: "오늘 출석하고 해정을 받습니다. 하루 1회." },
@@ -2436,16 +2601,16 @@ export const commandDefinitions = [
   },
   {
     name: "그래프",
-    description: "종목의 시세 그래프를 그립니다.",
-    options: [
+    description: "종목의 시세 그래프를 그립니다. 종목2~5로 여러 종목을 한 번에 봐요.",
+    options: multi([
       { name: "종목", description: "그래프를 볼 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
-    ],
+    ]),
   },
   {
     name: "상장폐지종류",
-    description: "상장폐지된 종목과 하락률을 봅니다. 종목을 고르면 시세 그래프도 그려요. (최신순)",
+    description: "상장폐지된 종목과 하락률을 봅니다. 종목(2~5까지)을 고르면 그래프도 그려요. (최신순)",
     options: [
-      { name: "종목", description: "그래프를 볼 폐지 종목 (안 고르면 목록)", type: 3, required: false, autocomplete: true },
+      ...multi([{ name: "종목", description: "그래프를 볼 폐지 종목 (안 고르면 목록)", type: 3, required: false, autocomplete: true }]),
       { name: "개수", description: "볼 종목 개수 (기본 10, 최대 20)", type: 4, required: false, autocomplete: true },
     ],
   },
@@ -2463,54 +2628,54 @@ export const commandDefinitions = [
   },
   {
     name: "매수",
-    description: "종목을 매수합니다. 수량을 안 쓰면 1주예요.",
-    options: [
+    description: "종목을 매수합니다. 종목2~5를 쓰면 여러 종목을 한 번에 사요. 수량 기본 1주.",
+    options: multi([
       { name: "종목", description: "종목 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
       { name: "수량", description: "매수할 수량 (기본 1, '최대'는 살 수 있는 만큼)", type: 4, required: false, autocomplete: true },
-    ],
+    ]),
   },
   {
     name: "매도",
-    description: "종목을 매도합니다. 수량을 안 쓰면 1주예요.",
-    options: [
+    description: "종목을 매도합니다. 종목2~5를 쓰면 여러 종목을 한 번에 팔아요. 수량 기본 1주.",
+    options: multi([
       { name: "종목", description: "내가 가진 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
       { name: "수량", description: "매도할 수량 (기본 1, '전량'은 보유 전부)", type: 4, required: false, autocomplete: true },
-    ],
+    ]),
   },
   {
     name: "예약매수",
-    description: "지정한 가격 이하가 되면 자동으로 매수하도록 예약합니다.",
-    options: [
+    description: "지정가 이하가 되면 자동 매수하도록 예약합니다. 종목2~5로 여러 개를 한 번에 예약해요.",
+    options: multi([
       { name: "종목", description: "종목 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
       { name: "가격", description: "이 가격 이하가 되면 매수 (해정)", type: 4, required: true, autocomplete: true },
       { name: "수량", description: "매수할 수량 (기본 1)", type: 4, required: false, autocomplete: true },
-    ],
+    ]),
   },
   {
     name: "예약매도",
-    description: "지정한 가격 이상이 되면 자동으로 매도하도록 예약합니다.",
-    options: [
+    description: "지정가 이상이 되면 자동 매도하도록 예약합니다. 종목2~5로 여러 개를 한 번에 예약해요.",
+    options: multi([
       { name: "종목", description: "내가 가진 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
       { name: "가격", description: "이 가격 이상이 되면 매도 (해정)", type: 4, required: true, autocomplete: true },
       { name: "수량", description: "매도할 수량 (기본 1)", type: 4, required: false, autocomplete: true },
-    ],
+    ]),
   },
   { name: "예약목록", description: "내가 걸어둔 예약 매수/매도 목록을 봅니다." },
   {
     name: "예약취소",
-    description: "걸어둔 예약을 취소합니다.",
-    options: [
+    description: "걸어둔 예약을 취소합니다. 예약2~5로 여러 건을 한 번에 취소해요.",
+    options: multi([
       { name: "예약", description: "취소할 예약 (목록에서 선택, '전체 취소'도 가능)", type: 3, required: true, autocomplete: true },
-    ],
+    ]),
   },
   { name: "주식상점", description: "구입할 수 있는 상품 목록을 모두에게 보여줍니다. (가격 낮은 순, 알림 없이 표시)" },
   {
     name: "구입",
-    description: "주식상점에서 상품을 구입합니다. 수량을 안 쓰면 1개예요.",
-    options: [
+    description: "주식상점에서 상품을 구입합니다. 상품2~5로 여러 상품을 한 번에 사요. 수량 기본 1개.",
+    options: multi([
       { name: "상품", description: "상품 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
       { name: "수량", description: "구입할 개수 (기본 1, 칸을 누르면 살 수 있는 최대 개수가 떠요)", type: 4, required: false, autocomplete: true },
-    ],
+    ]),
   },
   { name: "보유상품", description: "내가 구입한 상품 목록을 봅니다." },
   {
@@ -2527,33 +2692,33 @@ export const commandDefinitions = [
   { name: "알림확인", description: "현재 알림 설정을 봅니다." },
   {
     name: "종목추가",
-    description: "[관리자] 새 종목을 등록합니다.",
-    options: [
+    description: "[관리자] 새 종목을 등록합니다. 종목2~5로 여러 종목을 한 번에 등록해요.",
+    options: multi([
       { name: "종목", description: "종목 이름", type: 3, required: true },
       { name: "가격", description: "초기 가격(해정)", type: 4, required: true, autocomplete: true },
-    ],
+    ]),
   },
   {
     name: "종목삭제",
-    description: "[관리자] 종목을 삭제합니다.",
-    options: [
+    description: "[관리자] 종목을 삭제합니다. 종목2~5로 여러 종목을 한 번에 삭제해요.",
+    options: multi([
       { name: "종목", description: "종목 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
-    ],
+    ]),
   },
   {
     name: "종목생성",
-    description: "새 종목을 1000해정에 상장합니다. 이름만 정할 수 있고, 하루 횟수 제한이 있어요.",
-    options: [
+    description: "새 종목을 1000해정에 상장합니다. 이름2~5로 여러 개를 한 번에, 하루 횟수 제한이 있어요.",
+    options: multi([
       { name: "이름", description: "새 종목 이름 (1~12자)", type: 3, required: true },
-    ],
+    ]),
   },
   {
     name: "시세설정",
-    description: "[관리자] 종목 가격을 변경합니다.",
-    options: [
+    description: "[관리자] 종목 가격을 변경합니다. 종목2~5로 여러 종목을 한 번에 바꿔요.",
+    options: multi([
       { name: "종목", description: "종목 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
       { name: "가격", description: "새 가격(해정)", type: 4, required: true, autocomplete: true },
-    ],
+    ]),
   },
   {
     name: "출석설정",
@@ -2569,6 +2734,80 @@ export const commandDefinitions = [
 function opt(interaction, name) {
   const found = interaction.data.options?.find((o) => o.name === name);
   return found?.value;
+}
+
+// 여러 종목의 결과(문자열 = 안내/오류, 객체 = 임베드)를 하나의 응답으로 합쳐요.
+function combineResults(results) {
+  const embeds = [];
+  const notes = [];
+  for (const r of results) {
+    if (typeof r === "string") notes.push(r);
+    else embeds.push(...(r.embeds || []));
+  }
+  if (embeds.length === 0) return notes.join("\n");
+  return { ...(notes.length ? { content: notes.join("\n") } : {}), embeds };
+}
+
+const slotLabel = (n) => (n <= 1 ? "" : `${n}번째 `);
+
+// 종목(또는 상품)·수량·가격 칸을 번호순으로 읽어요: [{ n, name, qty, price }]
+// 칸이 비어 있는데 수량/가격만 있거나, 수량이 정수가 아니면 error를 돌려줘요.
+function readSlots(interaction, nameKey, { price = false } = {}) {
+  const slots = [];
+  for (let i = 1; i <= MAX_SLOTS; i++) {
+    const s = slotSuffix(i);
+    const rawName = String(opt(interaction, nameKey + s) ?? "").trim();
+    const qtyRaw = opt(interaction, "수량" + s);
+    const priceRaw = price ? opt(interaction, "가격" + s) : undefined;
+    if (!rawName) {
+      if (qtyRaw !== undefined || priceRaw !== undefined) {
+        return { error: `${nameKey}${s} 없이 수량/가격만 입력했어요. ${nameKey}${s}도 골라 주세요.` };
+      }
+      continue;
+    }
+    const qty = qtyRaw ?? 1;
+    if (!Number.isSafeInteger(qty) || qty <= 0) return { error: `${slotLabel(i)}수량은 1 이상의 정수여야 해요.` };
+    if (price && priceRaw === undefined) return { error: `${slotLabel(i)}가격을 입력해 주세요.` };
+    slots.push({ n: i, name: rawName, qty, price: priceRaw });
+  }
+  return { slots };
+}
+
+// 같은 이름은 수량을 합쳐요 (매수/매도/구입). 반환: { items: [{ name, qty }], merged: 합친 적 있는지, error }
+function mergeSlots(slots) {
+  const map = new Map();
+  let merged = false;
+  for (const s of slots) {
+    if (map.has(s.name)) merged = true;
+    map.set(s.name, (map.get(s.name) || 0) + s.qty);
+  }
+  const items = [...map].map(([name, qty]) => ({ name, qty }));
+  if (items.some((i) => !Number.isSafeInteger(i.qty))) return { error: "수량이 너무 커요. 수량을 줄여 주세요." };
+  return { items, merged };
+}
+
+// 자동완성용: 앞 칸에 이미 고른 만큼 잔고/보유 수량을 미리 빼서 보여줘요. (매수·구입은 잔고, 매도·예약매도는 보유 수량)
+function priorAdjusted(command, interaction, slot, user, priceMap) {
+  const isBuy = command === "매수" || command === "구입";
+  const isSell = command === "매도" || command === "예약매도";
+  if (!isBuy && !isSell) return user;
+  const cur = slot === "" ? 1 : Number(slot);
+  const nameKey = command === "구입" ? "상품" : "종목";
+  const copy = { ...user, holdings: { ...user.holdings } };
+  for (let i = 1; i < cur; i++) {
+    const s = slotSuffix(i);
+    const name = String(opt(interaction, nameKey + s) ?? "").trim();
+    if (!name) continue;
+    const qty = Number(opt(interaction, "수량" + s) ?? 1);
+    if (!Number.isSafeInteger(qty) || qty < 1) continue;
+    if (isBuy) {
+      const price = priceMap[name];
+      if (price !== undefined) copy.balance -= price * qty;
+    } else {
+      copy.holdings[name] = Math.max(0, (copy.holdings[name] || 0) - qty);
+    }
+  }
+  return copy;
 }
 
 function isAdmin(interaction, env) {
@@ -2662,17 +2901,18 @@ const HOURS = Array.from({ length: 24 }, (_, h) => ({
 
 // 매수/매도 수량 예시 + 미리보기
 // 수량 칸을 누르면 "이 수량으로 사고팔면 잔고가 얼마가 되는지, 이득/손해가 얼마인지"가 항목마다 보여요.
-async function quantityChoices(command, interaction, env, keyword) {
+async function quantityChoices(command, interaction, env, keyword, slot = "") {
   const defaults = [1, 5, 10];
 
   // 구입: 고른 상품 가격으로 "몇 개 사면 잔고가 얼마가 되는지" 미리 보여줘요.
   if (command === "구입") {
     const plainItems = () => numberChoices(defaults.map((n) => ({ label: `${n}개`, value: n })), keyword);
-    const productName = String(opt(interaction, "상품") ?? "").trim();
+    const productName = String(opt(interaction, "상품" + slot) ?? "").trim();
     const buyerId = interaction.member?.user?.id;
     if (!productName || !buyerId) return plainItems();
 
-    const [products, buyer] = await Promise.all([listProducts(env), getUser(env, buyerId)]);
+    const [products, buyerRaw] = await Promise.all([listProducts(env), getUser(env, buyerId)]);
+    const buyer = priorAdjusted(command, interaction, slot, buyerRaw, Object.fromEntries(products.map((p) => [p.name, p.price])));
     const product = products.find((p) => p.name === productName);
     if (!product) return plainItems();
 
@@ -2694,12 +2934,17 @@ async function quantityChoices(command, interaction, env, keyword) {
 
   const plain = () => numberChoices(defaults.map((n) => ({ label: `${n}주`, value: n })), keyword);
 
-  const stockName = String(opt(interaction, "종목") ?? "").trim();
+  const stockName = String(opt(interaction, "종목" + slot) ?? "").trim();
   const userId = interaction.member?.user?.id;
   if (!stockName || !userId) return plain();
 
-  const [stock, user] = await Promise.all([getStock(env, stockName), getUser(env, userId)]);
+  const [stock, userRaw, all] = await Promise.all([
+    getStock(env, stockName),
+    getUser(env, userId),
+    slot ? listStocks(env) : null, // 2번째 칸부터는 앞 칸 종목의 가격이 필요해요
+  ]);
   if (!stock) return plain();
+  const user = all ? priorAdjusted(command, interaction, slot, userRaw, Object.fromEntries(all.map((s) => [s.name, s.price]))) : userRaw;
 
   let labelFor;
   let values;
@@ -2738,8 +2983,8 @@ async function quantityChoices(command, interaction, env, keyword) {
 }
 
 // 시세설정 가격 예시: 현재가 기준 -50% ~ +100%
-async function priceSuggestions(interaction, env) {
-  const stockName = String(opt(interaction, "종목") ?? "").trim();
+async function priceSuggestions(interaction, env, slot = "") {
+  const stockName = String(opt(interaction, "종목" + slot) ?? "").trim();
   if (!stockName) return [];
   const stock = await getStock(env, stockName);
   if (!stock) return [];
@@ -2761,9 +3006,22 @@ export async function autocomplete(interaction, env) {
 
   const command = interaction.data.name;
   const keyword = String(focused.value ?? "").trim();
+  // 종목2, 수량3 처럼 번호가 붙은 칸은 base(종목/수량…)와 slot(번호)로 나눠서 같은 방식으로 처리해요.
+  const base = focused.name.replace(/\d+$/, "");
+  const slot = focused.name.slice(base.length);
+
+  // 같은 명령어의 다른 칸에 이미 고른 값은 목록에서 빼요 (그래프/삭제/시세설정/폐지 조회/예약취소)
+  const taken = new Set();
+  if (["그래프", "종목삭제", "시세설정", "상장폐지종류", "예약취소"].includes(command)) {
+    for (const o of interaction.data.options || []) {
+      if (o.focused || o.name === focused.name) continue;
+      if (o.name.replace(/\d+$/, "") === base) taken.add(String(o.value).trim());
+    }
+  }
+  const pickable = (items) => items.filter((i) => !taken.has(i.value));
 
   // ----- 상장폐지종류: 폐지된 종목 이름 (최신 폐지순, 같은 이름은 가장 최근 것만) -----
-  if (focused.name === "종목" && command === "상장폐지종류") {
+  if (base === "종목" && command === "상장폐지종류") {
     const delisted = await listDelisted(env, 200);
     const seen = new Set();
     const items = [];
@@ -2775,15 +3033,16 @@ export async function autocomplete(interaction, env) {
         value: d.name,
       });
     }
-    return textChoices(items, keyword);
+    return textChoices(pickable(items), keyword);
   }
 
   // ----- 종목 이름 (종목추가는 새 이름을 입력하는 거라 제외) -----
-  if (focused.name === "종목" && command !== "종목추가") {
+  if (base === "종목" && command !== "종목추가") {
     const stocks = await listStocks(env); // 이름순
 
     const userId = interaction.member?.user?.id;
-    const user = userId ? await getUser(env, userId) : { balance: 0, holdings: {}, costs: {} };
+    const rawUser = userId ? await getUser(env, userId) : { balance: 0, holdings: {}, costs: {} };
+    const user = priorAdjusted(command, interaction, slot, rawUser, Object.fromEntries(stocks.map((s) => [s.name, s.price])));
 
     if (command === "매도" || command === "예약매도") {
       // 매도는 내가 가진 종목만 보여줌 (현재가 기준 평가손익 함께 표시)
@@ -2814,13 +3073,13 @@ export async function autocomplete(interaction, env) {
     }
 
     return textChoices(
-      stocks.map((s) => ({ label: `${s.name}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정)`, value: s.name })),
+      pickable(stocks.map((s) => ({ label: `${s.name}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정)`, value: s.name }))),
       keyword
     );
   }
 
   // ----- 상품 이름: 가격 낮은 순, 설명 포함 -----
-  if (focused.name === "상품") {
+  if (base === "상품") {
     const products = await listProducts(env);
     return textChoices(
       products.map((p) => ({
@@ -2832,24 +3091,25 @@ export async function autocomplete(interaction, env) {
   }
 
   // ----- 예약취소: 내 예약 목록 -----
-  if (focused.name === "예약") {
+  if (base === "예약") {
     const userId = interaction.member?.user?.id;
     const orders = userId ? await getOrders(env, userId) : [];
     const items = orders.map((o) => ({
       label: `[${o.id}] ${sideText(o.side)} ${o.stock} · ${o.price.toLocaleString()}해정 ${o.side === "buy" ? "이하" : "이상"} · ${o.qty.toLocaleString()}주`,
       value: o.id,
     }));
-    if (items.length > 1) items.push({ label: "전체 취소", value: "all" });
-    return textChoices(items, keyword);
+    const left = pickable(items);
+    if (left.length > 1 && taken.size === 0) left.push({ label: "전체 취소", value: "all" }); // 전체 취소는 첫 칸에서만
+    return textChoices(left, keyword);
   }
 
   // ----- 숫자 옵션 -----
-  if (focused.name === "수량") {
+  if (base === "수량") {
     // 예약은 체결 시점 가격이 달라서 미리보기 없이 예시만 보여줌
     if (command === "예약매수" || command === "예약매도") {
       return numberChoices([1, 5, 10, 50, 100].map((n) => ({ label: `${n}주`, value: n })), keyword);
     }
-    return quantityChoices(command, interaction, env, keyword);
+    return quantityChoices(command, interaction, env, keyword, slot);
   }
 
   if (focused.name === "개수") {
@@ -2860,9 +3120,9 @@ export async function autocomplete(interaction, env) {
     return numberChoices(HOURS, keyword);
   }
 
-  if (focused.name === "가격") {
+  if (base === "가격") {
     if (command === "시세설정" || command === "예약매수" || command === "예약매도") {
-      return numberChoices(await priceSuggestions(interaction, env), keyword);
+      return numberChoices(await priceSuggestions(interaction, env, slot), keyword);
     }
     // 종목추가: 초기 가격 예시
     return numberChoices(
@@ -2883,56 +3143,130 @@ export async function autocomplete(interaction, env) {
   return [];
 }
 
-// 예약 매수/매도 공통 처리 (side: "buy" | "sell")
+// 예약 매수/매도 공통 처리 (side: "buy" | "sell"). 종목/가격/수량 칸을 최대 5세트까지 한 번에 받아요.
+// 하나라도 조건이 안 맞으면 아무 예약도 걸지 않고, 안 맞는 이유를 모두 알려줘요.
 async function reserveOrder(side, interaction, env) {
   const userId = interaction.member.user.id;
-  const name = String(opt(interaction, "종목") ?? "").trim();
-  const price = opt(interaction, "가격");
-  const qty = opt(interaction, "수량") ?? 1;
-  if (!Number.isInteger(price) || price < 1) return "가격은 1 이상의 정수여야 해요.";
-  if (!Number.isInteger(qty) || qty <= 0) return "수량은 1 이상의 정수여야 해요.";
+  const { slots, error } = readSlots(interaction, "종목", { price: true });
+  if (error) return error;
+  if (!slots.length) return "종목을 골라 주세요.";
+  for (const s of slots) {
+    if (!Number.isSafeInteger(s.price) || s.price < 1) return `${slotLabel(s.n)}가격은 1 이상의 정수여야 해요.`;
+  }
 
   // 디스코드 3초 제한 때문에 한 번에 같이 조회
-  const [stock, user, items] = await Promise.all([
-    getStock(env, name),
+  const [stocks, user, items] = await Promise.all([
+    Promise.all(slots.map((s) => getStock(env, s.name))),
     getUser(env, userId),
     getOrderItems(env, userId),
   ]);
-  if (!stock) return `"${name}" 종목을 찾을 수 없어요.`;
 
-  if (Object.keys(items).length >= MAX_ORDERS_PER_USER) {
-    return `예약은 최대 ${MAX_ORDERS_PER_USER}개까지 걸 수 있어요. \`/예약취소\`로 정리한 뒤 다시 시도해 주세요.`;
+  const many = slots.length > 1;
+  const tag = (s) => (many ? `[${s.n}번째 ${s.name}] ` : "");
+  const errors = [];
+
+  const missing = slots.filter((_, i) => !stocks[i]);
+  if (missing.length) errors.push(...missing.map((s) => `${tag(s)}"${s.name}" 종목을 찾을 수 없어요.`));
+
+  const current = Object.keys(items).length;
+  if (current + slots.length > MAX_ORDERS_PER_USER) {
+    errors.push(
+      `예약은 최대 ${MAX_ORDERS_PER_USER}개까지 걸 수 있어요. (지금 ${current}개 + 이번 ${slots.length}개) \`/예약취소\`로 정리한 뒤 다시 시도해 주세요.`
+    );
   }
 
-  if (side === "buy") {
-    if (stock.price <= price) {
-      return `현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이하예요. 바로 \`/매수\`를 쓰거나, 더 낮은 가격으로 예약해 주세요.`;
-    }
-    if (user.balance < price * qty) {
-      return `잔고가 부족해요. (예약가 기준 필요: ${(price * qty).toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정)`;
-    }
-  } else {
-    if (stock.price >= price) {
-      return `현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이상이에요. 바로 \`/매도\`를 쓰거나, 더 높은 가격으로 예약해 주세요.`;
-    }
-    const held = user.holdings[name] || 0;
-    const reserved = Object.values(items)
-      .filter((o) => o.side === "sell" && o.stock === name)
-      .reduce((sum, o) => sum + o.qty, 0);
-    if (held - reserved < qty) {
-      return `예약할 수 있는 보유 수량이 부족해요. (보유 ${held.toLocaleString()}주 · 이미 매도 예약 ${reserved.toLocaleString()}주)`;
-    }
+  // 매도 예약 수량: 이미 걸어둔 것 + 이번 명령에서 앞 칸에 건 것까지 합쳐서 보유 수량을 넘지 않게
+  const reserved = {};
+  for (const o of Object.values(items)) {
+    if (o.side === "sell") reserved[o.stock] = (reserved[o.stock] || 0) + o.qty;
   }
 
-  const id = newOrderId(items);
-  const order = { stock: name, side, qty, price, at: Date.now() };
-  await saveOrderItems(env, userId, { ...items, [id]: order });
+  slots.forEach((s, i) => {
+    const stock = stocks[i];
+    if (!stock) return;
+    if (side === "buy") {
+      if (stock.price <= s.price) {
+        errors.push(`${tag(s)}현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이하예요. 바로 \`/매수\`를 쓰거나, 더 낮은 가격으로 예약해 주세요.`);
+      } else if (user.balance < s.price * s.qty) {
+        errors.push(`${tag(s)}잔고가 부족해요. (예약가 기준 필요: ${(s.price * s.qty).toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정)`);
+      }
+    } else {
+      if (stock.price >= s.price) {
+        errors.push(`${tag(s)}현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이상이에요. 바로 \`/매도\`를 쓰거나, 더 높은 가격으로 예약해 주세요.`);
+        return;
+      }
+      const held = user.holdings[s.name] || 0;
+      const already = reserved[s.name] || 0;
+      if (held - already < s.qty) {
+        errors.push(`${tag(s)}예약할 수 있는 보유 수량이 부족해요. (보유 ${held.toLocaleString()}주 · 이미 매도 예약 ${already.toLocaleString()}주)`);
+      } else {
+        reserved[s.name] = already + s.qty;
+      }
+    }
+  });
 
+  if (errors.length) return [...errors, ...(many ? ["(아무 예약도 걸지 않았어요.)"] : [])].join("\n");
+
+  const next = { ...items };
+  const made = slots.map((s, i) => {
+    const id = newOrderId(next);
+    const order = { stock: s.name, side, qty: s.qty, price: s.price, at: Date.now() + i };
+    next[id] = order;
+    return { id, order, now: stocks[i].price };
+  });
+  await saveOrderItems(env, userId, next);
+
+  const footer = "시세가 변동될 때(평소 변동, 급등락)마다 확인하고, 체결되면 DM으로 알려드려요. (체결가는 그때의 현재가예요)";
+  if (!many) {
+    const { id, order, now } = made[0];
+    return [`⏰ 예약했어요. \`${id}\``, orderText(order), `현재가 ${now.toLocaleString()}해정 · ${footer}`].join("\n");
+  }
   return [
-    `⏰ 예약했어요. \`${id}\``,
-    orderText(order),
-    `현재가 ${stock.price.toLocaleString()}해정 · 시세가 변동될 때(평소 변동, 급등락)마다 확인하고, 체결되면 DM으로 알려드려요. (체결가는 그때의 현재가예요)`,
+    `⏰ ${made.length}건을 예약했어요.`,
+    ...made.map((m) => `- \`${m.id}\` ${orderText(m.order)} · 현재가 ${m.now.toLocaleString()}해정`),
+    footer,
   ].join("\n");
+}
+
+// 종목 1개의 시세 그래프: 문자열(안내/오류) 또는 { embeds: [...] }
+async function stockChart(env, name) {
+    const stock = await getStock(env, name);
+    if (!stock) return `"${name}" 종목을 찾을 수 없어요.`;
+
+    const points = getPriceHistory(stock);
+    if (points.length < 2) {
+      return `**${name}**의 시세 기록이 아직 부족해요. 시세가 한 번 더 변동된 뒤에 다시 시도해 주세요.`;
+    }
+
+    const first = points[0];
+    const last = points[points.length - 1];
+    const prices = points.map((p) => p.p);
+    const high = Math.max(...prices);
+    const low = Math.min(...prices);
+    const diff = last.p - first.p;
+    const pct = first.p > 0 ? (diff / first.p) * 100 : 0;
+    const up = diff >= 0;
+    const mark = diff > 0 ? UP_MARK : diff < 0 ? DOWN_MARK : "➖";
+
+    const imageUrl = await renderStockChart(points, up);
+
+    return {
+      embeds: [
+        {
+          title: `${name} 시세 그래프`,
+          description: [
+            `🗓️ 상장일: ${listedText(stock.listedAt)} (한국시간)`,
+            `${mark} 현재가 **${stock.price.toLocaleString()}해정**${dangerTag(stock.price) ? `${dangerTag(stock.price)} 상장폐지 위기` : ""}`,
+            `구간 변동: ${mark} ${fmtSigned(diff)}해정 (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%) · ${formatKST(first.t)} 시작가 ${first.p.toLocaleString()}해정 대비`,
+            `구간 최고 ${high.toLocaleString()} / 최저 ${low.toLocaleString()}해정`,
+            `역대 최고가 ${Math.max(stock.maxPrice || 0, high).toLocaleString()}해정`,
+          ].join("\n"),
+          color: up ? 0xe53935 : 0x1e88e5, // 오름 = 빨강, 내림 = 파랑
+          image: { url: imageUrl },
+          footer: { text: `최근 ${points.length}개 기록 · ${formatKST(first.t)} ~ ${formatKST(last.t)} (한국시간)` },
+        },
+      ],
+    };
 }
 
 // ---- 4) 커맨드별 핸들러: (interaction, env) => Promise<string> ----
@@ -3010,10 +3344,12 @@ export const handlers = {
 
   // 상장폐지된 종목 목록 (최신 폐지순) + 하락률. 종목을 고르면 폐지된 종목도 시세 그래프를 그려줘요.
   상장폐지종류: async (interaction, env) => {
-    const pick = String(opt(interaction, "종목") ?? "").trim();
+    const { slots, error } = readSlots(interaction, "종목");
+    if (error) return error;
+    const picks = [...new Set(slots.map((s) => s.name))];
 
-    // ----- 종목 지정: 하락률 + 그래프 -----
-    if (pick) {
+    // ----- 종목 지정: 하락률 + 그래프 (여러 개면 임베드를 여러 장) -----
+    const showOne = async (pick) => {
       const all = await listDelisted(env, 200);
       const d = all.find((x) => x.name === pick); // 최신 폐지순이라 가장 최근 기록이 잡혀요
       if (!d) return `"${pick}" 상장폐지 기록을 찾지 못했어요. 칸을 눌러 목록에서 골라 주세요.`;
@@ -3051,7 +3387,9 @@ export const handlers = {
           },
         ],
       };
-    }
+    };
+    if (picks.length === 1) return showOne(picks[0]);
+    if (picks.length > 1) return combineResults(await Promise.all(picks.map(showOne)));
 
     // ----- 목록 -----
     const requested = opt(interaction, "개수") ?? 10;
@@ -3079,44 +3417,11 @@ export const handlers = {
 
   // 종목 시세 그래프 (QuickChart 이미지를 임베드로 보여줌)
   그래프: async (interaction, env) => {
-    const name = String(opt(interaction, "종목") ?? "").trim();
-    const stock = await getStock(env, name);
-    if (!stock) return `"${name}" 종목을 찾을 수 없어요.`;
-
-    const points = getPriceHistory(stock);
-    if (points.length < 2) {
-      return `**${name}**의 시세 기록이 아직 부족해요. 시세가 한 번 더 변동된 뒤에 다시 시도해 주세요.`;
-    }
-
-    const first = points[0];
-    const last = points[points.length - 1];
-    const prices = points.map((p) => p.p);
-    const high = Math.max(...prices);
-    const low = Math.min(...prices);
-    const diff = last.p - first.p;
-    const pct = first.p > 0 ? (diff / first.p) * 100 : 0;
-    const up = diff >= 0;
-    const mark = diff > 0 ? UP_MARK : diff < 0 ? DOWN_MARK : "➖";
-
-    const imageUrl = await renderStockChart(points, up);
-
-    return {
-      embeds: [
-        {
-          title: `${name} 시세 그래프`,
-          description: [
-            `🗓️ 상장일: ${listedText(stock.listedAt)} (한국시간)`,
-            `${mark} 현재가 **${stock.price.toLocaleString()}해정**${dangerTag(stock.price) ? `${dangerTag(stock.price)} 상장폐지 위기` : ""}`,
-            `구간 변동: ${mark} ${fmtSigned(diff)}해정 (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%) · ${formatKST(first.t)} 시작가 ${first.p.toLocaleString()}해정 대비`,
-            `구간 최고 ${high.toLocaleString()} / 최저 ${low.toLocaleString()}해정`,
-            `역대 최고가 ${Math.max(stock.maxPrice || 0, high).toLocaleString()}해정`,
-          ].join("\n"),
-          color: up ? 0xe53935 : 0x1e88e5, // 오름 = 빨강, 내림 = 파랑
-          image: { url: imageUrl },
-          footer: { text: `최근 ${points.length}개 기록 · ${formatKST(first.t)} ~ ${formatKST(last.t)} (한국시간)` },
-        },
-      ],
-    };
+    const { slots, error } = readSlots(interaction, "종목");
+    if (error) return error;
+    if (!slots.length) return "종목을 골라 주세요.";
+    const names = [...new Set(slots.map((s) => s.name))];
+    return combineResults(await Promise.all(names.map((name) => stockChart(env, name))));
   },
 
   // 전체 유저의 보유 종목 (모두에게 보이는 무음 응답 — interactions.js의 SILENT_COMMANDS에 등록)
@@ -3216,22 +3521,29 @@ export const handlers = {
     return [`**📜 내 최근 기록 (${list.length}건, 최신순)**`, ...lines].join("\n");
   },
 
+  // 종목 1개면 예전과 똑같이, 2개 이상이면 한 번에 계산해서 전부 성공할 때만 체결해요.
   매수: async (interaction, env) => {
     const userId = interaction.member.user.id;
-    const name = opt(interaction, "종목");
-    const qty = opt(interaction, "수량") ?? 1;
-    if (!Number.isInteger(qty) || qty <= 0) return "수량은 1 이상의 정수여야 해요.";
-    const result = await buyStock(env, userId, name, qty);
-    return result.message;
+    const { slots, error } = readSlots(interaction, "종목");
+    if (error) return error;
+    if (!slots.length) return "종목을 골라 주세요.";
+    const { items, merged, error: mergeError } = mergeSlots(slots);
+    if (mergeError) return mergeError;
+    const note = merged ? "ℹ️ 같은 종목은 수량을 합쳤어요.\n" : "";
+    if (items.length === 1) return note + (await buyStock(env, userId, items[0].name, items[0].qty)).message;
+    return note + (await buyStocks(env, userId, items)).message;
   },
 
   매도: async (interaction, env) => {
     const userId = interaction.member.user.id;
-    const name = opt(interaction, "종목");
-    const qty = opt(interaction, "수량") ?? 1;
-    if (!Number.isInteger(qty) || qty <= 0) return "수량은 1 이상의 정수여야 해요.";
-    const result = await sellStock(env, userId, name, qty);
-    return result.message;
+    const { slots, error } = readSlots(interaction, "종목");
+    if (error) return error;
+    if (!slots.length) return "종목을 골라 주세요.";
+    const { items, merged, error: mergeError } = mergeSlots(slots);
+    if (mergeError) return mergeError;
+    const note = merged ? "ℹ️ 같은 종목은 수량을 합쳤어요.\n" : "";
+    if (items.length === 1) return note + (await sellStock(env, userId, items[0].name, items[0].qty)).message;
+    return note + (await sellStocks(env, userId, items)).message;
   },
 
   예약매수: (interaction, env) => reserveOrder("buy", interaction, env),
@@ -3256,10 +3568,17 @@ export const handlers = {
 
   예약취소: async (interaction, env) => {
     const userId = interaction.member.user.id;
-    const target = String(opt(interaction, "예약") ?? "").trim();
-    const removed = await cancelOrder(env, userId, target);
+    const { slots, error } = readSlots(interaction, "예약");
+    if (error) return error;
+    const targets = slots.map((s) => s.name);
+    if (!targets.length) return "취소할 예약을 골라 주세요.";
+    const { removed, missing } = await cancelOrders(env, userId, targets);
     if (removed.length === 0) return "해당 예약을 찾지 못했어요. 칸을 눌러 목록에서 골라 주세요.";
-    return [`**예약 ${removed.length}건을 취소했어요.**`, ...removed.map((o) => `- \`${o.id}\` ${orderText(o)}`)].join("\n");
+    return [
+      `**예약 ${removed.length}건을 취소했어요.**`,
+      ...removed.map((o) => `- \`${o.id}\` ${orderText(o)}`),
+      ...(missing.length ? [`(찾지 못한 예약: ${missing.map((m) => `\`${m}\``).join(", ")})`] : []),
+    ].join("\n");
   },
 
   // 가격 낮은 순 (listProducts가 정렬해서 줌)
@@ -3277,10 +3596,14 @@ export const handlers = {
 
   구입: async (interaction, env) => {
     const userId = interaction.member.user.id;
-    const name = opt(interaction, "상품");
-    const qty = opt(interaction, "수량") ?? 1;
-    const result = await buyProduct(env, userId, name, qty);
-    return result.message;
+    const { slots, error } = readSlots(interaction, "상품");
+    if (error) return error;
+    if (!slots.length) return "상품을 골라 주세요.";
+    const { items, merged, error: mergeError } = mergeSlots(slots);
+    if (mergeError) return mergeError;
+    const note = merged ? "ℹ️ 같은 상품은 수량을 합쳤어요.\n" : "";
+    if (items.length === 1) return note + (await buyProduct(env, userId, items[0].name, items[0].qty)).message;
+    return note + (await buyProducts(env, userId, items)).message;
   },
 
   보유상품: async (interaction, env) => {
@@ -3331,66 +3654,114 @@ export const handlers = {
     return notifyStatusText(user.notify || { all: false, up: false, down: false }, "현재 알림 설정");
   },
 
+  // 아래 관리자 명령은 종목2~5까지 여러 개를 한 번에 처리해요. 하나라도 잘못되면 아무것도 바꾸지 않아요.
   종목추가: async (interaction, env) => {
     if (!isAdmin(interaction, env)) return "관리자만 사용할 수 있는 명령어예요.";
-    const name = String(opt(interaction, "종목") ?? "").trim();
-    const price = opt(interaction, "가격");
-    if (!name) return "종목 이름을 입력해 주세요.";
-    if (!Number.isInteger(price) || price < 1) return "가격은 1 이상의 정수여야 해요.";
-    await upsertStock(env, name, price);
-    return `"${name}" 종목을 ${price.toLocaleString()}해정에 등록했어요.`;
+    const { slots, error } = readSlots(interaction, "종목", { price: true });
+    if (error) return error;
+    if (!slots.length) return "종목 이름을 입력해 주세요.";
+    for (const s of slots) {
+      if (!Number.isSafeInteger(s.price) || s.price < 1) return `${slotLabel(s.n)}가격은 1 이상의 정수여야 해요.`;
+    }
+    const dup = slots.find((s, i) => slots.findIndex((x) => x.name === s.name) !== i);
+    if (dup) return `같은 종목이 두 번 들어 있어요: "${dup.name}"`;
+
+    await Promise.all(slots.map((s) => upsertStock(env, s.name, s.price)));
+    if (slots.length === 1) return `"${slots[0].name}" 종목을 ${slots[0].price.toLocaleString()}해정에 등록했어요.`;
+    return [`${slots.length}개 종목을 등록했어요.`, ...slots.map((s) => `- "${s.name}" ${s.price.toLocaleString()}해정`)].join("\n");
   },
 
   종목삭제: async (interaction, env) => {
     if (!isAdmin(interaction, env)) return "관리자만 사용할 수 있는 명령어예요.";
-    const name = opt(interaction, "종목");
-    await removeStock(env, name);
-    await ensureMinimumStocks(env); // 종목 수가 기준 이하면 자동 상장
-    return `"${name}" 종목을 삭제했어요.`;
+    const { slots, error } = readSlots(interaction, "종목");
+    if (error) return error;
+    if (!slots.length) return "삭제할 종목을 골라 주세요.";
+    const names = [...new Set(slots.map((s) => s.name))];
+
+    if (names.length === 1) {
+      await removeStock(env, names[0]);
+      await ensureMinimumStocks(env); // 종목 수가 기준 이하면 자동 상장
+      return `"${names[0]}" 종목을 삭제했어요.`;
+    }
+
+    // 여러 개: 없는 종목은 빼고 알려줘요
+    const found = await Promise.all(names.map((n) => getStock(env, n)));
+    const exist = names.filter((_, i) => found[i]);
+    const missing = names.filter((_, i) => !found[i]);
+    await Promise.all(exist.map((n) => removeStock(env, n)));
+    if (exist.length) await ensureMinimumStocks(env); // 마지막에 한 번만 확인
+    return [
+      exist.length ? `${exist.length}개 종목을 삭제했어요: ${exist.map((n) => `"${n}"`).join(", ")}` : "삭제된 종목이 없어요.",
+      ...(missing.length ? [`(찾지 못한 종목: ${missing.map((n) => `"${n}"`).join(", ")})`] : []),
+    ].join("\n");
   },
 
   // 유저 종목 생성: 이름만 정하고 가격은 LISTING_PRICE 고정, 하루 dailyLimit회 (무료)
+  // 이름2~5로 여러 개를 만들면 개수만큼 횟수를 써요. 남은 횟수보다 많이 요청하면 아무것도 만들지 않아요.
   // 디스코드는 3초 안에 응답이 없으면 "응답하지 않았다"고 표시해서, Firestore 호출을 최대한 묶어서 처리해요.
   종목생성: async (interaction, env) => {
     const userId = interaction.member.user.id;
-    const name = String(opt(interaction, "이름") ?? "").trim();
-    if (!name || name.length > 12) return "종목 이름은 1~12자로 입력해 주세요.";
+    const { slots, error } = readSlots(interaction, "이름");
+    if (error) return error;
+    if (!slots.length) return "종목 이름은 1~12자로 입력해 주세요.";
+    const names = slots.map((s) => s.name);
+    if (names.some((n) => n.length > 12)) return "종목 이름은 1~12자로 입력해 주세요.";
+    const dup = names.find((n, i) => names.indexOf(n) !== i);
+    if (dup) return `같은 이름이 두 번 들어 있어요: "${dup}"`;
 
     // 설정 / 유저 / 같은 이름 종목 확인을 동시에 조회
-    const [cfg, user, exists] = await Promise.all([
+    const [cfg, user, ...exists] = await Promise.all([
       getListingConfig(env),
       getUser(env, userId),
-      getStock(env, name),
+      ...names.map((n) => getStock(env, n)),
     ]);
 
     const today = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const used = user.listingDay === today ? user.listingCount || 0 : 0;
-    if (used >= cfg.dailyLimit) {
+    const remaining = Math.max(0, cfg.dailyLimit - used);
+    if (remaining === 0) {
       return `오늘은 종목 생성을 ${cfg.dailyLimit}회 모두 썼어요. 내일 다시 시도해 주세요.`;
     }
-    if (exists) return `"${name}" 종목이 이미 있어요. 다른 이름을 골라 주세요.`;
+    if (names.length > remaining) {
+      return `오늘 남은 생성 횟수는 ${remaining}회인데 ${names.length}개를 요청했어요. (오늘 ${used}/${cfg.dailyLimit}회 사용)\n아무것도 상장하지 않았어요.`;
+    }
+    const taken = names.filter((_, i) => exists[i]);
+    if (taken.length) {
+      return taken.length === 1 && names.length === 1
+        ? `"${taken[0]}" 종목이 이미 있어요. 다른 이름을 골라 주세요.`
+        : `이미 있는 종목이 있어요: ${taken.map((n) => `"${n}"`).join(", ")}\n다른 이름을 골라 주세요. (아무것도 상장하지 않았어요.)`;
+    }
 
-    user.listingDay = today;
-    user.listingCount = used + 1;
+    const newUsed = used + names.length;
 
     // 상장 / 횟수 저장 / 기록을 동시에 처리 (upsertStock에 {}를 넘겨 이미 없는 걸 아니까 다시 읽지 않게 함)
     await Promise.all([
-      upsertStock(env, name, LISTING_PRICE, {}),
+      ...names.map((n) => upsertStock(env, n, LISTING_PRICE, {})),
       // 유저 문서 전체가 아니라 바뀐 두 필드만 저장 (쓰기 용량↓, 다른 필드 덮어쓰기 위험↓)
-      setDoc(env, `users/${userId}`, { listingDay: today, listingCount: used + 1 }),
-      addHistory(env, userId, `종목 생성: ${name} (${LISTING_PRICE.toLocaleString()}해정 상장)`),
+      setDoc(env, `users/${userId}`, { listingDay: today, listingCount: newUsed }),
+      addHistory(env, userId, `종목 생성: ${names.join(", ")} (${LISTING_PRICE.toLocaleString()}해정 상장)`),
     ]);
 
-    return `"${name}" 종목을 ${LISTING_PRICE.toLocaleString()}해정에 상장했어요. (오늘 ${used + 1}/${cfg.dailyLimit}회)`;
+    if (names.length === 1) {
+      return `"${names[0]}" 종목을 ${LISTING_PRICE.toLocaleString()}해정에 상장했어요. (오늘 ${newUsed}/${cfg.dailyLimit}회)`;
+    }
+    return `${names.length}개 종목을 ${LISTING_PRICE.toLocaleString()}해정에 상장했어요: ${names.map((n) => `"${n}"`).join(", ")} (오늘 ${newUsed}/${cfg.dailyLimit}회)`;
   },
 
   시세설정: async (interaction, env) => {
     if (!isAdmin(interaction, env)) return "관리자만 사용할 수 있는 명령어예요.";
-    const name = opt(interaction, "종목");
-    const price = opt(interaction, "가격");
-    if (!Number.isInteger(price) || price < 1) return "가격은 1 이상의 정수여야 해요.";
-    await upsertStock(env, name, price);
-    return `"${name}" 가격을 ${price.toLocaleString()}해정으로 변경했어요.`;
+    const { slots, error } = readSlots(interaction, "종목", { price: true });
+    if (error) return error;
+    if (!slots.length) return "종목을 골라 주세요.";
+    for (const s of slots) {
+      if (!Number.isSafeInteger(s.price) || s.price < 1) return `${slotLabel(s.n)}가격은 1 이상의 정수여야 해요.`;
+    }
+    const dup = slots.find((s, i) => slots.findIndex((x) => x.name === s.name) !== i);
+    if (dup) return `같은 종목이 두 번 들어 있어요: "${dup.name}"`;
+
+    await Promise.all(slots.map((s) => upsertStock(env, s.name, s.price)));
+    if (slots.length === 1) return `"${slots[0].name}" 가격을 ${slots[0].price.toLocaleString()}해정으로 변경했어요.`;
+    return [`${slots.length}개 종목 가격을 변경했어요.`, ...slots.map((s) => `- "${s.name}" → ${s.price.toLocaleString()}해정`)].join("\n");
   },
 
   출석설정: async (interaction, env) => {
