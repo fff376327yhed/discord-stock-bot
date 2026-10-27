@@ -1,7 +1,7 @@
 import {
   loadEnv, isAuthorizedCron, currentSurgeSlot, surgeSlotKey, isSurgeMoment,
   fluctuatePrices, announcePriceChanges, notifyPriceChanges, announcePreAlert,
-  processOrders, processFutures, prepareCrowd, finishCrowd, getDoc, setDoc,
+  processOrders, processFutures, processBank, prepareCrowd, finishCrowd, getDoc, setDoc,
 } from "../src/lib.js";
 
 // 크론 엔드포인트 3개(fluctuate / midnight / prealert)를 한 함수로 합친 파일이에요.
@@ -47,6 +47,14 @@ async function runFluctuation(env, range, label) {
     console.error("선물 정산 실패:", err.message);
   }
 
+  // 2-3) 은행: 만기 알림 / 만기 대출 자동 회수 / 연체 처리 (실패해도 시세 변동 결과는 그대로 응답)
+  let bank = null;
+  try {
+    bank = await processBank(env);
+  } catch (err) {
+    console.error("은행 처리 실패:", err.message);
+  }
+
   // 3) 알림을 켠 유저에게 DM
   await notifyPriceChanges(env, changes);
 
@@ -55,6 +63,7 @@ async function runFluctuation(env, range, label) {
     announce,
     orders,
     futures,
+    bank,
     crowd: crowd?.summary,
     mode: label,
     count: changes.length,

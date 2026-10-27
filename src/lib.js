@@ -861,6 +861,7 @@ export async function getRanking(env) {
     listCollection(env, "stocks"),
   ]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const extras = await extraAssets(env, priceMap); // 예금 + 선물 평가금 - 대출
 
   return users
     .map((u) => {
@@ -868,7 +869,7 @@ export async function getRanking(env) {
         (sum, [name, qty]) => sum + (priceMap[name] || 0) * qty,
         0
       );
-      return { id: u.id, total: (u.balance || 0) + holdingsValue };
+      return { id: u.id, total: (u.balance || 0) + holdingsValue + (extras[u.id] || 0) };
     })
     .sort((a, b) => b.total - a.total);
 }
@@ -883,6 +884,7 @@ export async function getUserDetail(env, userId) {
     getRanking(env),
   ]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const extraAsset = await userExtraAsset(env, userId, priceMap); // 예금 + 선물 평가금 - 대출
 
   const holdings = Object.entries(user.holdings)
     .map(([name, qty]) => {
@@ -896,7 +898,7 @@ export async function getUserDetail(env, userId) {
     .sort((a, b) => compareKo(a.name, b.name));
   const holdingsValue = holdings.reduce((sum, h) => sum + h.value, 0);
   const holdingsCost = holdings.reduce((sum, h) => sum + h.cost, 0);
-  const totalAsset = user.balance + holdingsValue;
+  const totalAsset = user.balance + holdingsValue + extraAsset;
   const rank = ranking.findIndex((r) => r.id === userId) + 1;
 
   const prevAsset = Number.isFinite(user.lastAsset) ? user.lastAsset : null;
@@ -910,6 +912,7 @@ export async function getUserDetail(env, userId) {
     balance: user.balance,
     holdings,
     holdingsValue,
+    extraAsset,
     holdingsCost,
     holdingsProfit: holdingsValue - holdingsCost,
     realizedProfit: user.realizedProfit || 0,
@@ -1135,7 +1138,7 @@ const collectionOf = (day) => `logs_${day}`;
 export const VIEW_ONLY = new Set([
   "도움말", "주식목록", "그래프", "상장폐지종류", "보유종목", "잔고", "내정보",
   "봇현황", "랭킹", "내역", "예약목록", "보유상품", "알림확인", "채굴정보", "주식상점",
-  "선물목록", "선물설명",
+  "선물목록", "선물설명", "은행", "은행설명",
 ]);
 
 // 명령어 이름 -> 분류 (관리자 콘솔의 분류 선택칸에 그대로 나와요)
@@ -1145,6 +1148,10 @@ const CATEGORY = {
   구입: "상품구입",
   선물: "선물",
   선물청산: "선물",
+  예금: "은행",
+  출금: "은행",
+  대출: "은행",
+  상환: "은행",
   예약매수: "예약",
   예약매도: "예약",
   예약취소: "예약",
@@ -2777,6 +2784,499 @@ export async function processFutures(env, changes = []) {
 }
 
 // ============================================================
+// [bank.js]
+// ============================================================
+// ---------- 해정 은행 (예금 / 대출 / 이자 / 연체) ----------
+// 이자는 "시간이 흐른 만큼" 계산해요. 명령어를 쓰는 순간이나 크론이 돌 때마다 마지막 계산 이후의
+// 이자를 더하기 때문에, 언제 조회해도 그 시각 기준으로 정확한 금액이 나와요. (실시간)
+//  - 예금: 일 DEPOSIT_RATE 이자. 쌓인 이자는 예금에 바로 합쳐져요.
+//  - 대출: 원금 × 일 이자율 × 지난 시간(일). 기간(1/3/7일)마다 이자율이 달라요.
+//    만기가 지나면 일 이자율에 LOAN_PENALTY_RATE(연체 이자)가 더 붙어요.
+//  - 상환: 이자 먼저, 그다음 원금. 일찍 갚으면 그때까지 쌓인 이자만 내요.
+//  - 만기: 잔고 → 예금 순서로 자동 회수. 모자라면 연체, 연체 LIQUIDATE_AFTER_HOURS시간 뒤에는 보유 주식 강제 매도.
+//  - 저장: bank/{유저ID} = { deposit, depositAt, earned, loans: { 번호: 대출 } }
+//    대출 = { principal, unpaid, rate, term, takenAt, due, lastAt, borrowed, warned? }
+export const DEPOSIT_RATE = 0.005; // 예금 일 0.5%
+export const LOAN_TERMS = { 1: 0.03, 3: 0.025, 7: 0.02 }; // 기간(일) -> 일 이자율
+export const LOAN_PENALTY_RATE = 0.05; // 연체 시 일 +5%p
+export const LOAN_MIN = 100;
+export const MAX_LOANS_PER_USER = 3;
+export const LOAN_LIMIT_RATIO = 0.5; // 한도 = 순자산의 50%
+export const LOAN_LIMIT_MIN = 1000; // 순자산이 적어도 이만큼은 빌릴 수 있어요
+export const LIQUIDATE_AFTER_HOURS = 24; // 연체 후 이 시간이 지나면 보유 주식 강제 매도
+export const REMIND_BEFORE_HOURS = 6; // 만기 이 시간 전에 DM으로 알려줘요
+const BANK_HOUR_MS = 60 * 60 * 1000;
+
+const bankPath = (userId) => `bank/${userId}`;
+const pctText = (r) => `${+(r * 100).toFixed(2)}%`;
+const unixOf = (ms) => Math.floor(ms / 1000);
+// 디스코드가 알아서 "3일 뒤"처럼 실시간으로 바꿔 보여주는 시각 표시
+const dueText = (ms) => `<t:${unixOf(ms)}:f> (<t:${unixOf(ms)}:R>)`;
+const depositOf = (bank) => Math.floor(bank.deposit + 1e-9);
+
+export async function getBank(env, userId) {
+  const doc = await getDoc(env, bankPath(userId));
+  const bank = { deposit: 0, depositAt: 0, earned: 0, loans: {}, ...(doc || {}) };
+  if (!bank.loans) bank.loans = {};
+  return bank;
+}
+
+async function saveBank(env, userId, bank) {
+  await setDoc(env, bankPath(userId), {
+    deposit: bank.deposit,
+    depositAt: bank.depositAt,
+    earned: bank.earned || 0,
+    loans: bank.loans,
+  });
+}
+
+// 대출 한 건의 이자를 now까지 계산해서 unpaid에 더해요 (만기 이후 구간은 연체 이자율)
+function accrueLoan(loan, now) {
+  const from = loan.lastAt || loan.takenAt;
+  if (now <= from) return loan;
+  const normalMs = Math.max(0, Math.min(now, loan.due) - from);
+  const lateMs = Math.max(0, now - Math.max(from, loan.due));
+  loan.unpaid += (loan.principal * (loan.rate * normalMs + (loan.rate + LOAN_PENALTY_RATE) * lateMs)) / DAY_MS;
+  loan.lastAt = now;
+  return loan;
+}
+
+// 예금 이자 + 모든 대출 이자를 now까지 계산 (bank를 직접 바꿔요. 조회만 할 때는 복사본을 넘기세요)
+function accrueBank(bank, now) {
+  if (bank.deposit > 0 && bank.depositAt && now > bank.depositAt) {
+    const gain = (bank.deposit * DEPOSIT_RATE * (now - bank.depositAt)) / DAY_MS;
+    bank.deposit += gain;
+    bank.earned = (bank.earned || 0) + gain;
+  }
+  bank.depositAt = now;
+  for (const loan of Object.values(bank.loans)) accrueLoan(loan, now);
+  return bank;
+}
+
+const loanOwed = (loan) => loan.principal + Math.max(0, Math.ceil(loan.unpaid - 1e-9)); // 지금 다 갚으려면 필요한 돈
+const interestOwed = (loan) => Math.max(0, Math.ceil(loan.unpaid - 1e-9)); // -0 방지
+const isOverdue = (loan, now) => now > loan.due;
+
+// 이자 먼저, 남으면 원금. 실제로 낸 { toInterest, toPrincipal } 반환
+function payLoan(loan, amount) {
+  const toInterest = Math.min(amount, interestOwed(loan));
+  loan.unpaid = Math.max(0, loan.unpaid - toInterest);
+  const toPrincipal = Math.min(amount - toInterest, loan.principal);
+  loan.principal -= toPrincipal;
+  return { toInterest, toPrincipal };
+}
+
+function newLoanId(loans) {
+  let id;
+  do {
+    id = Math.random().toString(36).slice(2, 6);
+  } while (!id || loans[id]);
+  return id;
+}
+
+const loansByDue = (bank) =>
+  Object.entries(bank.loans)
+    .map(([id, l]) => ({ id, l }))
+    .sort((a, b) => a.l.due - b.l.due);
+
+// 순자산 = 잔고 + 주식 + 예금 + 선물 평가금 - 대출(원금+이자)
+async function netWorthOf(env, userId, user, bank, stocks) {
+  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const holdingsValue = Object.entries(user.holdings).reduce((sum, [name, qty]) => sum + (priceMap[name] || 0) * qty, 0);
+  const futs = futureList(await getFutureItems(env, userId));
+  const futuresValue = futs.reduce((sum, f) => sum + (priceMap[f.stock] === undefined ? f.margin : futureEquity(f, priceMap[f.stock])), 0);
+  const debt = Object.values(bank.loans).reduce((sum, l) => sum + loanOwed(l), 0);
+  const deposit = depositOf(bank);
+  return { net: user.balance + holdingsValue + deposit + futuresValue - debt, debt, deposit };
+}
+
+// 대출 한도: 순자산의 50% (최소 1,000해정). 이미 빌린 원금은 빼요.
+function loanLimitOf(net, bank) {
+  const total = Math.max(LOAN_LIMIT_MIN, Math.floor(Math.max(net, 0) * LOAN_LIMIT_RATIO));
+  const used = Object.values(bank.loans).reduce((sum, l) => sum + l.principal, 0);
+  return { total, used, available: Math.max(0, total - used) };
+}
+
+// 랭킹/총자산용: 예금 + 선물 평가금 - 대출. { 유저ID: 해정 }
+export async function extraAssets(env, priceMap) {
+  const [banks, futs] = await Promise.all([listCollection(env, "bank"), listCollection(env, "futures")]);
+  const now = Date.now();
+  const extra = {};
+  for (const b of banks) {
+    const bank = accrueBank({ deposit: b.deposit || 0, depositAt: b.depositAt || 0, earned: 0, loans: structuredClone(b.loans || {}) }, now);
+    const debt = Object.values(bank.loans).reduce((sum, l) => sum + loanOwed(l), 0);
+    extra[b.id] = (extra[b.id] || 0) + depositOf(bank) - debt;
+  }
+  for (const f of futs) {
+    for (const p of Object.values(f.items || {})) {
+      const price = priceMap[p.stock];
+      extra[f.id] = (extra[f.id] || 0) + (price === undefined ? p.margin : futureEquity(p, price));
+    }
+  }
+  return extra;
+}
+
+// 한 명분 (/내정보용)
+export async function userExtraAsset(env, userId, priceMap) {
+  const [bank0, futItems] = await Promise.all([getBank(env, userId), getFutureItems(env, userId)]);
+  const bank = accrueBank(structuredClone(bank0), Date.now());
+  const debt = Object.values(bank.loans).reduce((sum, l) => sum + loanOwed(l), 0);
+  const futuresValue = futureList(futItems).reduce(
+    (sum, f) => sum + (priceMap[f.stock] === undefined ? f.margin : futureEquity(f, priceMap[f.stock])),
+    0
+  );
+  return depositOf(bank) + futuresValue - debt;
+}
+
+// ---------- 예금 ----------
+export async function depositMoney(env, userId, amount) {
+  if (!Number.isSafeInteger(amount) || amount < 1) return { ok: false, message: "예금할 금액은 1 이상의 정수로 입력해 주세요." };
+  const user = await getUser(env, userId);
+  if (user.balance < amount) {
+    return { ok: false, message: `잔고가 부족해요. (필요: ${amount.toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정)` };
+  }
+  const bank = accrueBank(await getBank(env, userId), Date.now());
+  const balanceBefore = user.balance;
+
+  // 잔고에서 먼저 빼고 예금에 넣어요. 예금 저장이 실패하면 잔고를 돌려줘요.
+  user.balance -= amount;
+  await saveUser(env, userId, user);
+  bank.deposit += amount;
+  try {
+    await saveBank(env, userId, bank);
+  } catch (err) {
+    console.error(`예금 저장 실패 (${userId}):`, err.message);
+    user.balance += amount;
+    await saveUser(env, userId, user).catch(() => {});
+    return { ok: false, message: "예금하는 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
+  }
+  await addHistory(env, userId, `예금: ${amount.toLocaleString()}해정 → 예금 ${depositOf(bank).toLocaleString()}해정`);
+
+  return {
+    ok: true,
+    message: [
+      `🏦 **예금 완료** +${amount.toLocaleString()}해정`,
+      balanceLine(balanceBefore, user.balance),
+      `🐷 예금 총액: **${depositOf(bank).toLocaleString()}해정** (일 ${pctText(DEPOSIT_RATE)} · 하루에 약 +${Math.floor(bank.deposit * DEPOSIT_RATE).toLocaleString()}해정)`,
+    ].join("\n"),
+  };
+}
+
+// amount가 비어 있으면 전액 출금
+export async function withdrawMoney(env, userId, amount) {
+  const bank = accrueBank(await getBank(env, userId), Date.now());
+  const have = depositOf(bank);
+  if (have < 1) return { ok: false, message: "예금이 없어요. `/예금`으로 먼저 맡겨 보세요." };
+  const pay = amount === undefined || amount === null ? have : amount;
+  if (!Number.isSafeInteger(pay) || pay < 1) return { ok: false, message: "출금할 금액은 1 이상의 정수로 입력해 주세요." };
+  if (pay > have) return { ok: false, message: `예금이 부족해요. (출금 가능: ${have.toLocaleString()}해정)` };
+
+  const user = await getUser(env, userId);
+  const balanceBefore = user.balance;
+
+  // 예금에서 먼저 빼고 잔고에 넣어요. 잔고 저장이 실패하면 예금을 되돌려요.
+  const bankBefore = structuredClone(bank);
+  bank.deposit -= pay;
+  await saveBank(env, userId, bank);
+  user.balance += pay;
+  try {
+    await saveUser(env, userId, user);
+  } catch (err) {
+    console.error(`출금 저장 실패 (${userId}):`, err.message);
+    await saveBank(env, userId, bankBefore).catch(() => {});
+    return { ok: false, message: "출금하는 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
+  }
+  await addHistory(env, userId, `출금: ${pay.toLocaleString()}해정 → 잔고 ${user.balance.toLocaleString()}해정`);
+
+  return {
+    ok: true,
+    message: [
+      `🏦 **출금 완료** -${pay.toLocaleString()}해정`,
+      balanceLine(balanceBefore, user.balance),
+      `🐷 남은 예금: ${depositOf(bank).toLocaleString()}해정`,
+    ].join("\n"),
+  };
+}
+
+// ---------- 대출 ----------
+export async function takeLoan(env, userId, amount, termDays) {
+  const rate = LOAN_TERMS[termDays];
+  if (rate === undefined) return { ok: false, message: `기간은 ${Object.keys(LOAN_TERMS).join(", ")}일 중에서 골라 주세요.` };
+  if (!Number.isSafeInteger(amount) || amount < LOAN_MIN) {
+    return { ok: false, message: `대출은 ${LOAN_MIN.toLocaleString()}해정 이상 정수로 신청해 주세요.` };
+  }
+
+  const now = Date.now();
+  const [user, bank0, stocks] = await Promise.all([getUser(env, userId), getBank(env, userId), listStocks(env)]);
+  const bank = accrueBank(bank0, now);
+
+  if (Object.values(bank.loans).some((l) => isOverdue(l, now))) {
+    return { ok: false, message: "🚨 연체 중인 대출이 있어서 새로 빌릴 수 없어요. `/상환`으로 먼저 갚아 주세요." };
+  }
+  if (Object.keys(bank.loans).length >= MAX_LOANS_PER_USER) {
+    return { ok: false, message: `대출은 최대 ${MAX_LOANS_PER_USER}건까지 가능해요. 먼저 갚아 주세요.` };
+  }
+
+  const { net } = await netWorthOf(env, userId, user, bank, stocks);
+  const limit = loanLimitOf(net, bank);
+  if (amount > limit.available) {
+    return {
+      ok: false,
+      message: `대출 한도를 넘었어요. (신청: ${amount.toLocaleString()}해정, 남은 한도: ${limit.available.toLocaleString()}해정 / 전체 ${limit.total.toLocaleString()}해정)`,
+    };
+  }
+
+  const id = newLoanId(bank.loans);
+  const due = now + termDays * DAY_MS;
+  bank.loans[id] = { principal: amount, unpaid: 0, rate, term: termDays, takenAt: now, due, lastAt: now, borrowed: amount };
+
+  // 대출 기록을 먼저 저장하고 해정을 지급해요. 지급이 실패하면 기록을 지워요.
+  await saveBank(env, userId, bank);
+  const balanceBefore = user.balance;
+  user.balance += amount;
+  try {
+    await saveUser(env, userId, user);
+  } catch (err) {
+    console.error(`대출 지급 실패 (${userId}):`, err.message);
+    delete bank.loans[id];
+    await saveBank(env, userId, bank).catch(() => {});
+    return { ok: false, message: "대출 처리 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
+  }
+  await addHistory(env, userId, `대출: ${amount.toLocaleString()}해정 (${termDays}일 · 일 ${pctText(rate)}) → 잔고 ${user.balance.toLocaleString()}해정`);
+
+  const expected = Math.round(amount * rate * termDays);
+  return {
+    ok: true,
+    message: [
+      `💸 **대출 실행!** \`${id}\` ${amount.toLocaleString()}해정 (${termDays}일)`,
+      balanceLine(balanceBefore, user.balance),
+      `- 이자: 하루 ${pctText(rate)} (${termDays}일 꽉 채우면 약 ${expected.toLocaleString()}해정, 시간 단위로 계속 쌓여요)`,
+      `- 📅 갚을 날: ${dueText(due)}`,
+      `- 일찍 갚으면 그때까지 쌓인 이자만 내요. 만기가 지나면 하루 ${pctText(rate + LOAN_PENALTY_RATE)}로 연체 이자가 붙어요.`,
+    ].join("\n"),
+  };
+}
+
+// ---------- 상환 ----------
+// target: 대출 번호 또는 "all"(만기 빠른 순서로 잔고가 닿는 만큼). amount: 비우면 전액
+export async function repayLoans(env, userId, target, amount) {
+  const now = Date.now();
+  const [user, bank0] = await Promise.all([getUser(env, userId), getBank(env, userId)]);
+  const bank = accrueBank(bank0, now);
+
+  const plan = []; // [{ id, pay }]
+  if (target === "all") {
+    let funds = user.balance;
+    for (const { id, l } of loansByDue(bank)) {
+      const pay = Math.min(loanOwed(l), funds);
+      if (pay < 1) break;
+      plan.push({ id, pay });
+      funds -= pay;
+    }
+    if (Object.keys(bank.loans).length === 0) return { ok: false, message: "갚을 대출이 없어요. 👍" };
+    if (plan.length === 0) return { ok: false, message: "잔고가 없어서 갚을 수 없어요. `/출금`으로 예금을 찾아 보세요." };
+  } else {
+    const loan = bank.loans[target];
+    if (!loan) return { ok: false, message: "해당 대출을 찾지 못했어요. 칸을 눌러 목록에서 골라 주세요." };
+    const owed = loanOwed(loan);
+    const want = amount === undefined || amount === null ? owed : amount;
+    if (!Number.isSafeInteger(want) || want < 1) return { ok: false, message: "상환 금액은 1 이상의 정수로 입력해 주세요." };
+    const pay = Math.min(want, owed);
+    if (user.balance < pay) {
+      return { ok: false, message: `잔고가 부족해요. (필요: ${pay.toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정) 금액을 줄여서 일부만 갚을 수도 있어요.` };
+    }
+    plan.push({ id: target, pay });
+  }
+
+  const balanceBefore = user.balance;
+  const lines = [];
+  let total = 0;
+  for (const { id, pay } of plan) {
+    const loan = bank.loans[id];
+    const { toInterest, toPrincipal } = payLoan(loan, pay);
+    total += pay;
+    if (loan.principal <= 0) {
+      delete bank.loans[id];
+      lines.push(`- \`${id}\` 이자 ${toInterest.toLocaleString()} + 원금 ${toPrincipal.toLocaleString()} 상환 → ✅ **완납!**`);
+    } else {
+      lines.push(`- \`${id}\` 이자 ${toInterest.toLocaleString()} + 원금 ${toPrincipal.toLocaleString()} 상환 → 남은 빚 ${loanOwed(loan).toLocaleString()}해정`);
+    }
+  }
+
+  // 잔고에서 먼저 빼고 대출을 줄여요. 대출 저장이 실패하면 잔고를 돌려줘요.
+  user.balance -= total;
+  await saveUser(env, userId, user);
+  try {
+    await saveBank(env, userId, bank);
+  } catch (err) {
+    console.error(`상환 저장 실패 (${userId}):`, err.message);
+    user.balance += total;
+    await saveUser(env, userId, user).catch(() => {});
+    return { ok: false, message: "상환 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
+  }
+  await addHistory(env, userId, `대출 상환: ${total.toLocaleString()}해정 → 잔고 ${user.balance.toLocaleString()}해정`);
+
+  return { ok: true, message: [`💳 **상환 완료** -${total.toLocaleString()}해정`, ...lines, balanceLine(balanceBefore, user.balance)].join("\n") };
+}
+
+// ---------- /은행 : 내 현황 (조회하는 순간 기준) ----------
+export async function bankStatus(env, userId) {
+  const now = Date.now();
+  const [user, bank0, stocks] = await Promise.all([getUser(env, userId), getBank(env, userId), listStocks(env)]);
+  const bank = accrueBank(structuredClone(bank0), now);
+  const { net, debt, deposit } = await netWorthOf(env, userId, user, bank, stocks);
+  const limit = loanLimitOf(net, bank);
+
+  const lines = ["**🏦 내 은행 현황** (지금 이 순간 기준, 이자는 계속 쌓여요)", ""];
+  lines.push(`🐷 **예금**: ${deposit.toLocaleString()}해정 (일 ${pctText(DEPOSIT_RATE)} · 지금까지 받은 이자 +${Math.floor(bank.earned || 0).toLocaleString()}해정)`);
+
+  const loans = loansByDue(bank);
+  if (loans.length === 0) {
+    lines.push("💸 **대출**: 없음");
+  } else {
+    lines.push(`💸 **대출 ${loans.length}건** · 갚을 돈 합계 **${debt.toLocaleString()}해정**`);
+    for (const { id, l } of loans) {
+      const late = isOverdue(l, now);
+      lines.push(
+        `\`${id}\` ${l.term}일 대출 · 원금 ${l.principal.toLocaleString()} + 이자 ${interestOwed(l).toLocaleString()} = **${loanOwed(l).toLocaleString()}해정**`,
+        late
+          ? `  🚨 **연체 중!** 하루 ${pctText(l.rate + LOAN_PENALTY_RATE)}씩 이자가 붙고 있어요 (만기 ${dueText(l.due)})`
+          : `  일 ${pctText(l.rate)} · 📅 만기 ${dueText(l.due)}`
+      );
+    }
+  }
+  lines.push("", `📋 **대출 한도**: 남은 ${limit.available.toLocaleString()}해정 / 전체 ${limit.total.toLocaleString()}해정 (순자산 ${net.toLocaleString()}해정의 ${LOAN_LIMIT_RATIO * 100}%, 최소 ${LOAN_LIMIT_MIN.toLocaleString()})`);
+  return lines.join("\n");
+}
+
+// ---------- 크론: 시세 변동 직후에 호출 ----------
+// 1) 만기 전 알림  2) 만기 지난 대출 자동 회수(잔고 → 예금)  3) 연체가 길면 보유 주식 강제 매도
+// 반환: { collected: 자동 회수 건수, liquidated: 강제 매도로 갚은 건수, overdue: 연체 중 건수, reminded: 알림 수 }
+function forceSell(user, priceMap, need) {
+  const lines = [];
+  let raised = 0;
+  const list = Object.entries(user.holdings)
+    .map(([name, qty]) => ({ name, qty, price: priceMap[name] || 0 }))
+    .filter((h) => h.qty > 0 && h.price > 0)
+    .sort((a, b) => b.qty * b.price - a.qty * a.price);
+  for (const h of list) {
+    if (raised >= need) break;
+    const qty = Math.min(h.qty, Math.ceil((need - raised) / h.price));
+    const prevCost = costOf(user, h.name, h.price);
+    const basis = Math.round((prevCost * qty) / h.qty);
+    const earned = h.price * qty;
+    user.holdings[h.name] = h.qty - qty;
+    if (user.holdings[h.name] === 0) {
+      delete user.holdings[h.name];
+      delete user.costs[h.name];
+    } else {
+      user.costs[h.name] = prevCost - basis;
+    }
+    user.realizedProfit = (user.realizedProfit || 0) + (earned - basis);
+    raised += earned;
+    lines.push(`${h.name} ${qty.toLocaleString()}주 강제 매도 (+${earned.toLocaleString()}해정)`);
+  }
+  user.balance += raised;
+  return { raised, lines };
+}
+
+export async function processBank(env) {
+  const [docs, stocks] = await Promise.all([listCollection(env, "bank"), listStocks(env)]);
+  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const summary = { collected: 0, liquidated: 0, overdue: 0, reminded: 0 };
+  const now = Date.now();
+
+  await Promise.all(
+    docs.map(async (doc) => {
+      const userId = doc.id;
+      const loans = doc.loans || {};
+      const needWork = Object.values(loans).some(
+        (l) => l.due <= now || (!l.warned && l.due - now <= REMIND_BEFORE_HOURS * BANK_HOUR_MS)
+      );
+      if (!needWork) return;
+
+      try {
+        const bank = accrueBank(await getBank(env, userId), now);
+        const user = await getUser(env, userId);
+        const notes = [];
+        let userChanged = false;
+
+        for (const { id, l } of loansByDue(bank)) {
+          // 만기 전 알림 (한 번만)
+          if (l.due > now) {
+            if (!l.warned && l.due - now <= REMIND_BEFORE_HOURS * BANK_HOUR_MS) {
+              l.warned = true;
+              summary.reminded++;
+              notes.push(`⏰ **[만기 임박]** \`${id}\` 대출 ${loanOwed(l).toLocaleString()}해정을 ${dueText(l.due)}까지 갚아야 해요. 안 갚으면 잔고에서 자동으로 빠져나가요.`);
+            }
+            continue;
+          }
+
+          // 만기 지남: 1) 잔고
+          let owed = loanOwed(l);
+          let paid = 0;
+          const fromBalance = Math.min(user.balance, owed);
+          if (fromBalance > 0) {
+            payLoan(l, fromBalance);
+            user.balance -= fromBalance;
+            userChanged = true;
+            paid += fromBalance;
+          }
+          // 2) 예금
+          owed = loanOwed(l);
+          if (l.principal > 0 && owed > 0 && depositOf(bank) > 0) {
+            const fromDeposit = Math.min(depositOf(bank), owed);
+            payLoan(l, fromDeposit);
+            bank.deposit -= fromDeposit;
+            paid += fromDeposit;
+          }
+          // 3) 연체가 길어지면 보유 주식 강제 매도
+          let soldLines = [];
+          owed = loanOwed(l);
+          if (l.principal > 0 && now >= l.due + LIQUIDATE_AFTER_HOURS * BANK_HOUR_MS) {
+            const sold = forceSell(user, priceMap, owed);
+            if (sold.raised > 0) {
+              userChanged = true;
+              soldLines = sold.lines;
+              const pay = Math.min(user.balance, owed);
+              payLoan(l, pay);
+              user.balance -= pay;
+              paid += pay;
+              summary.liquidated++;
+            }
+          }
+
+          if (l.principal <= 0) {
+            delete bank.loans[id];
+            summary.collected++;
+            notes.push(`🏦 **[대출 자동 상환]** \`${id}\` 대출이 만기가 되어 ${paid.toLocaleString()}해정이 자동으로 상환됐어요.${soldLines.length ? `\n보유 주식을 강제로 팔았어요: ${soldLines.join(", ")}` : ""}`);
+          } else {
+            summary.overdue++;
+            notes.push(
+              `🚨 **[연체]** \`${id}\` 대출이 만기를 넘겼어요. 남은 빚 ${loanOwed(l).toLocaleString()}해정 (하루 ${pctText(l.rate + LOAN_PENALTY_RATE)}씩 연체 이자)` +
+                (paid > 0 ? `\n자동으로 ${paid.toLocaleString()}해정을 회수했어요.` : "") +
+                (soldLines.length ? `\n보유 주식을 강제로 팔았어요: ${soldLines.join(", ")}` : "") +
+                `\n해정이 들어오면 자동으로 갚아지고, ${LIQUIDATE_AFTER_HOURS}시간이 지나면 보유 주식이 강제로 팔려요.`
+            );
+          }
+        }
+
+        if (notes.length === 0) return;
+        if (userChanged) await saveUser(env, userId, user);
+        await saveBank(env, userId, bank);
+        await addHistory(env, userId, `은행 자동 처리: ${notes.length}건 → 잔고 ${user.balance.toLocaleString()}해정`);
+        await logAction(env, { u: userId, cmd: "상환", a: `${notes.length}건`, r: "은행 자동 처리 (알림/회수/연체)" });
+        await safeDM(env, userId, notes.join("\n\n"));
+      } catch (err) {
+        console.error(`은행 처리 실패 (${userId}):`, err.message);
+      }
+    })
+  );
+
+  return summary;
+}
+
+// ============================================================
 // [commands.js]
 // ============================================================
 // ---- 1) Discord에 등록할 커맨드 정의 ----
@@ -2924,6 +3424,40 @@ export const commandDefinitions = [
     ),
   },
   { name: "선물설명", description: "선물이 뭔지, 어떻게 쓰는지 쉽게 알려줍니다." },
+  { name: "은행", description: "내 예금·대출·이자·대출 한도를 지금 이 순간 기준으로 봅니다." },
+  { name: "은행설명", description: "은행 이용법을 쉽게 알려줍니다. (예금·대출·이자·연체)" },
+  {
+    name: "예금",
+    description: "해정을 은행에 맡기고 이자를 받습니다. 이자는 시간이 흐르는 대로 쌓여요.",
+    options: [{ name: "금액", description: "맡길 해정 (칸을 누르면 예시가 떠요)", type: 4, required: true, autocomplete: true, min_value: 1 }],
+  },
+  {
+    name: "출금",
+    description: "은행 예금을 찾아 잔고로 가져옵니다. 쌓인 이자도 같이 나와요.",
+    options: [{ name: "금액", description: "찾을 해정 (안 적으면 전액)", type: 4, required: false, autocomplete: true, min_value: 1 }],
+  },
+  {
+    name: "대출",
+    description: "은행에서 해정을 빌립니다. 기간 안에 이자와 함께 갚아야 해요. (사용법은 /은행설명)",
+    options: [
+      { name: "금액", description: "빌릴 해정 (칸을 누르면 한도 안의 예시가 떠요)", type: 4, required: true, autocomplete: true, min_value: LOAN_MIN },
+      {
+        name: "기간",
+        description: "갚을 기간 (길수록 하루 이자는 낮아요)",
+        type: 4,
+        required: true,
+        choices: Object.entries(LOAN_TERMS).map(([d, r]) => ({ name: `${d}일 (이자 하루 ${+(r * 100).toFixed(2)}%)`, value: Number(d) })),
+      },
+    ],
+  },
+  {
+    name: "상환",
+    description: "대출을 갚습니다. 일부만 갚거나 전부 갚을 수 있어요. (이자 먼저, 그다음 원금)",
+    options: [
+      { name: "대출", description: "갚을 대출 (목록에서 선택, '전체 상환'도 가능)", type: 3, required: true, autocomplete: true },
+      { name: "금액", description: "갚을 해정 (안 적으면 전액)", type: 4, required: false, autocomplete: true, min_value: 1 },
+    ],
+  },
   { name: "주식상점", description: "구입할 수 있는 상품 목록을 모두에게 보여줍니다. (가격 낮은 순, 알림 없이 표시)" },
   {
     name: "구입",
@@ -3346,6 +3880,67 @@ export async function autocomplete(interaction, env) {
     );
   }
 
+  // ----- 은행: 예금/출금/대출/상환 -----
+  if (["예금", "출금", "대출", "상환"].includes(command)) {
+    const userId = interaction.member?.user?.id;
+    if (!userId) return [];
+    const now = Date.now();
+
+    // 상환: 대출 고르기 / 금액 예시
+    if (command === "상환") {
+      const bank = accrueBank(await getBank(env, userId), now);
+      const loans = loansByDue(bank);
+      if (focused.name === "대출") {
+        const items = loans.map(({ id, l }) => ({
+          label: `[${id}] ${l.term}일 대출 · 갚을 돈 ${loanOwed(l).toLocaleString()}해정${isOverdue(l, now) ? " · 🚨연체" : ""}`,
+          value: id,
+        }));
+        if (items.length > 1) items.push({ label: "전체 상환 (잔고가 닿는 만큼, 만기 빠른 순)", value: "all" });
+        return textChoices(items, keyword);
+      }
+      const picked = bank.loans[String(opt(interaction, "대출") ?? "")];
+      if (!picked) return [];
+      const owed = loanOwed(picked);
+      const list = [
+        { label: `전액 ${owed.toLocaleString()}해정 (이자 ${interestOwed(picked).toLocaleString()} + 원금 ${picked.principal.toLocaleString()})`, value: owed },
+      ];
+      if (interestOwed(picked) > 0 && interestOwed(picked) < owed) list.push({ label: `이자만 ${interestOwed(picked).toLocaleString()}해정`, value: interestOwed(picked) });
+      if (owed >= 200) list.push({ label: `절반 ${Math.floor(owed / 2).toLocaleString()}해정`, value: Math.floor(owed / 2) });
+      return numberChoices(list, keyword);
+    }
+
+    // 예금: 잔고 기준 예시
+    if (command === "예금") {
+      const user = await getUser(env, userId);
+      const list = [100, 500, 1000, 5000, 10000]
+        .filter((n) => n < user.balance)
+        .map((n) => ({ label: `${n.toLocaleString()}해정`, value: n }));
+      if (user.balance >= 1) list.push({ label: `전액 ${user.balance.toLocaleString()}해정`, value: user.balance });
+      return numberChoices(list, keyword);
+    }
+
+    // 출금: 예금 기준 예시
+    if (command === "출금") {
+      const have = depositOf(accrueBank(await getBank(env, userId), now));
+      const list = [100, 500, 1000, 5000]
+        .filter((n) => n < have)
+        .map((n) => ({ label: `${n.toLocaleString()}해정`, value: n }));
+      if (have >= 1) list.push({ label: `전액 ${have.toLocaleString()}해정`, value: have });
+      return numberChoices(list, keyword);
+    }
+
+    // 대출: 남은 한도 안의 예시
+    const [user, bank0, stocks] = await Promise.all([getUser(env, userId), getBank(env, userId), listStocks(env)]);
+    const bank = accrueBank(bank0, now);
+    const { net } = await netWorthOf(env, userId, user, bank, stocks);
+    const { available } = loanLimitOf(net, bank);
+    const list = [100, 500, 1000, 5000, 10000]
+      .filter((n) => n < available)
+      .map((n) => ({ label: `${n.toLocaleString()}해정`, value: n }));
+    if (available >= LOAN_MIN) list.push({ label: `최대 ${available.toLocaleString()}해정 (남은 한도)`, value: available });
+    return numberChoices(list, keyword);
+  }
+
   // ----- 선물청산: 내 선물 포지션 (현재 손익 표시) -----
   if (base === "포지션") {
     const userId = interaction.member?.user?.id;
@@ -3581,6 +4176,43 @@ function futuresHelpText() {
   ].join("\n");
 }
 
+// /은행설명: 처음 보는 사람도 바로 이해하도록 짧게
+function bankHelpText() {
+  const terms = Object.entries(LOAN_TERMS)
+    .map(([d, r]) => `${d}일(하루 ${pctText(r)})`)
+    .join(" / ");
+  return [
+    "**🏦 해정 은행 사용법**",
+    "맡기면 **이자를 받고**, 빌리면 **이자를 내요.** 이자는 시간이 흐르는 대로 실시간으로 쌓여요.",
+    "",
+    "**🐷 예금** — 하루 " + pctText(DEPOSIT_RATE),
+    "`/예금 금액` 맡기기 · `/출금` 찾기 (금액을 안 적으면 전액)",
+    "",
+    "**💸 대출**",
+    "`/대출 금액 기간` — 기간: " + terms,
+    "- 이자는 빌린 순간부터 시간 단위로 계속 쌓여요",
+    "- 일찍 갚으면 **그때까지 쌓인 이자만** 내요",
+    `- 한도: 내 순자산(해정+주식+예금+선물-빚)의 ${LOAN_LIMIT_RATIO * 100}%, 최소 ${LOAN_LIMIT_MIN.toLocaleString()}해정`,
+    `- 동시에 최대 ${MAX_LOANS_PER_USER}건`,
+    "",
+    "**예시** 1,000해정을 3일로 빌리면?",
+    "- 하루 " + pctText(LOAN_TERMS[3]) + " → 3일 꽉 채우면 이자 약 " + Math.round(1000 * LOAN_TERMS[3] * 3) + "해정",
+    "- 1일 만에 갚으면 이자 약 " + Math.round(1000 * LOAN_TERMS[3]) + "해정",
+    "",
+    "**💳 상환**",
+    "`/상환 대출 금액` — 금액을 안 적으면 전액. 일부만 갚아도 돼요 (이자 먼저, 그다음 원금)",
+    "",
+    "**🚨 못 갚으면?**",
+    "1. 만기가 되면 은행이 내 **잔고 → 예금** 순서로 자동으로 가져가요",
+    `2. 그래도 모자라면 **연체**: 하루 +${pctText(LOAN_PENALTY_RATE)}p 연체 이자가 붙고, 새 대출은 막혀요`,
+    `3. 연체 ${LIQUIDATE_AFTER_HOURS}시간 뒤에도 못 갚으면 **보유 주식이 강제로 팔려요** (큰 종목부터)`,
+    "4. 그래도 빚이 남으면 해정이 들어올 때마다 자동으로 갚아져요",
+    `⏰ 만기 ${REMIND_BEFORE_HOURS}시간 전에 DM으로 알려줘요`,
+    "",
+    "`/은행` — 내 예금·대출·이자·한도를 지금 이 순간 기준으로 보기",
+  ].join("\n");
+}
+
 export const handlers = {
   도움말: async () => helpText(),
 
@@ -3795,6 +4427,7 @@ export const handlers = {
       "**내 상세정보**",
       `현금 잔고: ${detail.balance.toLocaleString()}해정`,
       `보유 종목 평가액: ${detail.holdingsValue.toLocaleString()}해정`,
+      ...(detail.extraAsset ? [`🏦 예금·선물 평가금 - 대출: ${detail.extraAsset.toLocaleString()}해정`] : []),
       `총 자산: ${detail.totalAsset.toLocaleString()}해정`,
       changeText,
       `보유 종목 평가손익: ${profitLabel(detail.holdingsProfit, detail.holdingsCost)}`,
@@ -3934,6 +4567,20 @@ export const handlers = {
   },
 
   선물설명: async () => futuresHelpText(),
+
+  은행: async (interaction, env) => bankStatus(env, interaction.member.user.id),
+
+  은행설명: async () => bankHelpText(),
+
+  예금: async (interaction, env) => (await depositMoney(env, interaction.member.user.id, opt(interaction, "금액"))).message,
+
+  출금: async (interaction, env) => (await withdrawMoney(env, interaction.member.user.id, opt(interaction, "금액"))).message,
+
+  대출: async (interaction, env) =>
+    (await takeLoan(env, interaction.member.user.id, opt(interaction, "금액"), opt(interaction, "기간"))).message,
+
+  상환: async (interaction, env) =>
+    (await repayLoans(env, interaction.member.user.id, String(opt(interaction, "대출") ?? "").trim(), opt(interaction, "금액"))).message,
 
   // 가격 낮은 순 (listProducts가 정렬해서 줌)
   // 모두에게 보이는 무음 응답 (interactions.js의 SILENT_COMMANDS에 "주식상점" 등록)
