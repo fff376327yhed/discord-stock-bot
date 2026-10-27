@@ -1,11 +1,11 @@
 import {
   loadEnv, isAuthorizedCron, currentSurgeSlot, surgeSlotKey, isSurgeMoment,
   fluctuatePrices, announcePriceChanges, notifyPriceChanges, announcePreAlert,
-  processOrders, processFutures, processBank, processDividends, prepareCrowd, finishCrowd, getDoc, setDoc,
+  processOrders, processFutures, processBank, processDividends, takeNews, finishNews, publishNews, prepareCrowd, finishCrowd, getDoc, setDoc,
 } from "../src/lib.js";
 
 // 크론 엔드포인트 3개(fluctuate / midnight / prealert)를 한 함수로 합친 파일이에요.
-// 호출: /api/cron?task=fluctuate | midnight | prealert
+// 호출: /api/cron?task=fluctuate | midnight | prealert | news
 //  - vercel.json의 rewrites 덕분에 예전 주소(/api/cron/fluctuate 등)도 그대로 동작해요.
 //  - 인증: Authorization: Bearer <CRON_SECRET>
 
@@ -19,7 +19,15 @@ async function runFluctuation(env, range, label) {
     console.error("봇 준비 실패:", err.message);
   }
 
-  const changes = await fluctuatePrices(env, { ...range, impact: crowd?.impact });
+  // 공시: 예고된 호재/악재가 있으면 이번 변동에 반영 (실패해도 시세 변동은 그대로 진행)
+  let news = null;
+  try {
+    news = await takeNews(env);
+  } catch (err) {
+    console.error("공시 불러오기 실패:", err.message);
+  }
+
+  const changes = await fluctuatePrices(env, { ...range, impact: crowd?.impact, news: news?.shifts });
 
   // 상장폐지 종목을 봇 보유분에서 지우고 봇 저장
   try {
@@ -29,7 +37,15 @@ async function runFluctuation(env, range, label) {
   }
 
   // 1) 주식채널 공지 (알림 설정과 무관)
-  const announce = await announcePriceChanges(env, changes, label);
+  // 반영된 공시를 비우고 결과 문구를 만들어 공지에 같이 올려요
+  let newsResult = { lines: [], count: 0 };
+  try {
+    newsResult = await finishNews(env, news, changes);
+  } catch (err) {
+    console.error("공시 결과 처리 실패:", err.message);
+  }
+
+  const announce = await announcePriceChanges(env, changes, label, newsResult.lines);
 
   // 2) 예약 매수/매도 체결 (실패해도 시세 변동 결과는 그대로 응답)
   let orders = null;
@@ -73,6 +89,7 @@ async function runFluctuation(env, range, label) {
     futures,
     bank,
     dividends,
+    news: newsResult.count,
     crowd: crowd?.summary,
     mode: label,
     count: changes.length,
@@ -151,7 +168,13 @@ async function prealertTask(env) {
 }
 
 // ---------- 진입점 ----------
-const TASKS = { fluctuate: fluctuateTask, midnight: midnightTask, prealert: prealertTask };
+// ---------- 4) 공시 (5분 전 공지, cron-job.org: 10,25,40,55 * * * *) ----------
+async function newsTask(env) {
+  const result = await publishNews(env);
+  return Response.json({ ok: true, ...result });
+}
+
+const TASKS = { fluctuate: fluctuateTask, midnight: midnightTask, prealert: prealertTask, news: newsTask };
 
 export default {
   fetch: async function handler(request) {

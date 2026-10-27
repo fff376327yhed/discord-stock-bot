@@ -1052,14 +1052,14 @@ export function getDelistedHistory(d) {
 //   - holders: 상장폐지된 종목을 보유 중이던 유저 ID 목록 (아니면 빈 배열)
 // crashChance: 종목마다 이 확률로 crashPct(예: -100%)가 그대로 적용돼요. (0.005 = 0.5%)
 // impact: { 종목이름: %p } 봇 순매수 압력 등 종목별로 변동률에 더해지는 값 (crowd.js 에서 계산)
-export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, crashPct = -100, impact = {} }) {
+export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, crashPct = -100, impact = {}, news = {} }) {
   const stocks = await listStocks(env);
   const changes = [];
 
   for (const stock of stocks) {
     const pct = Math.random() < crashChance
       ? crashPct
-      : minPct + Math.random() * (maxPct - minPct) + (impact[stock.name] || 0);
+      : minPct + Math.random() * (maxPct - minPct) + (impact[stock.name] || 0) + (news[stock.name] || 0); // news = 공시 기울기
     const newPrice = Math.max(1, Math.round(stock.price * (1 + pct / 100)));
     // 최고가 기록이 없던 기존 종목은 지금 가격을 최고가로 시작
     const maxPrice = Math.max(Number.isFinite(stock.maxPrice) ? stock.maxPrice : stock.price, stock.price);
@@ -1138,7 +1138,7 @@ const collectionOf = (day) => `logs_${day}`;
 export const VIEW_ONLY = new Set([
   "도움말", "주식목록", "그래프", "상장폐지종류", "보유종목", "잔고", "내정보",
   "봇현황", "랭킹", "내역", "예약목록", "보유상품", "알림확인", "채굴정보", "주식상점",
-  "선물목록", "선물설명", "은행", "은행설명", "배당",
+  "선물목록", "선물설명", "은행", "은행설명", "배당", "공시목록",
 ]);
 
 // 명령어 이름 -> 분류 (관리자 콘솔의 분류 선택칸에 그대로 나와요)
@@ -1166,6 +1166,8 @@ const CATEGORY = {
   종목삭제: "관리자",
   시세설정: "관리자",
   출석설정: "관리자",
+  공시: "관리자",
+  공시설정: "관리자",
 };
 export const categoryOf = (cmd) => CATEGORY[cmd] || "기타";
 
@@ -2205,7 +2207,7 @@ function announceLine(c) {
 // 유저의 알림 설정과 상관없이 올라가요. (관리자 콘솔의 '가격 변동 알림' 체크를 끄면 올라가지 않음) 실패해도 시세 변동 자체는 막지 않습니다.
 // 상장폐지된 종목이 있으면 공지 맨 아래에 안내 문구가 추가돼요.
 // 반환값: { sent: true, messages: 보낸 메시지 수 } 또는 { sent: false, reason: "이유" }
-export async function announcePriceChanges(env, changes, label = "시세 변동") {
+export async function announcePriceChanges(env, changes, label = "시세 변동", extraLines = []) {
   if (!env.DISCORD_BOT_TOKEN) {
     return { sent: false, reason: "DISCORD_BOT_TOKEN 환경변수가 없어요" };
   }
@@ -2240,6 +2242,16 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
         current = "";
       }
       current += (current ? "\n" : "") + line;
+    }
+
+    // 공시 결과 (있을 때만)
+    if (extraLines.length) {
+      const block = ["📰 **공시 결과**", ...extraLines].join("\n");
+      if (current.length + block.length + 2 > 1900) {
+        chunks.push(current);
+        current = "";
+      }
+      current += (current ? "\n\n" : "") + block;
     }
 
     // 안내 문구: 상장폐지 종목이 있을 때만 표시
@@ -3471,6 +3483,9 @@ export async function processDividends(env) {
 
   const [users, stocks] = await Promise.all([listCollection(env, "users"), listStocks(env)]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  // 배당 확대(×2)/무배당(×0) 공시가 있으면 이번 지급에 반영해요
+  const newsDoc = (await getDoc(env, NEWS_PATH).catch(() => null)) || {};
+  const divMods = newsDoc.divMods || {};
   const targets = [];
   for (const u of users) {
     let sum = 0;
@@ -3478,7 +3493,7 @@ export async function processDividends(env) {
     for (const [name, qty] of Object.entries(u.holdings || {})) {
       const price = priceMap[name];
       if (!(qty > 0) || price === undefined) continue;
-      const pay = dividendOf(price, qty);
+      const pay = Math.floor(dividendOf(price, qty) * (divMods[name] ?? 1));
       if (pay > 0) {
         sum += pay;
         parts.push(`${name} +${pay.toLocaleString()}`);
@@ -3509,6 +3524,8 @@ export async function processDividends(env) {
     );
   }
 
+  if (Object.keys(divMods).length) await setDoc(env, NEWS_PATH, { divMods: {} }).catch(() => {}); // 공시 반영 끝
+
   // 주식채널에 무음으로 한 줄 공지 (실패해도 지급은 끝난 상태)
   if (paid > 0 && env.ALLOWED_CHANNEL_ID) {
     try {
@@ -3526,16 +3543,18 @@ export async function processDividends(env) {
 
 // /배당 : 내 예상 배당금과 받은 내역
 export async function dividendInfo(env, userId) {
-  const [user, stocks, state] = await Promise.all([getUser(env, userId), listStocks(env), getDoc(env, DIVIDEND_PATH)]);
+  const [user, stocks, state, newsDoc] = await Promise.all([getUser(env, userId), listStocks(env), getDoc(env, DIVIDEND_PATH), getDoc(env, NEWS_PATH).catch(() => null)]);
+  const mods = newsDoc?.divMods || {};
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
   const rows = [];
   let sum = 0;
   for (const [name, qty] of Object.entries(user.holdings)) {
     const price = priceMap[name];
     if (!(qty > 0) || price === undefined) continue;
-    const pay = dividendOf(price, qty);
+    const mul = mods[name] ?? 1;
+    const pay = Math.floor(dividendOf(price, qty) * mul);
     sum += pay;
-    rows.push({ name, qty, pay, danger: price <= DANGER_PRICE });
+    rows.push({ name, qty, pay, mul, danger: price <= DANGER_PRICE });
   }
   rows.sort((a, b) => b.pay - a.pay || compareKo(a.name, b.name));
   const capped = Math.min(sum, DIVIDEND_MAX_PER_USER);
@@ -3557,7 +3576,7 @@ export async function dividendInfo(env, userId) {
   } else {
     lines.push("**지금 지급한다면**");
     for (const r of rows) {
-      lines.push(`- ${r.name} ${r.qty.toLocaleString()}주 → ${r.danger ? "무배당 (위기 종목)" : `+${r.pay.toLocaleString()}해정`}`);
+      lines.push(`- ${r.name} ${r.qty.toLocaleString()}주 → ${r.danger ? "무배당 (위기 종목)" : r.mul === 0 ? "무배당 (공시)" : `+${r.pay.toLocaleString()}해정${r.mul !== 1 ? ` (공시: ×${r.mul})` : ""}`}`);
     }
     lines.push(`합계 **+${capped.toLocaleString()}해정**${sum > capped ? ` (하루 상한 ${DIVIDEND_MAX_PER_USER.toLocaleString()}해정 적용)` : ""}`);
   }
@@ -3565,6 +3584,325 @@ export async function dividendInfo(env, userId) {
     lines.push("", `🧾 마지막으로 받은 배당: ${user.lastDividend.day} · +${Number(user.lastDividend.amount).toLocaleString()}해정`);
   }
   if (user.totalDividend) lines.push(`📈 지금까지 받은 배당 합계: ${Number(user.totalDividend).toLocaleString()}해정`);
+  return lines.join("\n");
+}
+
+// ---------- 공시/뉴스 ----------
+//  - 하루 3~4건(관리자가 /공시설정으로 변경)을 랜덤으로 올려요. 시세 변동 5분 전에 주식채널에 공지하고,
+//    다음 시세 변동에 "확률 편향"으로 반영돼요. (호재 = 무조건 상승이 아니라 변동 범위가 위쪽으로 기울어요)
+//  - 같은 종목은 NEWS_COOLDOWN_HOURS시간 동안 다시 안 나와요.
+//  - 위기 종목(300해정 이하)에는 큰 악재가 안 나오고, 상장폐지 경고 / 구제 소식만 나와요.
+//  - 배당 확대/무배당 공시는 다음 배당금 지급액에도 반영돼요. (processDividends)
+//  - 루머는 NEWS_RUMOR_TRUE_RATE 확률로만 사실이에요. (헛소문이면 반대로 살짝 움직여요)
+//  - 호출: cron-job.org에서 10,25,40,55분마다 /api/cron?task=news (시세 변동이 0,15,30,45분일 때 5분 전)
+//  - 저장: config/news = { enabled, perDay, day, target, count, queue, cool, recent, divMods }
+const NEWS_PATH = "config/news";
+export const NEWS_PER_DAY = 4;
+export const NEWS_COOLDOWN_HOURS = 6;
+const NEWS_SHIFT = { 1: 6, 2: 10, 3: 14 }; // 기울기 세기(퍼센트포인트). 평소 변동이 -20~+20%라면 중간 호재는 -10~+30%
+const NEWS_MAX_SHIFT = 20; // 한 종목에 겹쳐도 이 이상은 안 기울어요
+const NEWS_RUMOR_TRUE_RATE = 0.6;
+const NEWS_KEEP = 12; // /공시목록에 남겨두는 최근 공시 수
+const NEWS_HOUR_MS = 60 * 60 * 1000;
+
+// 관리자가 /공시로 직접 올릴 때 고르는 성격
+const NEWS_MANUAL = {
+  good1: { tone: "good", shift: NEWS_SHIFT[1], label: "호재 (소)" },
+  good2: { tone: "good", shift: NEWS_SHIFT[2], label: "호재 (중)" },
+  good3: { tone: "good", shift: NEWS_SHIFT[3], label: "호재 (대)" },
+  bad1: { tone: "bad", shift: NEWS_SHIFT[1], label: "악재 (소)" },
+  bad2: { tone: "bad", shift: NEWS_SHIFT[2], label: "악재 (중)" },
+  bad3: { tone: "bad", shift: NEWS_SHIFT[3], label: "악재 (대)" },
+  none: { tone: "none", shift: 0, label: "정보만 알림 (효과 없음)" },
+};
+
+// 자동 공시 문구 모음. 서버 분위기에 맞게 texts에 문장을 마음껏 추가/수정하세요. ({n} = 종목 이름)
+//  tone: good(호재) / bad(악재), tilt: 세기 1~3, weight: 나올 확률 가중치
+//  scope: normal(일반 종목만) / danger(위기 종목만) / both
+//  div: 2 = 다음 배당 2배, 0 = 다음 배당 없음   rumor: true = 확인 안 된 소문
+const NEWS_TEMPLATES = [
+  { kind: "실적 발표", tone: "good", tilt: 2, weight: 2, scope: "normal", texts: [
+    "{n} 이번 분기 실적이 시장 예상을 크게 웃돌았어요",
+    "{n} 역대 최대 분기 매출을 달성했어요",
+    "{n} 영업이익이 전년 대비 큰 폭으로 늘었어요",
+  ] },
+  { kind: "실적 발표", tone: "bad", tilt: 2, weight: 2, scope: "normal", texts: [
+    "{n} 이번 분기 실적이 시장 예상에 못 미쳤어요",
+    "{n} 영업이익이 줄어 어닝 쇼크를 기록했어요",
+    "{n} 적자 전환 소식이 전해졌어요",
+  ] },
+  { kind: "신제품/계약", tone: "good", tilt: 1, weight: 2, scope: "normal", texts: [
+    "{n} 신제품이 출시 첫날부터 품절 대란을 일으켰어요",
+    "{n} 대형 공급 계약을 따냈다고 밝혔어요",
+    "{n} 해외 시장 진출 계획을 발표했어요",
+  ] },
+  { kind: "사업 차질", tone: "bad", tilt: 1, weight: 1, scope: "normal", texts: [
+    "{n} 신제품 출시가 무기한 연기됐어요",
+    "{n} 주요 거래처가 계약을 해지했어요",
+  ] },
+  { kind: "횡령/사고", tone: "bad", tilt: 3, weight: 1, scope: "normal", texts: [
+    "{n} 임원의 횡령 의혹이 제기됐어요",
+    "{n} 공장 화재로 생산이 중단됐어요",
+    "{n} 개인정보 유출 사고가 발생했어요",
+  ] },
+  { kind: "배당 확대", tone: "good", tilt: 1, weight: 1, scope: "normal", div: 2, texts: [
+    "{n} 다음 배당을 2배로 늘리겠다고 발표했어요",
+    "{n} 주주환원 정책으로 배당 확대를 결정했어요",
+  ] },
+  { kind: "무배당", tone: "bad", tilt: 1, weight: 1, scope: "normal", div: 0, texts: [
+    "{n} 투자 재원 마련을 위해 다음 배당을 하지 않기로 했어요",
+    "{n} 이번에는 배당을 건너뛰겠다고 밝혔어요",
+  ] },
+  { kind: "상장폐지 경고", tone: "bad", tilt: 2, weight: 2, scope: "danger", texts: [
+    "{n} 상장폐지 심사 대상에 올랐어요",
+    "{n} 감사의견 거절 가능성이 제기됐어요",
+  ] },
+  { kind: "구제 소식", tone: "good", tilt: 2, weight: 1, scope: "danger", texts: [
+    "{n} 대형 투자자가 인수를 검토 중이라는 소식이에요",
+    "{n} 구조조정 계획이 승인됐어요",
+  ] },
+  { kind: "루머", tone: "good", tilt: 2, weight: 1, scope: "both", rumor: true, texts: [
+    "{n} 곧 대형 계약을 따낼 거라는 소문이 돌고 있어요",
+    "{n} 호실적 발표가 임박했다는 소문이 있어요",
+  ] },
+  { kind: "루머", tone: "bad", tilt: 2, weight: 1, scope: "both", rumor: true, texts: [
+    "{n} 경영진 불화설이 퍼지고 있어요",
+    "{n} 실적이 안 좋다는 이야기가 돌고 있어요",
+  ] },
+];
+
+const newsPickOne = (arr) => arr[Math.floor(Math.random() * arr.length)];
+function newsPickWeighted(list) {
+  const total = list.reduce((s, t) => s + t.weight, 0);
+  let r = Math.random() * total;
+  for (const t of list) {
+    r -= t.weight;
+    if (r < 0) return t;
+  }
+  return list[list.length - 1];
+}
+const newsId = (at) => `n${at.toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+
+// 종목 하나에 붙일 공시를 만들어요 (위기 종목이면 위기용 문구만)
+function buildNewsItem(stock, at) {
+  const danger = isDelistDanger(stock.price);
+  const pool = NEWS_TEMPLATES.filter((t) => t.scope === "both" || t.scope === (danger ? "danger" : "normal"));
+  const t = newsPickWeighted(pool);
+  const sign = t.tone === "good" ? 1 : -1;
+  let shift = NEWS_SHIFT[t.tilt] * sign;
+  const item = {
+    id: newsId(at),
+    stock: stock.name,
+    kind: t.kind,
+    text: newsPickOne(t.texts).replaceAll("{n}", stock.name) + (t.rumor ? " (확인되지 않았어요)" : ""),
+    tone: t.tone,
+    rumor: !!t.rumor,
+    manual: false,
+    at,
+  };
+  if (t.rumor) {
+    item.rumorTrue = Math.random() < NEWS_RUMOR_TRUE_RATE;
+    if (!item.rumorTrue) shift = -shift / 2; // 헛소문이면 반대로 살짝
+  }
+  item.shift = shift;
+  if (t.div !== undefined) item.div = t.div;
+  return item;
+}
+
+const newsAnnounceLine = (it) => `📰 **[${it.rumor ? "루머" : it.kind}]** **${it.stock}** — ${it.text}`;
+
+// 주식채널의 마지막 공지 메시지 맨 아래에 덧붙여요. 덧붙일 공간이 없으면 새 메시지로 올려요. (급등락 예고와 같은 방식)
+async function appendToAnnouncement(env, line) {
+  if (!env.DISCORD_BOT_TOKEN) return { sent: false, reason: "DISCORD_BOT_TOKEN 환경변수가 없어요" };
+  if (!env.ALLOWED_CHANNEL_ID) return { sent: false, reason: "ALLOWED_CHANNEL_ID 환경변수가 없어요" };
+  const doc = await readAnnounceDoc(env);
+  if (doc.enabled === false) return { sent: false, reason: "가격 변동 공지가 꺼져 있어요 (공시도 같이 쉬어요)" };
+
+  const channel = env.ALLOWED_CHANNEL_ID;
+  try {
+    const ids = doc.channelId === channel ? String(doc.messageIds || "").split(",").filter(Boolean) : [];
+    const lastId = ids[ids.length - 1];
+    if (lastId) {
+      const msg = await discordRequest(env, "GET", `/channels/${channel}/messages/${lastId}`);
+      const merged = `${msg.content}\n\n${line}`;
+      if (merged.length <= 1900) {
+        await discordRequest(env, "PATCH", `/channels/${channel}/messages/${lastId}`, { content: merged });
+        return { sent: true, mode: "edit" };
+      }
+    }
+    const message = await discordPost(env, `/channels/${channel}/messages`, { content: line, flags: 4096 });
+    await setDoc(env, ANNOUNCE_PATH, { messageIds: [...ids, message.id].join(","), channelId: channel });
+    return { sent: true, mode: "new" };
+  } catch (err) {
+    console.error("공시 공지 실패:", err.message);
+    return { sent: false, reason: err.message };
+  }
+}
+
+// queue / recent / cool / divMods에 새 공시를 기록해요
+async function saveNewsItems(env, doc, items, patch = {}) {
+  const now = Date.now();
+  const queue = { ...(doc.queue || {}) };
+  const recent = { ...(doc.recent || {}) };
+  const cool = Object.fromEntries(Object.entries(doc.cool || {}).filter(([, t]) => now - t < 24 * NEWS_HOUR_MS));
+  const divMods = { ...(doc.divMods || {}) };
+  for (const it of items) {
+    queue[it.id] = it;
+    recent[it.id] = { stock: it.stock, kind: it.kind, text: it.text, tone: it.tone, rumor: it.rumor, at: it.at, done: false };
+    cool[it.stock] = it.at;
+    if (it.div !== undefined) divMods[it.stock] = it.div;
+  }
+  const keep = Object.entries(recent).sort(([, a], [, b]) => b.at - a.at).slice(0, NEWS_KEEP);
+  await setDoc(env, NEWS_PATH, { queue, recent: Object.fromEntries(keep), cool, divMods, ...patch });
+}
+
+// 크론(10,25,40,55분마다): 하루 목표 건수를 하루 동안 고르게 퍼뜨려서 올려요
+export async function publishNews(env) {
+  const now = Date.now();
+  const doc = (await getDoc(env, NEWS_PATH)) || {};
+  const perDay = doc.perDay ?? NEWS_PER_DAY;
+  if (doc.enabled === false || perDay <= 0) return { published: 0, reason: "공시가 꺼져 있어요" };
+  if (isSurgeMoment(now)) return { published: 0, reason: "급등락 시각이라 쉬어요" };
+
+  // 하루 목표(예: 4건이면 3~4건)를 날짜가 바뀔 때 한 번 정해요
+  const day = todayKST();
+  let target = doc.target ?? perDay;
+  let count = doc.count ?? 0;
+  if (doc.day !== day) {
+    target = Math.max(1, perDay - (Math.random() < 0.5 ? 1 : 0));
+    count = 0;
+    await setDoc(env, NEWS_PATH, { day, target, count });
+  }
+  const remaining = target - count;
+  if (remaining <= 0) return { published: 0, reason: "오늘 공시를 다 올렸어요" };
+
+  // 남은 건수 / 남은 호출 횟수(15분 간격) 확률로 올려서 하루 동안 고르게 퍼져요
+  const kst = new Date(now + 9 * NEWS_HOUR_MS);
+  const minutesNow = kst.getUTCHours() * 60 + kst.getUTCMinutes();
+  const callsLeft = Math.max(1, Math.ceil((1440 - minutesNow) / 15));
+  if (Math.random() >= Math.min(1, remaining / callsLeft)) return { published: 0, reason: "이번엔 공시가 없어요" };
+
+  const stocks = await listStocks(env);
+  const queued = new Set(Object.values(doc.queue || {}).map((i) => i.stock));
+  const cool = doc.cool || {};
+  const eligible = stocks.filter(
+    (s) => s.price > DELIST_PRICE && !queued.has(s.name) && !(cool[s.name] && now - cool[s.name] < NEWS_COOLDOWN_HOURS * NEWS_HOUR_MS)
+  );
+  if (eligible.length === 0) return { published: 0, reason: "공시할 수 있는 종목이 없어요 (쿨다운 중)" };
+
+  eligible.sort(() => Math.random() - 0.5);
+  const n = Math.min(eligible.length, remaining >= 2 && Math.random() < 0.2 ? 2 : 1);
+  const items = eligible.slice(0, n).map((s, i) => buildNewsItem(s, now + i));
+
+  // 공지가 먼저 올라가야 유저가 알 수 있어요. 공지가 실패하면 효과도 기록하지 않아요.
+  const post = await appendToAnnouncement(env, items.map(newsAnnounceLine).join("\n"));
+  if (!post.sent) return { published: 0, reason: post.reason };
+
+  await saveNewsItems(env, doc, items, { day, target, count: count + items.length });
+  return { published: items.length, stocks: items.map((i) => i.stock) };
+}
+
+// 관리자가 직접 올리는 공시 (/공시). 하루 횟수·쿨다운과 상관없이 바로 올라가요.
+export async function postManualNews(env, stockName, text, toneKey) {
+  const m = NEWS_MANUAL[toneKey];
+  if (!m) return { ok: false, message: "성격을 목록에서 골라 주세요." };
+  const content = String(text || "").trim();
+  if (content.length < 1 || content.length > 150) return { ok: false, message: "공시 내용은 1~150자로 적어 주세요." };
+  const stock = await getStock(env, stockName);
+  if (!stock) return { ok: false, message: `"${stockName}" 종목을 찾지 못했어요.` };
+
+  const now = Date.now();
+  const item = {
+    id: newsId(now),
+    stock: stock.name ?? stockName,
+    kind: "공시",
+    text: content,
+    tone: m.tone,
+    shift: m.tone === "bad" ? -m.shift : m.shift,
+    rumor: false,
+    manual: true,
+    at: now,
+  };
+  const post = await appendToAnnouncement(env, newsAnnounceLine(item));
+  if (!post.sent) return { ok: false, message: `공지를 올리지 못해서 공시를 취소했어요. (${post.reason})` };
+
+  const doc = (await getDoc(env, NEWS_PATH)) || {};
+  await saveNewsItems(env, doc, [item]);
+  return { ok: true, message: `📰 공시를 올렸어요: **${item.stock}** (${m.label}) — 다음 시세 변동에 반영돼요.` };
+}
+
+// 시세 변동 직전에 호출: 올라와 있는 공시를 읽어서 종목별 기울기를 돌려줘요
+export async function takeNews(env) {
+  const doc = await getDoc(env, NEWS_PATH);
+  const items = Object.values(doc?.queue || {});
+  if (items.length === 0) return null;
+  const shifts = {};
+  for (const it of items) shifts[it.stock] = (shifts[it.stock] || 0) + (it.shift || 0);
+  for (const k of Object.keys(shifts)) shifts[k] = Math.max(-NEWS_MAX_SHIFT, Math.min(NEWS_MAX_SHIFT, shifts[k]));
+  return { items, shifts };
+}
+
+// 시세 변동 직후에 호출: 반영된 공시를 비우고, 결과 문구를 만들어요
+export async function finishNews(env, news, changes) {
+  if (!news) return { lines: [], count: 0 };
+  const byName = Object.fromEntries(changes.map((c) => [c.name, c]));
+  const doc = (await getDoc(env, NEWS_PATH)) || {};
+  const queue = { ...(doc.queue || {}) };
+  const recent = { ...(doc.recent || {}) };
+  const lines = [];
+
+  for (const it of news.items) {
+    delete queue[it.id];
+    const c = byName[it.stock];
+    let line = `**${it.stock}** ${it.rumor ? "루머" : it.kind}`;
+    let pct = 0;
+    if (!c) {
+      line += " → 종목이 사라졌어요";
+    } else if (c.delisted) {
+      line += " → 🚫 상장폐지";
+    } else {
+      pct = ((c.after - c.before) / c.before) * 100;
+      line += ` → ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
+      if (it.rumor) line += it.rumorTrue ? " · 소문이 사실이었어요" : " · 헛소문이었어요";
+      else if (it.tone === "good") line += pct > 0 ? " · 공시대로 올랐어요" : " · 호재인데 안 올랐어요";
+      else if (it.tone === "bad") line += pct < 0 ? " · 공시대로 내렸어요" : " · 악재인데 안 내렸어요";
+    }
+    lines.push(line);
+    if (recent[it.id]) {
+      recent[it.id] = { ...recent[it.id], done: true, pct: Math.round(pct * 10) / 10, delisted: !!c?.delisted, ...(it.rumor ? { rumorTrue: !!it.rumorTrue } : {}) };
+    }
+  }
+  await setDoc(env, NEWS_PATH, { queue, recent });
+  return { lines, count: news.items.length };
+}
+
+// /공시설정 (관리자)
+export async function setNewsConfig(env, { enabled, perDay }) {
+  const patch = {};
+  if (enabled !== undefined) patch.enabled = enabled;
+  if (perDay !== undefined) patch.perDay = perDay;
+  if (Object.keys(patch).length) await setDoc(env, NEWS_PATH, patch);
+  const doc = (await getDoc(env, NEWS_PATH)) || {};
+  return { enabled: doc.enabled !== false, perDay: doc.perDay ?? NEWS_PER_DAY, queued: Object.keys(doc.queue || {}).length };
+}
+
+// /공시목록: 최근 공시와 결과
+export async function newsListText(env) {
+  const doc = (await getDoc(env, NEWS_PATH)) || {};
+  const list = Object.values(doc.recent || {}).sort((a, b) => b.at - a.at).slice(0, 10);
+  if (list.length === 0) return "아직 올라온 공시가 없어요.";
+  const lines = ["**📰 최근 공시**", ""];
+  for (const r of list) {
+    let result = "⏳ 다음 변동에 반영 예정";
+    if (r.done) {
+      if (r.delisted) result = "🚫 상장폐지";
+      else {
+        result = `${r.pct > 0 ? "+" : ""}${r.pct}%`;
+        if (r.rumor) result += r.rumorTrue ? " · 사실이었어요" : " · 헛소문이었어요";
+      }
+    }
+    lines.push(`- ${formatKST(r.at)} **${r.stock}** [${r.rumor ? "루머" : r.kind}] ${r.text}\n  → ${result}`);
+  }
   return lines.join("\n");
 }
 
@@ -3813,6 +4151,30 @@ export const commandDefinitions = [
       { name: "활성화", description: "출석체크 켜기/끄기", type: 5, required: false },
     ],
   },
+  {
+    name: "공시",
+    description: "[관리자] 종목에 공시를 올립니다. 다음 시세 변동에 호재/악재가 반영돼요.",
+    options: [
+      { name: "종목", description: "종목 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+      { name: "내용", description: "공시 내용 (150자 이내)", type: 3, required: true, max_length: 150 },
+      {
+        name: "성격",
+        description: "다음 변동에 미치는 영향",
+        type: 3,
+        required: true,
+        choices: Object.entries(NEWS_MANUAL).map(([value, m]) => ({ name: m.label, value })),
+      },
+    ],
+  },
+  {
+    name: "공시설정",
+    description: "[관리자] 자동 공시를 켜고 끄거나 하루 횟수를 정합니다.",
+    options: [
+      { name: "활성화", description: "자동 공시 켜기/끄기", type: 5, required: false },
+      { name: "하루횟수", description: "하루 평균 공시 수 (0이면 자동 공시 없음)", type: 4, required: false, min_value: 0, max_value: 50 },
+    ],
+  },
+  { name: "공시목록", description: "최근 올라온 공시와 그 결과를 봅니다." },
 ];
 
 // ---- 2) 옵션 파싱 헬퍼 ----
@@ -4889,6 +5251,26 @@ export const handlers = {
   은행: async (interaction, env) => bankStatus(env, interaction.member.user.id),
 
   배당: async (interaction, env) => dividendInfo(env, interaction.member.user.id),
+
+  공시: async (interaction, env) => {
+    if (!isAdmin(interaction, env)) return "관리자만 사용할 수 있는 명령어예요.";
+    return (await postManualNews(env, String(opt(interaction, "종목") ?? "").trim(), opt(interaction, "내용"), opt(interaction, "성격"))).message;
+  },
+
+  공시설정: async (interaction, env) => {
+    if (!isAdmin(interaction, env)) return "관리자만 사용할 수 있는 명령어예요.";
+    const perDay = opt(interaction, "하루횟수");
+    const enabled = opt(interaction, "활성화");
+    const cfg = await setNewsConfig(env, { enabled, perDay });
+    return [
+      "**공시 설정을 저장했어요.**",
+      `- 자동 공시: ${cfg.enabled ? "✅ 켜짐" : "❌ 꺼짐"}`,
+      `- 하루 평균: ${cfg.perDay}건 (실제로는 ${Math.max(1, cfg.perDay - 1)}~${cfg.perDay}건)`,
+      `- 다음 변동을 기다리는 공시: ${cfg.queued}건`,
+    ].join("\n");
+  },
+
+  공시목록: async (_interaction, env) => newsListText(env),
 
   은행설명: async () => bankHelpText(),
 
