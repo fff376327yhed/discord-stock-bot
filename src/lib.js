@@ -1150,6 +1150,7 @@ const CATEGORY = {
   선물청산: "선물",
   예금: "은행",
   출금: "은행",
+  송금: "은행",
   대출: "은행",
   상환: "은행",
   예약매수: "예약",
@@ -3282,6 +3283,82 @@ export async function processBank(env) {
 // ---- 1) Discord에 등록할 커맨드 정의 ----
 // autocomplete: true 인 옵션은 칸을 누르기만 해도 예시 목록이 떠요. 목록에 없는 값도 직접 입력할 수 있어요.
 // 여러 종목/상품을 한 번에: 첫 번째 칸(종목, 수량 …) 뒤에 [2번째]~[5번째] 칸을 자동으로 붙여요.
+// ---------- 송금 (유저끼리 해정 보내기 + 은행 수수료) ----------
+//  - 보내는 사람이 "금액 + 수수료"를 내고, 받는 사람은 "금액" 전부를 받아요. 수수료는 은행이 가져가요(사라짐).
+//  - 수수료율/최소 금액은 아래 숫자만 바꾸면 돼요.
+export const TRANSFER_FEE_RATE = 0.03; // 수수료 3% (올림, 최소 1해정)
+export const TRANSFER_FEE_MIN = 1;
+export const TRANSFER_MIN = 10; // 한 번에 최소 송금액
+
+export const transferFee = (amount) => Math.max(TRANSFER_FEE_MIN, Math.ceil(amount * TRANSFER_FEE_RATE));
+
+// 잔고로 보낼 수 있는 최대 금액 (수수료 포함해서 잔고를 넘지 않는 가장 큰 값)
+export function maxTransferable(balance) {
+  let a = Math.floor(balance / (1 + TRANSFER_FEE_RATE));
+  while (a > 0 && a + transferFee(a) > balance) a--;
+  while (a + 1 + transferFee(a + 1) <= balance) a++;
+  return Math.max(0, a);
+}
+
+export async function transferMoney(env, fromId, toId, amount, { toIsBot = false } = {}) {
+  if (!toId) return { ok: false, message: "받는 사람을 골라 주세요." };
+  if (toIsBot) return { ok: false, message: "봇에게는 송금할 수 없어요." };
+  if (toId === fromId) return { ok: false, message: "자기 자신에게는 송금할 수 없어요." };
+  if (!Number.isSafeInteger(amount) || amount < TRANSFER_MIN) {
+    return { ok: false, message: `송금액은 ${TRANSFER_MIN.toLocaleString()}해정 이상의 정수로 입력해 주세요.` };
+  }
+
+  // 아직 한 번도 봇을 안 쓴 유저에게는 보낼 수 없어요 (없는 계정이 새로 만들어지는 걸 막음)
+  const target = await getDoc(env, `users/${toId}`);
+  if (!target) return { ok: false, message: "받는 사람이 아직 해정 봇을 쓴 적이 없어요. 먼저 명령어를 한 번 써보라고 알려주세요." };
+
+  const fee = transferFee(amount);
+  const total = amount + fee;
+  const sender = await getUser(env, fromId);
+  if (sender.balance < total) {
+    return {
+      ok: false,
+      message: `잔고가 부족해요. (필요: ${total.toLocaleString()}해정 = 송금 ${amount.toLocaleString()} + 수수료 ${fee.toLocaleString()}, 보유: ${sender.balance.toLocaleString()}해정)`,
+    };
+  }
+
+  const balanceBefore = sender.balance;
+  // 보내는 사람에게서 먼저 빼고, 받는 사람에게 넣어요. 받는 쪽 저장이 실패하면 보낸 쪽을 되돌려요.
+  sender.balance -= total;
+  await saveUser(env, fromId, sender);
+  try {
+    const receiver = await getUser(env, toId);
+    receiver.balance += amount;
+    await saveUser(env, toId, receiver);
+  } catch (err) {
+    console.error(`송금 저장 실패 (${fromId} -> ${toId}):`, err.message);
+    sender.balance += total;
+    await saveUser(env, fromId, sender).catch(() => {});
+    return { ok: false, message: "송금하는 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
+  }
+
+  await Promise.all([
+    addHistory(env, fromId, `송금: <@${toId}>에게 ${amount.toLocaleString()}해정 (수수료 ${fee.toLocaleString()}) → 잔고 ${sender.balance.toLocaleString()}해정`),
+    addHistory(env, toId, `송금 받음: <@${fromId}>에게서 +${amount.toLocaleString()}해정`),
+  ]);
+
+  // 받는 사람에게 DM (실패해도 송금은 그대로)
+  try {
+    await sendDM(env, toId, `💸 <@${fromId}>님이 **${amount.toLocaleString()}해정**을 보냈어요!`);
+  } catch (err) {
+    console.error(`송금 DM 실패 (${toId}):`, err.message);
+  }
+
+  return {
+    ok: true,
+    message: [
+      `💸 **송금 완료** <@${toId}>님에게 ${amount.toLocaleString()}해정`,
+      `🏦 은행 수수료: -${fee.toLocaleString()}해정 (${pctText(TRANSFER_FEE_RATE)})`,
+      balanceLine(balanceBefore, sender.balance),
+    ].join("\n"),
+  };
+}
+
 // 디스코드는 같은 이름의 옵션을 반복할 수 없어서 종목2, 수량2 … 처럼 이름을 나눠요.
 const MAX_SLOTS = 5;
 const slotSuffix = (i) => (i <= 1 ? "" : String(i));
@@ -3435,6 +3512,14 @@ export const commandDefinitions = [
     name: "출금",
     description: "은행 예금을 찾아 잔고로 가져옵니다. 쌓인 이자도 같이 나와요.",
     options: [{ name: "금액", description: "찾을 해정 (안 적으면 전액)", type: 4, required: false, autocomplete: true, min_value: 1 }],
+  },
+  {
+    name: "송금",
+    description: `다른 유저에게 해정을 보냅니다. 은행 수수료 ${pctText(TRANSFER_FEE_RATE)}가 붙어요.`,
+    options: [
+      { name: "받는사람", description: "해정을 받을 유저", type: 6, required: true },
+      { name: "금액", description: `보낼 해정 (최소 ${TRANSFER_MIN}, 수수료는 따로 붙어요)`, type: 4, required: true, autocomplete: true, min_value: TRANSFER_MIN },
+    ],
   },
   {
     name: "대출",
@@ -3880,6 +3965,19 @@ export async function autocomplete(interaction, env) {
     );
   }
 
+  // ----- 송금: 잔고 기준 금액 예시 (수수료까지 낼 수 있는 만큼만) -----
+  if (command === "송금" && focused.name === "금액") {
+    const userId = interaction.member?.user?.id;
+    if (!userId) return [];
+    const user = await getUser(env, userId);
+    const max = maxTransferable(user.balance);
+    const list = [100, 500, 1000, 5000, 10000]
+      .filter((n) => n < max)
+      .map((n) => ({ label: `${n.toLocaleString()}해정 (수수료 ${transferFee(n).toLocaleString()})`, value: n }));
+    if (max >= TRANSFER_MIN) list.push({ label: `최대 ${max.toLocaleString()}해정 (수수료 ${transferFee(max).toLocaleString()})`, value: max });
+    return numberChoices(list, keyword);
+  }
+
   // ----- 은행: 예금/출금/대출/상환 -----
   if (["예금", "출금", "대출", "상환"].includes(command)) {
     const userId = interaction.member?.user?.id;
@@ -4208,6 +4306,9 @@ function bankHelpText() {
     `3. 연체 ${LIQUIDATE_AFTER_HOURS}시간 뒤에도 못 갚으면 **보유 주식이 강제로 팔려요** (큰 종목부터)`,
     "4. 그래도 빚이 남으면 해정이 들어올 때마다 자동으로 갚아져요",
     `⏰ 만기 ${REMIND_BEFORE_HOURS}시간 전에 DM으로 알려줘요`,
+    "",
+    "**💸 송금**",
+    `\`/송금 받는사람 금액\` — 다른 유저에게 해정 보내기. 은행 수수료 ${pctText(TRANSFER_FEE_RATE)}(최소 ${TRANSFER_FEE_MIN}해정)는 보내는 사람이 따로 내고, 받는 사람은 금액을 그대로 받아요`,
     "",
     "`/은행` — 내 예금·대출·이자·한도를 지금 이 순간 기준으로 보기",
   ].join("\n");
@@ -4575,6 +4676,12 @@ export const handlers = {
   예금: async (interaction, env) => (await depositMoney(env, interaction.member.user.id, opt(interaction, "금액"))).message,
 
   출금: async (interaction, env) => (await withdrawMoney(env, interaction.member.user.id, opt(interaction, "금액"))).message,
+
+  송금: async (interaction, env) => {
+    const toId = opt(interaction, "받는사람");
+    const toIsBot = !!interaction.data.resolved?.users?.[toId]?.bot;
+    return (await transferMoney(env, interaction.member.user.id, toId, opt(interaction, "금액"), { toIsBot })).message;
+  },
 
   대출: async (interaction, env) =>
     (await takeLoan(env, interaction.member.user.id, opt(interaction, "금액"), opt(interaction, "기간"))).message,
