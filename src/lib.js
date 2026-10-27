@@ -3880,7 +3880,12 @@ export async function finishNews(env, news, changes) {
 export async function setNewsConfig(env, { enabled, perDay }) {
   const patch = {};
   if (enabled !== undefined) patch.enabled = enabled;
-  if (perDay !== undefined) patch.perDay = perDay;
+  if (perDay !== undefined) {
+    patch.perDay = perDay;
+    // 오늘 목표도 바로 바꿔요 (안 바꾸면 내일부터 적용돼요). 오늘 이미 올린 건수(count)는 그대로 두고 목표만 새로 정해요.
+    const cur = (await getDoc(env, NEWS_PATH)) || {};
+    if (cur.day === todayKST()) patch.target = perDay <= 0 ? 0 : Math.max(1, perDay - (Math.random() < 0.5 ? 1 : 0));
+  }
   if (Object.keys(patch).length) await setDoc(env, NEWS_PATH, patch);
   const doc = (await getDoc(env, NEWS_PATH)) || {};
   return { enabled: doc.enabled !== false, perDay: doc.perDay ?? NEWS_PER_DAY, queued: Object.keys(doc.queue || {}).length };
@@ -4171,7 +4176,7 @@ export const commandDefinitions = [
     description: "[관리자] 자동 공시를 켜고 끄거나 하루 횟수를 정합니다.",
     options: [
       { name: "활성화", description: "자동 공시 켜기/끄기", type: 5, required: false },
-      { name: "하루횟수", description: "하루 평균 공시 수 (0이면 자동 공시 없음)", type: 4, required: false, min_value: 0, max_value: 50 },
+      { name: "하루횟수", description: "하루 평균 공시 수 (0이면 자동 공시 없음)", type: 4, required: false, min_value: 0, max_value: 30 },
     ],
   },
   { name: "공시목록", description: "최근 올라온 공시와 그 결과를 봅니다." },
