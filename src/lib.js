@@ -2871,28 +2871,29 @@ export async function processFutures(env, changes = []) {
 //  - 만기: 잔고 → 예금 순서로 자동 회수. 모자라면 연체, 연체 LIQUIDATE_AFTER_HOURS시간 뒤에는 보유 주식 강제 매도.
 //  - 저장: bank/{유저ID} = { deposit, depositAt, earned, loans: { 번호: 대출 } }
 //    대출 = { principal, unpaid, rate, term, takenAt, due, lastAt, borrowed, warned? }
-export const DEPOSIT_RATE = 0.005; // 예금 일 0.5%
-export const LOAN_TERMS = { 1: 0.03, 3: 0.025, 7: 0.02 }; // 기간(일) -> 일 이자율
-export const LOAN_PENALTY_RATE = 0.05; // 연체 시 일 +5%p
+export const DEPOSIT_RATE = 0.02; // 예금 일 2% (시장 배율 0.2~2.0배 → 0.4%~4%)
+export const LOAN_TERMS = { 1: 0.12, 3: 0.1, 7: 0.08 }; // 기간(일) -> 일 이자율
+export const LOAN_PENALTY_RATE = 0.15; // 연체 시 일 +15%p
 export const LOAN_MIN = 100;
 export const MAX_LOANS_PER_USER = 3;
-export const LOAN_LIMIT_RATIO = 0.5; // 한도 = 순자산의 50%
+export const LOAN_LIMIT_RATIO = 0.3; // 한도 = 순자산의 30%
+export const LOAN_FEE_RATE = 0.01; // 대출 수수료: 빌릴 때 원금의 1%를 먼저 떼고 받아요 (빚은 원금 그대로)
 export const LOAN_LIMIT_MIN = 1000; // 순자산이 적어도 이만큼은 빌릴 수 있어요
-export const LIQUIDATE_AFTER_HOURS = 24; // 연체 후 이 시간이 지나면 보유 주식 강제 매도
+export const LIQUIDATE_AFTER_HOURS = 6; // 연체 후 이 시간이 지나면 보유 주식 강제 매도
 export const REMIND_BEFORE_HOURS = 6; // 만기 이 시간 전에 DM으로 알려줘요
 const BANK_HOUR_MS = 60 * 60 * 1000;
 
 // ---------- 시장 금리 (은행 이자 랜덤화) ----------
 // 매시 정각 크론이 배율(0.2~2.0배)을 하나 뽑아서 예금/대출 기준금리에 함께 곱해요.
-//  - 예금 0.5% 기준 → 0.1%~1.0% 사이에서 움직여요.
+//  - 예금 2% 기준 → 0.4%~4.0% 사이에서 움직여요.
 //  - index: 예금 복리 계산용 누적 지수. 금리가 바뀔 때마다 그 구간만큼 곱해서 쌓아요.
 //    (유저가 오래 안 들어와도 index 비율 하나로 정확히 계산 가능)
 //  - 저장: config/bankRate = { mult, depositRate, loanRates, index, indexAt }
 export const MARKET_RATE_MIN_MULT = 0.2;
 export const MARKET_RATE_MAX_MULT = 2.0;
-// 대출 금리 하한(일): 예금이 가장 높을 때(0.5% × 2.0배 = 1.0%)보다 항상 비싸게 해서
+// 대출 금리 하한(일): 예금이 가장 높을 때(2% × 2.0배 = 4.0%)보다 항상 비싸게 해서
 // "싸게 빌려서 예금" 차익거래를 막아요. 신용등급 배율까지 곱한 뒤에도 이 아래로는 안 내려가요.
-export const LOAN_RATE_FLOOR = +(DEPOSIT_RATE * MARKET_RATE_MAX_MULT * 1.2).toFixed(4); // 일 1.2%
+export const LOAN_RATE_FLOOR = +(DEPOSIT_RATE * MARKET_RATE_MAX_MULT * 1.2).toFixed(4); // 일 4.8%
 
 const bankRatePath = "config/bankRate";
 
@@ -3152,7 +3153,7 @@ async function netWorthOf(env, userId, user, bank, stocks) {
   return { net: user.balance + holdingsValue + deposit + futuresValue - debt, debt, deposit };
 }
 
-// 대출 한도: 순자산의 50% (최소 1,000해정). 이미 빌린 원금은 빼요.
+// 대출 한도: 순자산의 30% (최소 1,000해정). 이미 빌린 원금은 빼요.
 function loanLimitOf(net, bank) {
   const ratio = LOAN_LIMIT_RATIO * creditGrade(bank.credit).limitMul;
   const total = Math.max(LOAN_LIMIT_MIN, Math.floor(Math.max(net, 0) * ratio));
@@ -3305,7 +3306,8 @@ export async function takeLoan(env, userId, amount, termDays) {
   // 대출 기록을 먼저 저장하고 해정을 지급해요. 지급이 실패하면 기록을 지워요.
   await saveBank(env, userId, bank);
   const balanceBefore = user.balance;
-  user.balance += amount;
+  const fee = Math.max(1, Math.floor(amount * LOAN_FEE_RATE)); // 수수료는 먼저 떼고 받아요 (빚은 amount 그대로)
+  user.balance += amount - fee;
   try {
     await saveUser(env, userId, user);
   } catch (err) {
@@ -3314,7 +3316,7 @@ export async function takeLoan(env, userId, amount, termDays) {
     await saveBank(env, userId, bank).catch(() => {});
     return { ok: false, message: "대출 처리 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
   }
-  await addHistory(env, userId, `대출: ${amount.toLocaleString()}해정 (${termDays}일 · 일 ${pctText(rate)}) → 잔고 ${user.balance.toLocaleString()}해정`);
+  await addHistory(env, userId, `대출: ${amount.toLocaleString()}해정 (${termDays}일 · 일 ${pctText(rate)} · 수수료 ${fee.toLocaleString()}) → 잔고 ${user.balance.toLocaleString()}해정`);
 
   const expected = Math.round(amount * rate * termDays);
   return {
@@ -3322,6 +3324,7 @@ export async function takeLoan(env, userId, amount, termDays) {
     message: [
       `💸 **대출 실행!** \`${id}\` ${amount.toLocaleString()}해정 (${termDays}일)`,
       balanceLine(balanceBefore, user.balance),
+      `- 💰 수수료 ${fee.toLocaleString()}해정(${pctText(LOAN_FEE_RATE)})을 먼저 떼서 **${(amount - fee).toLocaleString()}해정**을 받았어요. 빚은 ${amount.toLocaleString()}해정이에요.`,
       `- 이자: 하루 ${pctText(rate)} (${termDays}일 꽉 채우면 약 ${expected.toLocaleString()}해정, 시간 단위로 계속 쌓여요)`,
       `- 🏦 신청 시점 시장금리 ×${marketMult} · 💳 신용등급 ${grade.name} ×${grade.rateMul} → 이 이자율은 만기까지 **고정**이에요 (이후 시장금리가 바뀌어도 그대로)`,
       `- 📅 갚을 날: ${dueText(due)}`,
@@ -5057,9 +5060,10 @@ function bankHelpText(rate) {
     "**💸 대출**",
     "`/대출 금액 기간` — 기간: 1일 / 3일 / 7일 (지금 이자율은 기간 칸을 누르면 보여요)",
     "- 이자율은 **빌린 순간의 시장금리**로 정해지고, **만기까지 안 바뀌어요** (신용등급 배율도 그때 기준)",
+    `- 빌릴 때 수수료 ${pctText(LOAN_FEE_RATE)}를 먼저 떼고 받아요 (빚은 빌린 금액 그대로)`,
     "- 이자는 빌린 순간부터 시간 단위로 계속 쌓여요",
     "- 일찍 갚으면 **그때까지 쌓인 이자만** 내요",
-    `- 한도: 내 순자산(해정+주식+예금+선물-빚)의 ${LOAN_LIMIT_RATIO * 100}%(신용등급에 따라 달라져요), 최소 ${LOAN_LIMIT_MIN.toLocaleString()}해정`,
+    `- 한도: 내 순자산(해정+주식+예금+선물-빚)의 ${Math.round(LOAN_LIMIT_RATIO * 100)}%(신용등급에 따라 달라져요), 최소 ${LOAN_LIMIT_MIN.toLocaleString()}해정`,
     `- 동시에 최대 ${MAX_LOANS_PER_USER}건`,
     "",
     "**예시** 지금 1,000해정을 3일로 빌리면? (신용등급 B 기준)",
