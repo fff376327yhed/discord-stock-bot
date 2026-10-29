@@ -451,6 +451,12 @@ export async function listStocksForAutocomplete(env) {
   return stocks.map((s) => ({ ...s }));
 }
 
+// 종목 목록을 ms(밀리초) 동안 기억해 둬요. (기본 2분)
+// 시세 변동 직후에 부르면, 뒤에 오는 주문/선물/은행 처리가 종목 목록을 또 읽지 않아요.
+export function pinStocksCache(list, ms = 120_000) {
+  stocksCache = { at: Date.now() - STOCKS_TTL_MS + ms, list };
+}
+
 export async function listStocks(env) {
   if (stocksCache.list && Date.now() - stocksCache.at < STOCKS_TTL_MS) {
     return stocksCache.list.map((s) => ({ ...s })); // 복사해서 돌려줘요 (호출한 쪽에서 값을 바꿔도 안전)
@@ -1112,6 +1118,8 @@ export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, cr
 
   // 종목 수가 기준 이하로 줄었으면 자동 상장
   await ensureMinimumStocks(env);
+  // 가격을 다 쓴 뒤의 최신 목록을 2분간 기억해요. (이후 주문/선물/은행 처리가 종목을 다시 읽지 않게 함)
+  pinStocksCache(await listStocks(env));
   return changes;
 }
 
