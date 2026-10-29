@@ -431,8 +431,24 @@ export function previewSell(user, stock, qty) {
 // 짧은 캐시: 크론 한 번 안에서 여러 번 불러도 읽기는 최소화돼요. (종목을 쓰거나 지우면 자동으로 비워져요)
 let stocksCache = { at: 0, list: null };
 const STOCKS_TTL_MS = 10_000;
+
+// 자동완성 전용 종목 캐시 (60초): 칸을 누르거나 글자를 칠 때마다 불려서 읽기를 많이 먹어요.
+// 목록에 보이는 가격이 최대 60초 늦을 수 있지만, 실제 매수/매도/예약은 항상 최신 시세로 처리돼요.
+let acStocksCache = { at: 0, list: null };
+const AC_STOCKS_TTL_MS = 60_000;
+
 export function invalidateStocksCache() {
   stocksCache = { at: 0, list: null };
+  acStocksCache = { at: 0, list: null };
+}
+
+export async function listStocksForAutocomplete(env) {
+  if (acStocksCache.list && Date.now() - acStocksCache.at < AC_STOCKS_TTL_MS) {
+    return acStocksCache.list.map((s) => ({ ...s }));
+  }
+  const stocks = await listStocks(env);
+  acStocksCache = { at: Date.now(), list: stocks };
+  return stocks.map((s) => ({ ...s }));
 }
 
 export async function listStocks(env) {
@@ -4535,13 +4551,11 @@ async function quantityChoices(command, interaction, env, keyword, slot = "") {
   const userId = interaction.member?.user?.id;
   if (!stockName || !userId) return plain();
 
-  const [stock, userRaw, all] = await Promise.all([
-    getStock(env, stockName),
-    getUser(env, userId),
-    slot ? listStocks(env) : null, // 2번째 칸부터는 앞 칸 종목의 가격이 필요해요
-  ]);
+  // 종목 목록은 자동완성 캐시에서 가져오고(읽기 0~30건), 종목 1건 조회는 따로 하지 않아요.
+  const [all, userRaw] = await Promise.all([listStocksForAutocomplete(env), getUser(env, userId)]);
+  const stock = all.find((s) => s.name === stockName);
   if (!stock) return plain();
-  const user = all ? priorAdjusted(command, interaction, slot, userRaw, Object.fromEntries(all.map((s) => [s.name, s.price]))) : userRaw;
+  const user = slot ? priorAdjusted(command, interaction, slot, userRaw, Object.fromEntries(all.map((s) => [s.name, s.price]))) : userRaw;
 
   let labelFor;
   let values;
@@ -4583,7 +4597,7 @@ async function quantityChoices(command, interaction, env, keyword, slot = "") {
 async function priceSuggestions(interaction, env, slot = "") {
   const stockName = String(opt(interaction, "종목" + slot) ?? "").trim();
   if (!stockName) return [];
-  const stock = await getStock(env, stockName);
+  const stock = (await listStocksForAutocomplete(env)).find((s) => s.name === stockName);
   if (!stock) return [];
 
   const p = stock.price;
@@ -4635,7 +4649,7 @@ export async function autocomplete(interaction, env) {
 
   // ----- 종목 이름 (종목추가는 새 이름을 입력하는 거라 제외) -----
   if (base === "종목" && command !== "종목추가") {
-    const stocks = await listStocks(env); // 이름순
+    const stocks = await listStocksForAutocomplete(env); // 이름순 (60초 캐시)
 
     const userId = interaction.member?.user?.id;
     const rawUser = userId ? await getUser(env, userId) : { balance: 0, holdings: {}, costs: {} };
@@ -4761,7 +4775,7 @@ export async function autocomplete(interaction, env) {
     }
 
     // 대출: 남은 한도 안의 예시
-    const [user, bank0, stocks] = await Promise.all([getUser(env, userId), getBank(env, userId), listStocks(env)]);
+    const [user, bank0, stocks] = await Promise.all([getUser(env, userId), getBank(env, userId), listStocksForAutocomplete(env)]);
     const bank = accrueBank(bank0, now);
     const { net } = await netWorthOf(env, userId, user, bank, stocks);
     const { available } = loanLimitOf(net, bank);
@@ -4775,7 +4789,7 @@ export async function autocomplete(interaction, env) {
   // ----- 선물청산: 내 선물 포지션 (현재 손익 표시) -----
   if (base === "포지션") {
     const userId = interaction.member?.user?.id;
-    const [items, stocks] = await Promise.all([userId ? getFutureItems(env, userId) : {}, listStocks(env)]);
+    const [items, stocks] = await Promise.all([userId ? getFutureItems(env, userId) : {}, listStocksForAutocomplete(env)]);
     const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
     const list = futureList(items).map((f) => {
       const price = priceMap[f.stock];
