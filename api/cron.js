@@ -65,9 +65,10 @@ async function runFluctuation(env, range, label) {
   }
 
   // 2-3) 은행: 만기 알림 / 만기 대출 자동 회수 / 연체 처리 (실패해도 시세 변동 결과는 그대로 응답)
+  // 읽기를 아끼려고 정각 근처(0~14분) 변동에서만 돌려요. (1시간에 1번)
   let bank = null;
   try {
-    bank = await processBank(env);
+    if (new Date().getMinutes() < 15) bank = await processBank(env);
   } catch (err) {
     console.error("은행 처리 실패:", err.message);
   }
@@ -112,28 +113,25 @@ async function fluctuateTask(env) {
 
 // ---------- 2) 급등락: -80% ~ +120% (+ 종목마다 0.5% 확률로 -100%) ----------
 // 하루 3번(18시/21시/0시 KST), 슬롯마다 딱 1번만 실행. 실행 기록은 Firebase config/surge 에 남겨요.
-// 슬롯 시각이 아니면 평소 변동으로 처리해요.
+// 슬롯 시각이 아니면 아무것도 읽지 않고 바로 끝내요. (평소 변동은 fluctuate 가 담당)
+// 그래서 cron-job.org에서 5분마다 호출해도 읽기가 거의 늘지 않아요.
 const SURGE_RANGE = { minPct: -80, maxPct: 120, crashChance: 0.005, crashPct: -100 };
 
 async function midnightTask(env) {
-  let surge = false;
   const slot = currentSurgeSlot();
-  if (slot) {
-    const key = surgeSlotKey(slot);
-    const state = await getDoc(env, "config/surge");
-    if (state?.lastKey !== key) {
-      // 실행 전에 먼저 기록해서, 5분 간격 호출이 겹쳐도 두 번 실행되지 않게 함
-      await setDoc(env, "config/surge", { lastKey: key });
-      surge = true;
-    }
+  if (!slot) {
+    return Response.json({ ok: true, skipped: true, reason: "급등락 시각이 아니에요." });
   }
 
-  // 급등락이 아닌데 급등락 직전·직후라면 평소 변동만 쉼
-  if (!surge && isSurgeMoment()) {
-    return Response.json({ ok: true, skipped: true, reason: "급등락 시각 전후라 평소 변동은 건너뛰었어요." });
+  const key = surgeSlotKey(slot);
+  const state = await getDoc(env, "config/surge");
+  if (state?.lastKey === key) {
+    return Response.json({ ok: true, skipped: true, reason: "이 슬롯은 이미 실행했어요." });
   }
 
-  return runFluctuation(env, surge ? SURGE_RANGE : NORMAL_RANGE, surge ? slot.label : "평소 변동");
+  // 실행 전에 먼저 기록해서, 5분 간격 호출이 겹쳐도 두 번 실행되지 않게 함
+  await setDoc(env, "config/surge", { lastKey: key });
+  return runFluctuation(env, SURGE_RANGE, slot.label);
 }
 
 // ---------- 3) 급등락 예고 (5~6분 전, cron-job.org: 17:54 / 20:54 / 23:54 KST) ----------
