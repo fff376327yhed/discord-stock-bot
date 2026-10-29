@@ -464,8 +464,8 @@ export async function getStock(env, name) {
   return getDoc(env, `stocks/${encodeURIComponent(name)}`);
 }
 
-// 그래프용 시세 기록 최대 개수 (30분마다 변동 + 급등락 기준 약 2일치)
-const PRICE_HISTORY_POINTS = 96;
+// 그래프용 시세 기록 최대 개수 (5분마다 변동 + 급등락 기준 약 24시간치)
+const PRICE_HISTORY_POINTS = 300;
 
 // 종목 문서의 history 맵 -> 시간순 배열: [{ t(밀리초), p(가격) }]
 export function getPriceHistory(stock) {
