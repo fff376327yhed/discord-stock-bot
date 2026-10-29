@@ -2937,13 +2937,21 @@ export async function rollBankRate(env) {
   if (BANK_RATE_ANNOUNCE && env.ALLOWED_CHANNEL_ID && env.DISCORD_BOT_TOKEN) {
     try {
       const arrow = mult > prev.mult ? "📈" : mult < prev.mult ? "📉" : "➖";
-      await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, {
+      // 지난번 금리 공지가 있으면 먼저 지워서, 채널에 금리 공지가 항상 1개만 남게 해요 (도배 방지)
+      if (BANK_RATE_REPLACE) {
+        const old = await getDoc(env, BANK_RATE_MSG_PATH).catch(() => null);
+        if (old?.messageId) {
+          await discordRequest(env, "DELETE", `/channels/${env.ALLOWED_CHANNEL_ID}/messages/${old.messageId}`).catch(() => {});
+        }
+      }
+      const posted = await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, {
         content:
           `🏦 **은행 금리 변경** ${arrow} 시장금리 ×${prev.mult ?? 1} → ×${mult}\n` +
           `예금 일 ${pctText(depositRate)} · 대출 ${loanRatesText(next)} (신용등급 B 기준)`,
         flags: 4096,
         allowed_mentions: { parse: [] },
       });
+      if (BANK_RATE_REPLACE && posted?.id) await setDoc(env, BANK_RATE_MSG_PATH, { messageId: posted.id });
     } catch (err) {
       console.error("은행 금리 공지 실패:", err.message);
     }
@@ -2957,6 +2965,8 @@ const unixOf = (ms) => Math.floor(ms / 1000);
 
 // ---------- 시장금리 표시용 도우미 ----------
 const BANK_RATE_ANNOUNCE = true; // false로 바꾸면 금리 변경 공지를 안 올려요
+const BANK_RATE_REPLACE = true; // true: 새 금리 공지를 올리기 전에 지난 금리 공지를 지워요 (채널에 1개만 남음). false: 예전처럼 계속 쌓여요
+const BANK_RATE_MSG_PATH = "config/bankRateMsg"; // 마지막 금리 공지 메시지 ID를 저장하는 곳
 // 대출 이자율(일): 시장금리 × 신용등급 배율, 단 하한(LOAN_RATE_FLOOR) 아래로는 안 내려가요 (takeLoan과 같은 계산)
 const loanRateOf = (base, mul = 1) => +Math.max(base * mul, LOAN_RATE_FLOOR).toFixed(4);
 // 다음 금리 변경 시각 = 다음 정각 (크론이 매시 정각에 돌아요)
