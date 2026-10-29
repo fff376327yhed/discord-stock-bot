@@ -1,6 +1,6 @@
 import {
   loadEnv,
-  listStocks, upsertStock, removeStock, getStock, getUser, saveUser,
+  listStocks, upsertStock, removeStock, getStock, getUser, saveUser, invalidateStocksCache,
   listProducts, upsertProduct, removeProduct, getProduct, setUserItem, DELIST_PRICE,
   listCollection, setDoc, getDoc, deleteDoc,
   resetBots,
@@ -199,6 +199,7 @@ async function handle(request) {
         if (old && Number.isFinite(old.listedAt)) {
           await setDoc(env, `stocks/${encodeURIComponent(to)}`, { listedAt: old.listedAt });
         }
+        invalidateStocksCache();
         await removeStock(env, from);
         return json({ ok: true });
       }
@@ -221,6 +222,7 @@ async function handle(request) {
             updatedAt: new Date(),
           })
         );
+        invalidateStocksCache();
         return json({ ok: true, count: stocks.length, price });
       }
 

@@ -306,13 +306,14 @@ async function createStock(env, name, price) {
     history: { [String(Date.now()).padStart(13, "0")]: price },
     updatedAt: new Date(),
   });
+  invalidateStocksCache();
 }
 
 // 종목 수가 triggerCount 이하면 names 목록에서 addCount개를 자동 상장
 // 반환: { added: [상장된 이름들] }
 export async function ensureMinimumStocks(env) {
   const cfg = await getListingConfig(env);
-  const stocks = await listCollection(env, "stocks");
+  const stocks = await listStocks(env);
   if (stocks.length > cfg.triggerCount) return { added: [] };
 
   // 지금 상장 중인 이름은 제외하고, 목록 앞쪽부터 addCount개를 고름
@@ -427,9 +428,20 @@ export function previewSell(user, stock, qty) {
 
 // ---------- 종목 ----------
 // 이름순(가나다)으로 정렬해서 반환
+// 짧은 캐시: 크론 한 번 안에서 여러 번 불러도 읽기는 최소화돼요. (종목을 쓰거나 지우면 자동으로 비워져요)
+let stocksCache = { at: 0, list: null };
+const STOCKS_TTL_MS = 10_000;
+export function invalidateStocksCache() {
+  stocksCache = { at: 0, list: null };
+}
+
 export async function listStocks(env) {
-  const stocks = await listCollection(env, "stocks");
-  return stocks.sort((a, b) => compareKo(a.name, b.name));
+  if (stocksCache.list && Date.now() - stocksCache.at < STOCKS_TTL_MS) {
+    return stocksCache.list.map((s) => ({ ...s })); // 복사해서 돌려줘요 (호출한 쪽에서 값을 바꿔도 안전)
+  }
+  const stocks = (await listCollection(env, "stocks")).sort((a, b) => compareKo(a.name, b.name));
+  stocksCache = { at: Date.now(), list: stocks };
+  return stocks.map((s) => ({ ...s }));
 }
 
 export async function getStock(env, name) {
@@ -478,10 +490,12 @@ export async function upsertStock(env, name, price, known) {
     updatedAt: new Date(),
     ...(isNew ? { listedAt: Date.now() } : {}),
   });
+  invalidateStocksCache();
 }
 
 export async function removeStock(env, name) {
   await deleteDoc(env, `stocks/${encodeURIComponent(name)}`);
+  invalidateStocksCache();
 }
 
 // ---------- 상품 (장식 아이템 등) ----------
@@ -858,7 +872,7 @@ export async function setUserItem(env, userId, productName, count) {
 export async function getRanking(env) {
   const [users, stocks] = await Promise.all([
     listCollection(env, "users"),
-    listCollection(env, "stocks"),
+    listStocks(env),
   ]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
   const extras = await extraAssets(env, priceMap); // 예금 + 선물 평가금 - 대출
@@ -1086,10 +1100,28 @@ export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, cr
 }
 
 // ---------- 알림 설정 ----------
+// 알림을 켠 유저 목록 문서 ({ u_유저ID: true/false }). 시세 변동 때 users 전체 대신 이 문서만 읽어요.
+export const NOTIFY_USERS_PATH = "config/notifyUsers";
+
+// 문서를 읽어요. 아직 없으면 딱 한 번만 users 전체를 읽어서 만들어요. (이미 알림 켠 유저가 빠지지 않게)
+async function loadNotifyFlags(env) {
+  let flags = await getDoc(env, NOTIFY_USERS_PATH);
+  if (!flags) {
+    const all = await listCollection(env, "users");
+    flags = Object.fromEntries(
+      all.map((u) => [`u_${u.id}`, Boolean(u.notify && (u.notify.all || u.notify.up || u.notify.down))])
+    );
+    if (Object.keys(flags).length) await setDoc(env, NOTIFY_USERS_PATH, flags);
+  }
+  return flags;
+}
+
 export async function setNotify(env, userId, notify) {
   const user = await getUser(env, userId);
   user.notify = notify;
   await saveUser(env, userId, user);
+  await loadNotifyFlags(env); // 문서가 없으면 기존 유저까지 포함해서 먼저 만들어둬요
+  await setDoc(env, NOTIFY_USERS_PATH, { [`u_${userId}`]: Boolean(notify.all || notify.up || notify.down) });
 }
 
 // ---------- 전체 유저 보유 종목 (/보유종목 용) ----------
@@ -1098,7 +1130,7 @@ export async function setNotify(env, userId, notify) {
 export async function getAllHoldings(env) {
   const [users, stocks] = await Promise.all([
     listCollection(env, "users"),
-    listCollection(env, "stocks"),
+    listStocks(env),
   ]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
 
@@ -2298,7 +2330,13 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
 export async function notifyPriceChanges(env, changes) {
   if (!env.DISCORD_BOT_TOKEN || changes.length === 0) return;
 
-  const users = await listCollection(env, "users");
+  // 알림 켠 유저 목록 문서를 읽어요. 문서가 아직 없으면 딱 한 번만 users 전체를 읽어서 만들어요.
+  const flags = await loadNotifyFlags(env);
+  const ids = Object.entries(flags).filter(([, on]) => on).map(([k]) => k.slice(2));
+  if (ids.length === 0) return;
+  const users = (
+    await Promise.all(ids.map((id) => getDoc(env, `users/${id}`).then((u) => u && { id, ...u })))
+  ).filter(Boolean);
   const hour = currentHourKST();
 
   for (const user of users) {
