@@ -1350,6 +1350,7 @@ const CATEGORY = {
   종목삭제: "관리자",
   시세설정: "관리자",
   출석설정: "관리자",
+  체력회복: "관리자",
   공시: "관리자",
   공시설정: "관리자",
 };
@@ -1490,7 +1491,7 @@ export async function checkAttendance(env, userId) {
 // [mining.js]
 // ============================================================
 // ---------- 튜닝 상수 ----------
-const MAX_LEVEL = 15;             // 채굴장 최고 레벨 (이 레벨부터는 더 못 올려요)
+const MAX_LEVEL = 100;            // 채굴장 최고 레벨 (이 레벨부터는 더 못 올려요)
 
 const STAMINA_BASE = 15;          // Lv1 최대 체력 (기존 10)
 const STAMINA_PER_LEVEL = 1;      // 레벨당 최대 체력 증가량
@@ -1501,7 +1502,9 @@ const REWARD_BASE_MAX = 80;       // Lv1 채굴 보상 최대 (기존 35)
 const REWARD_PER_LEVEL = 5;       // 레벨당 보상 증가량(최소/최대 동일하게) (기존 2)
 
 const UPGRADE_BASE_COST = 600;    // Lv1→2 업그레이드 비용(해정)
-const UPGRADE_COST_GROWTH = 1.3;  // 레벨마다 비용 배율
+const UPGRADE_COST_GROWTH = 1.3;  // 레벨마다 비용 배율 (Lv15까지)
+const UPGRADE_COST_GROWTH_LATE = 1.08; // Lv15 이후 비용 배율 (최고 레벨이 100이라 비용이 터지지 않게 완만하게)
+const UPGRADE_COST_SOFT_LEVEL = 15;    // 이 레벨부터 완만한 배율 적용
 
 const UPGRADE_BASE_COUNT = 30;    // 노가다로 무료 업그레이드하려면 필요한 채굴 횟수(Lv1 기준)
 const UPGRADE_COUNT_GROWTH = 10;  // 레벨마다 필요 횟수 증가량
@@ -1518,7 +1521,11 @@ function rewardRangeFor(level) {
 }
 
 function upgradeCostFor(level) {
-  return Math.round(UPGRADE_BASE_COST * Math.pow(UPGRADE_COST_GROWTH, level - 1));
+  const early = Math.min(level, UPGRADE_COST_SOFT_LEVEL) - 1;
+  const late = Math.max(0, level - UPGRADE_COST_SOFT_LEVEL);
+  return Math.round(
+    UPGRADE_BASE_COST * Math.pow(UPGRADE_COST_GROWTH, early) * Math.pow(UPGRADE_COST_GROWTH_LATE, late)
+  );
 }
 
 function upgradeCountFor(level) {
@@ -1558,6 +1565,26 @@ function minutesUntilNextRegen(mining) {
   const regenMs = STAMINA_REGEN_MINUTES * 60 * 1000;
   const waitMs = regenMs - (Date.now() - mining.staminaAt);
   return Math.max(1, Math.ceil(waitMs / 60000));
+}
+
+// ---------- 관리자: 모든 유저 체력 가득 채우기 ----------
+// 채굴 기록이 있는 유저만 대상이에요. (채굴을 한 번도 안 한 유저는 처음 채굴할 때 체력이 가득 찬 상태로 시작해요)
+export async function refillAllStamina(env) {
+  const users = await listCollection(env, "users");
+  const targets = users.filter((u) => u.mining);
+  const now = Date.now();
+  let done = 0;
+  for (let i = 0; i < targets.length; i += 20) {
+    await Promise.all(
+      targets.slice(i, i + 20).map(async (u) => {
+        const level = Math.min(u.mining.level || 1, MAX_LEVEL);
+        const mining = { ...u.mining, level, stamina: staminaMaxFor(level), staminaAt: now };
+        await setDoc(env, `users/${u.id}`, { mining });
+        done += 1;
+      })
+    );
+  }
+  return { total: users.length, refilled: done };
 }
 
 // ---------- 채굴 1회 ----------
@@ -4804,6 +4831,10 @@ export const commandDefinitions = [
     ],
   },
   {
+    name: "체력회복",
+    description: "[관리자] 모든 유저의 채굴 체력을 가득 채웁니다.",
+  },
+  {
     name: "공시",
     description: "[관리자] 종목에 공시를 올립니다. 다음 시세 변동에 호재/악재가 반영돼요.",
     options: [
@@ -4841,7 +4872,7 @@ export const COMMAND_GROUPS = {
   선물거래: { description: "롱/숏 + 배율로 하는 선물 거래", commands: ["선물", "선물목록", "선물청산", "선물설명"] },
   시장정보: { description: "해정지수·종목정보·관심종목·가격 알림 같은 시장 정보", commands: ["지수", "종목정보", "관심추가", "관심삭제", "관심목록", "가격알림", "알림취소", "봇현황", "상장폐지종류"] },
   채굴장: { description: "채굴로 해정 벌기", commands: ["채굴", "채굴정보", "채굴업그레이드"] },
-  관리: { description: "[관리자] 종목·시세·공시 관리", commands: ["종목추가", "종목삭제", "시세설정", "출석설정", "공시", "공시설정"] },
+  관리: { description: "[관리자] 종목·시세·공시 관리", commands: ["종목추가", "종목삭제", "시세설정", "출석설정", "체력회복", "공시", "공시설정"] },
 };
 
 const groupOfCommand = {};
@@ -6489,6 +6520,12 @@ export const handlers = {
     await Promise.all(slots.map((s) => upsertStock(env, s.name, s.price)));
     if (slots.length === 1) return `"${slots[0].name}" 가격을 ${slots[0].price.toLocaleString()}해정으로 변경했어요.`;
     return [`${slots.length}개 종목 가격을 변경했어요.`, ...slots.map((s) => `- "${s.name}" → ${s.price.toLocaleString()}해정`)].join("\n");
+  },
+
+  체력회복: async (interaction, env) => {
+    if (!isAdmin(interaction, env)) return "관리자만 사용할 수 있는 명령어예요.";
+    const { refilled } = await refillAllStamina(env);
+    return `🔋 채굴 기록이 있는 유저 ${refilled.toLocaleString()}명의 체력을 가득 채웠어요.`;
   },
 
   출석설정: async (interaction, env) => {
