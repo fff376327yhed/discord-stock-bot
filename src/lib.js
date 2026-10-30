@@ -1380,13 +1380,13 @@ export async function checkAttendance(env, userId) {
 // ---------- 튜닝 상수 ----------
 const MAX_LEVEL = 15;             // 채굴장 최고 레벨 (이 레벨부터는 더 못 올려요)
 
-const STAMINA_BASE = 10;          // Lv1 최대 체력
+const STAMINA_BASE = 15;          // Lv1 최대 체력 (기존 10)
 const STAMINA_PER_LEVEL = 1;      // 레벨당 최대 체력 증가량
 const STAMINA_REGEN_MINUTES = 10; // 체력 1 회복에 걸리는 시간(분)
 
-const REWARD_BASE_MIN = 15;       // Lv1 채굴 보상 최소
-const REWARD_BASE_MAX = 35;       // Lv1 채굴 보상 최대
-const REWARD_PER_LEVEL = 2;       // 레벨당 보상 증가량(최소/최대 동일하게)
+const REWARD_BASE_MIN = 40;       // Lv1 채굴 보상 최소 (기존 15)
+const REWARD_BASE_MAX = 80;       // Lv1 채굴 보상 최대 (기존 35)
+const REWARD_PER_LEVEL = 5;       // 레벨당 보상 증가량(최소/최대 동일하게) (기존 2)
 
 const UPGRADE_BASE_COST = 600;    // Lv1→2 업그레이드 비용(해정)
 const UPGRADE_COST_GROWTH = 1.3;  // 레벨마다 비용 배율
@@ -4281,7 +4281,7 @@ function multi(base, count = MAX_SLOTS) {
 export const commandDefinitions = [
   { name: "도움말", description: "사용할 수 있는 명령어 목록을 봅니다." },
   { name: "출석체크", description: "오늘 출석하고 해정을 받습니다. 하루 1회." },
-  { name: "채굴", description: "채굴장에서 노가다로 해정을 법니다. (체력 소모, 효율은 주식보다 낮아요)" },
+  { name: "채굴", description: "채굴장에서 노가다로 해정을 법니다. (체력 소모, 출석보다 훨씬 효율이 좋아요)" },
   { name: "채굴정보", description: "내 채굴 레벨, 체력, 다음 업그레이드 조건을 봅니다." },
   { name: "채굴업그레이드", description: "채굴 장비를 업그레이드합니다. (해정 지불 또는 노가다 조건 달성)" },
   {
