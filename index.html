@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>해정 관리자 콘솔</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Malgun Gothic", sans-serif;
+    background: #15161c;
+    color: #e6e6e6;
+    margin: 0;
+    padding: 24px;
+    line-height: 1.5;
+  }
+  h1 { color: #8ea1ff; margin: 0 0 16px; font-size: 1.6rem; }
+  .topbar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    background: #22242d; padding: 14px 18px; border-radius: 10px; margin-bottom: 18px;
+  }
+  .status { font-size: 0.9rem; color: #9aa0b4; margin-left: auto; }
+  .status.on { color: #6fd28a; font-weight: bold; }
+  details {
+    background: #22242d; border-radius: 10px; margin-bottom: 14px; overflow: hidden;
+  }
+  summary {
+    cursor: pointer; padding: 14px 18px; font-weight: bold; font-size: 1.05rem;
+    list-style: none; user-select: none;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "▶ "; color: #8ea1ff; }
+  details[open] > summary::before { content: "▼ "; }
+  .section { padding: 0 18px 18px; }
+  .form-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  input, select {
+    background: #15161c; color: #eee; border: 1px solid #3a3d4a;
+    border-radius: 6px; padding: 8px 10px; font-size: 0.95rem;
+  }
+  input[type="number"] { width: 130px; }
+  button {
+    background: #3b4cca; color: #fff; border: 0; border-radius: 6px;
+    padding: 7px 12px; cursor: pointer; font-size: 0.9rem;
+  }
+  button:hover { filter: brightness(1.12); }
+  button.ghost { background: #3a3d4a; }
+  button.danger { background: #b3261e; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { border-bottom: 1px solid #2f3240; padding: 9px 8px; text-align: left; vertical-align: top; }
+  th { color: #9aa0b4; font-weight: 600; font-size: 0.85rem; }
+  td .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .muted { color: #8b90a3; font-size: 0.88rem; }
+  .num { text-align: right; white-space: nowrap; }
+  #log {
+    font-family: Consolas, monospace; white-space: pre-wrap; background: #101116;
+    padding: 12px; border-radius: 8px; min-height: 42px; font-size: 0.88rem;
+  }
+  .hint { font-size: 0.85rem; color: #8b90a3; margin: 0 0 10px; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.8rem; background: #3a3d4a; white-space: nowrap; }
+  .tag.buy { background: #7a2a2a; } .tag.sell { background: #1f4a7a; } .tag.shop { background: #6a4a1a; }
+  .tag.order { background: #4a3a7a; } .tag.admin { background: #1f5a4a; }
+  .logwrap { overflow-x: auto; max-height: 560px; overflow-y: auto; }
+  .logwrap td { font-size: 0.88rem; }
+  .logtime { font-family: Consolas, monospace; white-space: nowrap; }
+  dialog {
+    background: #22242d; color: #e6e6e6; border: 1px solid #3a3d4a; border-radius: 10px;
+    padding: 18px; min-width: 300px;
+  }
+  dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+  dialog h3 { margin: 0 0 12px; color: #8ea1ff; font-size: 1.05rem; }
+  .reset-row { border-top: 1px solid #2f3240; padding-top: 12px; margin-top: 12px; }
+  .reset-row:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
+</style>
+</head>
+<body>
+
+<h1>🎮 해정 관리자 콘솔</h1>
+
+<div class="topbar">
+  <input id="pw" type="password" placeholder="관리자 비밀번호 (처음 한 번만 입력)">
+  <button onclick="connect()">접속</button>
+  <button class="ghost" onclick="refreshAll()">새로고침</button>
+  <button class="danger" onclick="forgetPw()">비밀번호 잊기</button>
+  <span id="status" class="status">연결 안 됨</span>
+</div>
+
+<details open>
+  <summary>종목 생성 / 가격·이름 수정</summary>
+  <div class="section">
+    <p class="hint">이름을 바꾸려면 아래 목록의 [수정]을 누르고 이름과 가격을 고친 뒤 저장하세요.</p>
+    <div class="form-row">
+      <input id="stockName" placeholder="종목 이름">
+      <input id="stockPrice" type="number" min="1" placeholder="가격">
+      <button onclick="saveStock()">저장</button>
+      <button class="ghost" onclick="clearStockForm()">입력 초기화</button>
+    </div>
+    <input type="hidden" id="stockOrigName">
+    <table>
+      <thead><tr><th>이름</th><th class="num">가격</th><th></th></tr></thead>
+      <tbody id="stockTable"></tbody>
+    </table>
+  </div>
+</details>
+
+<details>
+  <summary>상품 생성 / 가격·이름·설명 수정</summary>
+  <div class="section">
+    <div class="form-row">
+      <input id="productName" placeholder="상품 이름">
+      <input id="productPrice" type="number" min="1" placeholder="가격">
+      <input id="productDesc" placeholder="설명" style="width:280px">
+      <button onclick="saveProduct()">저장</button>
+      <button class="ghost" onclick="clearProductForm()">입력 초기화</button>
+    </div>
+    <input type="hidden" id="productOrigName">
+    <table>
+      <thead><tr><th>이름</th><th class="num">가격</th><th>설명</th><th></th></tr></thead>
+      <tbody id="productTable"></tbody>
+    </table>
+  </div>
+</details>
+
+<details>
+  <summary>유저 잔고 / 보유 상품</summary>
+  <div class="section">
+    <table>
+      <thead><tr><th>유저</th><th class="num">잔고</th><th>보유 상품</th><th></th></tr></thead>
+      <tbody id="userTable"></tbody>
+    </table>
+  </div>
+</details>
+
+<details>
+  <summary>📜 활동 로그 (누가 언제 뭘 했는지)</summary>
+  <div class="section">
+    <p class="hint">유저가 쓴 명령어(매수·매도·상품구입 등)와 관리자 콘솔 작업이 시간순으로 남아요. 조회만 하는 명령어(/잔고, /주식목록 등)는 남기지 않아요. 아래에서 기간을 고르고 [불러오기]를 누르세요.</p>
+    <div class="form-row">
+      <label class="muted">기간</label>
+      <select id="logDays">
+        <option value="1">오늘</option>
+        <option value="2">어제 포함 (2일)</option>
+        <option value="3">최근 3일</option>
+        <option value="7">최근 7일</option>
+      </select>
+      <button onclick="loadLogs()">불러오기</button>
+      <span id="logCount" class="muted"></span>
+    </div>
+    <div class="form-row">
+      <label class="muted">분류</label>
+      <select id="logCategory" onchange="renderLogs()"></select>
+      <label class="muted">유저</label>
+      <select id="logUser" onchange="renderLogs()" style="max-width:220px"></select>
+      <label class="muted">정렬</label>
+      <select id="logSort" onchange="renderLogs()">
+        <option value="new">최신순</option>
+        <option value="old">오래된순</option>
+        <option value="user">유저순</option>
+        <option value="cat">분류순</option>
+      </select>
+      <input id="logSearch" placeholder="검색 (종목·상품·내용)" oninput="renderLogs()" style="width:200px">
+    </div>
+    <div class="logwrap">
+      <table>
+        <thead><tr><th>시간 (한국시간)</th><th>유저</th><th>분류</th><th>명령어</th><th>입력</th><th>결과</th></tr></thead>
+        <tbody id="logTable"><tr><td colspan="6" class="muted">[불러오기]를 눌러주세요.</td></tr></tbody>
+      </table>
+    </div>
+    <div class="form-row" style="margin-top:12px;">
+      <label class="muted">로그 정리:</label>
+      <input id="purgeDays" type="number" min="1" max="365" value="30" style="width:90px">
+      <label class="muted">일보다 오래된 로그 삭제</label>
+      <button class="danger" onclick="purgeLogs()">삭제</button>
+    </div>
+  </div>
+</details>
+
+<details>
+  <summary>🧹 초기화 (잔고 / 봇 / 종목 가격 / 보유 상품)</summary>
+  <div class="section">
+    <p class="hint">주의: 누르면 모든 유저(또는 모든 종목)에게 한꺼번에 적용돼요. 되돌릴 수 없으니 숫자를 꼭 확인하세요.</p>
+
+    <div class="reset-row">
+      <div class="form-row">
+        <label class="muted">모든 유저 잔고를</label>
+        <input id="resetBalance" type="number" min="0" value="1000" style="width:140px">
+        <label class="muted">해정으로</label>
+        <button class="danger" onclick="resetBalances()">잔고 초기화</button>
+      </div>
+      <div class="form-row">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+          <input id="resetBalanceBots" type="checkbox" style="width:auto;">
+          <span class="muted">(선택) AI 봇도 같은 금액으로 같이 초기화 (보유 종목도 비워져요)</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="reset-row">
+      <div class="form-row">
+        <label class="muted">AI 봇 전체의 현금을</label>
+        <input id="resetBotCash" type="number" min="100" value="1000" style="width:140px">
+        <label class="muted">해정으로 (보유 종목은 비워져요, 100 이상)</label>
+        <button class="danger" onclick="resetBotsOnly()">봇 초기화</button>
+      </div>
+      <div class="form-row">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+          <input id="resetBotPersonality" type="checkbox" style="width:auto;">
+          <span class="muted">(선택) 봇의 성격도 새로 뽑기 (끄면 성격은 그대로)</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="reset-row">
+      <div class="form-row">
+        <label class="muted">모든 종목 가격을</label>
+        <input id="resetStockPrice" type="number" min="101" value="1000" style="width:140px">
+        <label class="muted">해정으로 (시세 기록도 새로 시작, 101 이상)</label>
+        <button class="danger" onclick="resetStockPrices()">종목 초기화</button>
+      </div>
+    </div>
+
+    <div class="reset-row">
+      <div class="form-row">
+        <label class="muted">모든 유저의 보유 상품</label>
+        <select id="resetProduct" style="min-width:180px"></select>
+        <label class="muted">수량을</label>
+        <input id="resetItemCount" type="number" min="0" value="0" style="width:110px">
+        <label class="muted">개로 (0이면 모두 제거)</label>
+        <button class="danger" onclick="resetItems()">상품 초기화</button>
+      </div>
+    </div>
+  </div>
+</details>
+
+<dialog id="itemDialog">
+  <h3 id="itemDialogTitle">보유 상품 편집</h3>
+  <div class="form-row">
+    <select id="itemProduct" style="min-width:200px" onchange="showItemCurrent()"></select>
+  </div>
+  <div class="form-row">
+    <label class="muted">수량</label>
+    <input id="itemCount" type="number" min="0" value="1" style="width:110px">
+    <span id="itemCurrent" class="muted"></span>
+  </div>
+  <p class="hint">0을 넣으면 그 상품이 목록에서 사라져요.</p>
+  <div class="form-row" style="justify-content:flex-end; margin:0;">
+    <button class="ghost" onclick="$('itemDialog').close()">취소</button>
+    <button onclick="saveItemDialog()">저장</button>
+  </div>
+</dialog>
+
+<details>
+  <summary>🔑 관리자 비밀번호 변경</summary>
+  <div class="section">
+    <p class="hint">여기서 바꾼 비밀번호가 바로 적용돼요. 영문·숫자·기호 6~64자만 쓸 수 있고, 공백과 한글은 안 돼요. 바꾸고 나면 이 브라우저에는 새 비밀번호가 자동으로 저장돼요. 다른 컴퓨터에서는 새 비밀번호로 다시 접속해야 해요.</p>
+    <div class="form-row">
+      <label class="muted">새 비밀번호</label>
+      <input id="newPw" type="password" autocomplete="new-password" style="width:200px">
+      <label class="muted">한 번 더</label>
+      <input id="newPw2" type="password" autocomplete="new-password" style="width:200px">
+      <button onclick="changePassword()">비밀번호 변경</button>
+    </div>
+    <div class="form-row">
+      <button class="ghost" onclick="clearPassword()">기본(Vercel) 비밀번호로 되돌리기</button>
+      <span class="muted">콘솔에서 바꾼 비밀번호를 지우고, Vercel에 적어둔 ADMIN_PANEL_PASSWORD로 돌아가요.</span>
+    </div>
+  </div>
+</details>
+
+<details>
+  <summary>출석 설정</summary>
+  <div class="section">
+    <p class="hint">출석체크 보상과 사용 여부를 설정합니다. 디스코드 <code>/출석체크</code>에 바로 반영됩니다.</p>
+    <div class="form-row">
+      <label class="muted">상태</label>
+      <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+        <input id="attEnabled" type="checkbox" style="width:auto;">
+        <span>출석체크 사용</span>
+      </label>
+    </div>
+    <div class="form-row">
+      <label class="muted">보상(해정)</label>
+      <input id="attReward" type="number" min="0" placeholder="보상 금액">
+      <button onclick="saveAttendance()">저장</button>
+      <button class="ghost" onclick="reloadAttendance()">현재 값 불러오기</button>
+    </div>
+    <div id="attStatus" class="muted">불러오기 전</div>
+  </div>
+</details>
+
+<details open>
+  <summary>자동 상장 / 유저 상장 설정</summary>
+  <div class="section">
+    <p class="hint">종목 수가 <b>기준 종목 수 이하</b>가 되면 아래 이름 목록에서 <b>자동 추가 수</b>만큼 1000해정으로 자동 상장합니다. 유저는 <code>/종목생성</code>으로 하루 정해진 횟수만큼 이름을 정해 상장할 수 있어요(가격 1000해정 고정).</p>
+    <div class="form-row">
+      <label class="muted">기준 종목 수</label>
+      <input id="listTrigger" type="number" min="0" style="width:110px">
+      <label class="muted">자동 추가 수</label>
+      <input id="listAdd" type="number" min="0" style="width:110px">
+      <label class="muted">유저 하루 생성 횟수</label>
+      <input id="listDaily" type="number" min="0" style="width:110px">
+    </div>
+    <div class="form-row" style="flex-direction:column; align-items:stretch;">
+      <label class="muted">자동 상장 이름 목록 (줄바꿈 또는 쉼표로 구분)</label>
+      <textarea id="listNames" rows="6" style="width:100%; background:#15161c; color:#eee; border:1px solid #3a3d4a; border-radius:6px; padding:8px; font-family:inherit;"></textarea>
+    </div>
+    <div class="form-row">
+      <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+        <input id="listKeep" type="checkbox" style="width:auto;">
+        <span>자동 상장에 쓴 이름도 목록에 유지 (쓴 이름은 맨 뒤로 보냄 · 끄면 쓴 이름은 목록에서 삭제)</span>
+      </label>
+    </div>
+    <div class="form-row">
+      <button onclick="saveListing()">저장</button>
+      <span id="listStatus" class="muted">불러오기 전</span>
+    </div>
+  </div>
+</details>
+
+<details>
+  <summary>실행 로그</summary>
+  <div class="section"><div id="log">대기 중</div></div>
+</details>
+
+<details open>
+  <summary>가격 변동 알림</summary>
+  <div class="section">
+    <p class="hint">체크하면 시세가 바뀔 때마다 주식채널에 변동 내역이 올라가고, 체크를 끄면 올라가지 않습니다. 유저별 DM 알림(<code>/알림설정</code>)과는 별개이며, 체크를 바꾸면 바로 저장됩니다.</p>
+    <div class="form-row">
+      <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+        <input id="announceEnabled" type="checkbox" style="width:auto;" onchange="saveAnnounce()">
+        <span>가격 변동 알림 (주식채널 공지)</span>
+      </label>
+    </div>
+    <div id="announceStatus" class="muted">불러오기 전</div>
+  </div>
+</details>
+
+<script>
+const API = "https://discord-stock-bot-mauve.vercel.app/api/admin/stocks";
+const PW_KEY = "haejeongAdminPw";
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let connected = false;
+// 자동 상장 입력칸을 고치는 중(저장 전)이면 true → 다른 동작의 새로고침이 입력을 덮어쓰지 않게 함
+let listingDirty = false;
+// 상품 선택칸과 "현재 몇 개 가졌는지" 표시에 쓰려고 마지막으로 불러온 목록을 기억해요
+let productsCache = [];
+let usersCache = [];
+let editingUserId = null;
+
+function log(msg) { $("log").textContent = msg; }
+function setStatus(text, on) {
+  $("status").textContent = text;
+  $("status").className = "status" + (on ? " on" : "");
+}
+
+// 처음 한 번만 비밀번호 확정. 이후에는 저장된 값을 사용.
+window.addEventListener("DOMContentLoaded", () => {
+  ["listTrigger", "listAdd", "listDaily", "listNames", "listKeep"].forEach((id) => {
+    $(id).addEventListener("input", () => { listingDirty = true; });
+    $(id).addEventListener("change", () => { listingDirty = true; });
+  });
+
+  const saved = localStorage.getItem(PW_KEY);
+  if (saved) {
+    $("pw").value = saved;
+    $("pw").disabled = true;
+    connect();
+  }
+});
+
+function pw() { return localStorage.getItem(PW_KEY) || $("pw").value; }
+
+async function connect() {
+  const value = $("pw").value.trim() || localStorage.getItem(PW_KEY) || "";
+  if (!value) return log("비밀번호를 입력하세요.");
+  localStorage.setItem(PW_KEY, value);
+  $("pw").value = value;
+  $("pw").disabled = true;
+  await reload();
+}
+
+function forgetPw() {
+  localStorage.removeItem(PW_KEY);
+  connected = false;
+  $("pw").disabled = false;
+  $("pw").value = "";
+  setStatus("연결 안 됨", false);
+  log("저장된 비밀번호를 지웠습니다. 다시 입력하세요.");
+}
+
+async function call(action, body) {
+  const res = await fetch(`${API}?action=${action}`, {
+    method: body ? "POST" : "GET",
+    headers: { "Content-Type": "application/json", "x-admin-password": pw() },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+async function act(fn, okMsg) {
+  try {
+    await fn();
+    if (okMsg) log(okMsg);
+    await reload(true);
+  } catch (e) {
+    log("오류: " + e.message);
+  }
+}
+
+// 사용자가 직접 누르는 새로고침: 입력 중이던 자동 상장 값도 서버 값으로 되돌림
+function refreshAll() {
+  listingDirty = false;
+  return reload();
+}
+
+async function reload(silent) {
+  try {
+    const [stocks, products, users] = await Promise.all([
+      call("listStocks"),
+      call("listProducts"),
+      call("listUsers"),
+    ]);
+    connected = true;
+    setStatus("접속됨", true);
+    renderStocks(stocks);
+    productsCache = products;
+    usersCache = users;
+    renderProducts(products);
+    renderUsers(users);
+    fillProductSelects();
+    renderAttendance(await call("getAttendance"));
+    renderAnnounce(await call("getAnnounce"));
+    renderListing(await call("getListing"), stocks);
+    if (!silent) log("불러오기 완료");
+  } catch (e) {
+    connected = false;
+    setStatus("연결 실패", false);
+    log("오류: " + e.message);
+  }
+}
+
+// ----- 종목 -----
+function renderStocks(stocks) {
+  $("stockTable").innerHTML = stocks.map((s) => `
+    <tr>
+      <td>${esc(s.name)}</td>
+      <td class="num">${Number(s.price).toLocaleString()}</td>
+      <td><div class="actions">
+        <button class="ghost" onclick='editStock(${JSON.stringify(s.name)}, ${Number(s.price)})'>수정</button>
+        <button class="danger" onclick='removeStock(${JSON.stringify(s.name)})'>삭제</button>
+      </div></td>
+    </tr>`).join("") || `<tr><td colspan="3" class="muted">등록된 종목이 없습니다.</td></tr>`;
+}
+
+function editStock(name, price) {
+  $("stockOrigName").value = name;
+  $("stockName").value = name;
+  $("stockPrice").value = price;
+  log(`"${name}" 수정 모드입니다. 이름이나 가격을 고친 뒤 저장을 누르세요.`);
+}
+
+function clearStockForm() {
+  $("stockOrigName").value = "";
+  $("stockName").value = "";
+  $("stockPrice").value = "";
+}
+
+function saveStock() {
+  const from = $("stockOrigName").value;
+  const to = $("stockName").value.trim();
+  const price = $("stockPrice").value;
+  if (from && from !== to) {
+    return act(() => call("renameStock", { from, to, price: Number(price) }), `"${from}" → "${to}" 이름 변경 완료`)
+      .then(clearStockForm);
+  }
+  return act(() => call("upsertStock", { name: to, price }), `"${to}" 저장 완료`)
+    .then(clearStockForm);
+}
+
+function removeStock(name) {
+  if (!confirm(`"${name}" 종목을 삭제할까요?`)) return;
+  act(() => call("removeStock", { name }), `"${name}" 삭제 완료`);
+}
+
+// ----- 상품 -----
+function renderProducts(products) {
+  $("productTable").innerHTML = products.map((p) => `
+    <tr>
+      <td>${esc(p.name)}</td>
+      <td class="num">${Number(p.price).toLocaleString()}</td>
+      <td class="muted">${esc(p.description)}</td>
+      <td><div class="actions">
+        <button class="ghost" onclick='editProduct(${JSON.stringify(p.name)}, ${Number(p.price)}, ${JSON.stringify(p.description || "")})'>수정</button>
+        <button class="danger" onclick='removeProduct(${JSON.stringify(p.name)})'>삭제</button>
+      </div></td>
+    </tr>`).join("") || `<tr><td colspan="4" class="muted">등록된 상품이 없습니다.</td></tr>`;
+}
+
+function editProduct(name, price, description) {
+  $("productOrigName").value = name;
+  $("productName").value = name;
+  $("productPrice").value = price;
+  $("productDesc").value = description;
+  log(`"${name}" 수정 모드입니다. 저장을 누르세요.`);
+}
+
+function clearProductForm() {
+  $("productOrigName").value = "";
+  $("productName").value = "";
+  $("productPrice").value = "";
+  $("productDesc").value = "";
+}
+
+function saveProduct() {
+  const from = $("productOrigName").value;
+  const to = $("productName").value.trim();
+  const price = $("productPrice").value;
+  const description = $("productDesc").value.trim();
+  if (from && from !== to) {
+    return act(() => call("renameProduct", { from, to, price: Number(price), description }), `"${from}" → "${to}" 이름 변경 완료`)
+      .then(clearProductForm);
+  }
+  return act(() => call("upsertProduct", { name: to, price, description }), `"${to}" 저장 완료`)
+    .then(clearProductForm);
+}
+
+function removeProduct(name) {
+  if (!confirm(`"${name}" 상품을 삭제할까요? (이미 구입한 유저의 보유 목록은 남습니다)`)) return;
+  act(() => call("removeProduct", { name }), `"${name}" 삭제 완료`);
+}
+
+// ----- 유저 -----
+function renderUsers(users) {
+  $("userTable").innerHTML = users.map((u) => {
+    const items = Object.entries(u.items || {});
+    const itemsText = items.length
+      ? items.map(([n, c]) => `${esc(n)} ×${c}`).join("<br>")
+      : `<span class="muted">없음</span>`;
+    const userCell = u.username
+      ? `${esc(u.username)}<br><span class="muted">${esc(u.id)}</span>`
+      : esc(u.id);
+    return `
+    <tr>
+      <td>${userCell}</td>
+      <td class="num">${(u.balance || 0).toLocaleString()}</td>
+      <td>${itemsText}</td>
+      <td><div class="actions">
+        <button class="ghost" onclick='setBalance(${JSON.stringify(u.id)})'>잔고 수정</button>
+        <button class="ghost" onclick='editItem(${JSON.stringify(u.id)})'>보유 상품 편집</button>
+      </div></td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="4" class="muted">유저가 없습니다.</td></tr>`;
+}
+
+function setBalance(userId) {
+  const balance = prompt("새 잔고를 입력하세요");
+  if (balance === null) return;
+  act(() => call("setBalance", { userId, balance }), `${userId} 잔고 변경 완료`);
+}
+
+// 상품 이름을 직접 치지 않고 목록에서 골라요
+function fillProductSelects() {
+  const options = productsCache
+    .map((p) => `<option value="${esc(p.name)}">${esc(p.name)} (${Number(p.price).toLocaleString()}해정)</option>`)
+    .join("");
+
+  // 초기화칸: 맨 위에 "전체 상품" 선택지 (고르던 값은 유지)
+  const prevReset = $("resetProduct").value;
+  $("resetProduct").innerHTML = `<option value="all">(전체 상품)</option>${options}`;
+  if (prevReset && [...$("resetProduct").options].some((o) => o.value === prevReset)) {
+    $("resetProduct").value = prevReset;
+  }
+
+  // 유저 편집창: 대화상자가 열려 있는 동안엔 고르던 값을 건드리지 않아요
+  if (!$("itemDialog").open) {
+    $("itemProduct").innerHTML = options || `<option value="">등록된 상품이 없어요</option>`;
+  }
+}
+
+function showItemCurrent() {
+  const user = usersCache.find((u) => u.id === editingUserId);
+  const name = $("itemProduct").value;
+  const have = Number(user?.items?.[name] || 0);
+  $("itemCurrent").textContent = name ? `(지금 ${have.toLocaleString()}개 보유)` : "";
+}
+
+function editItem(userId) {
+  if (productsCache.length === 0) return log("등록된 상품이 없어요. 먼저 상품을 만들어주세요.");
+  editingUserId = userId;
+  const user = usersCache.find((u) => u.id === userId);
+  $("itemDialogTitle").textContent = `보유 상품 편집 — ${user?.username || userId}`;
+  fillProductSelects();
+  $("itemCount").value = 1;
+  showItemCurrent();
+  $("itemDialog").showModal();
+}
+
+function saveItemDialog() {
+  const name = $("itemProduct").value;
+  const count = Number($("itemCount").value);
+  if (!name) return log("상품을 골라주세요.");
+  if (!Number.isInteger(count) || count < 0) return log("수량은 0 이상의 정수로 입력해 주세요.");
+  const userId = editingUserId;
+  $("itemDialog").close();
+  act(() => call("setUserItem", { userId, name, count }), `${userId}의 ${name} 수량을 ${count}개로 변경`);
+}
+
+// ----- 초기화 -----
+function resetBalances() {
+  const balance = Number($("resetBalance").value);
+  if (!Number.isInteger(balance) || balance < 0) return log("잔고는 0 이상의 정수로 입력해 주세요.");
+  if (!confirm(`모든 유저의 잔고를 ${balance.toLocaleString()}해정으로 바꿀까요?\n(되돌릴 수 없어요)`)) return;
+  const withBots = $("resetBalanceBots").checked;
+  act(async () => {
+    const r = await call("resetBalances", { balance });
+    let msg = `유저 ${r.count}명의 잔고를 ${r.balance.toLocaleString()}해정으로 초기화했어요.`;
+    if (withBots) {
+      if (balance < 100) msg += " (봇은 100 미만으로 못 바꿔서 건너뛰었어요)";
+      else {
+        const b = await call("resetBots", { cash: balance });
+        msg += b.count ? ` 봇 ${b.count.toLocaleString()}명도 같은 금액으로 초기화했어요.` : " (봇이 꺼져 있어서 봇은 건너뛰었어요)";
+      }
+    }
+    log(msg);
+  });
+}
+
+function resetBotsOnly() {
+  const cash = Number($("resetBotCash").value);
+  const newPersonality = $("resetBotPersonality").checked;
+  if (!Number.isInteger(cash) || cash < 100) return log("봇 현금은 100 이상의 정수로 입력해 주세요.");
+  if (!confirm(`AI 봇 전체의 현금을 ${cash.toLocaleString()}해정으로 바꾸고 보유 종목을 비울까요?${newPersonality ? "\n성격도 새로 뽑아요." : ""}\n(되돌릴 수 없어요)`)) return;
+  act(async () => {
+    const r = await call("resetBots", { cash, newPersonality });
+    log(r.count ? `AI 봇 ${r.count.toLocaleString()}명을 ${r.cash.toLocaleString()}해정으로 초기화했어요.` : "AI 봇이 꺼져 있어서(CROWD_BOTS=0) 바꿀 게 없어요.");
+  });
+}
+
+function resetStockPrices() {
+  const price = Number($("resetStockPrice").value);
+  if (!Number.isInteger(price) || price <= 100) return log("종목 가격은 101 이상의 정수로 입력해 주세요.");
+  if (!confirm(`모든 종목의 가격을 ${price.toLocaleString()}해정으로 바꾸고 시세 기록도 새로 시작할까요?\n(되돌릴 수 없어요)`)) return;
+  act(async () => {
+    const r = await call("resetStocks", { price });
+    log(`종목 ${r.count}개를 ${r.price.toLocaleString()}해정으로 초기화했어요.`);
+  });
+}
+
+function resetItems() {
+  const name = $("resetProduct").value;
+  const count = Number($("resetItemCount").value);
+  if (!name) return log("상품을 골라주세요.");
+  if (!Number.isInteger(count) || count < 0) return log("수량은 0 이상의 정수로 입력해 주세요.");
+  const target = name === "all" ? "모든 상품" : `"${name}"`;
+  const what = count === 0 ? `${target}을(를) 모든 유저에게서 제거` : `모든 유저의 ${target} 수량을 ${count.toLocaleString()}개로 설정`;
+  if (!confirm(`${what}할까요?\n(되돌릴 수 없어요)`)) return;
+  act(async () => {
+    const r = await call("resetItems", { name, count });
+    log(`${what} 완료 (유저 ${r.changed}명 변경).`);
+  });
+}
+
+// ----- 활동 로그 -----
+let logsData = [];
+const LOG_CATEGORIES = ["매수", "매도", "상품구입", "예약", "출석", "채굴", "종목생성", "알림", "관리자", "기타"];
+const LOG_LIMIT = 500; // 화면에 한 번에 그리는 최대 줄 수 (많으면 느려져서)
+
+const kstFull = (ms) => new Date(ms + 9 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
+
+function tagClass(k) {
+  if (k === "매수") return "buy";
+  if (k === "매도") return "sell";
+  if (k === "상품구입") return "shop";
+  if (k === "예약") return "order";
+  if (k === "관리자") return "admin";
+  return "";
+}
+
+// 유저 이름: 로그에 적힌 닉네임 > 유저 목록의 닉네임 > ID
+function logUserName(l) {
+  if (l.u === "admin") return "관리자";
+  const known = usersCache.find((u) => u.id === l.u)?.username;
+  return l.n || known || l.u;
+}
+
+function initLogFilters() {
+  if ($("logCategory").options.length) return;
+  $("logCategory").innerHTML = `<option value="">전체</option>` + LOG_CATEGORIES.map((c) => `<option>${c}</option>`).join("");
+  $("logUser").innerHTML = `<option value="">전체</option>`;
+}
+
+async function loadLogs() {
+  initLogFilters();
+  try {
+    logsData = await call(`listLogs&days=${$("logDays").value}`);
+    // 유저 선택칸: 이번에 불러온 로그에 나온 유저만
+    const seen = new Map();
+    for (const l of logsData) if (!seen.has(l.u)) seen.set(l.u, logUserName(l));
+    const prev = $("logUser").value;
+    $("logUser").innerHTML = `<option value="">전체</option>` +
+      [...seen.entries()]
+        .sort((a, b) => a[1].localeCompare(b[1], "ko"))
+        .map(([id, name]) => `<option value="${esc(id)}">${esc(name)}</option>`)
+        .join("");
+    if (seen.has(prev)) $("logUser").value = prev;
+    renderLogs();
+    log(`활동 로그 ${logsData.length.toLocaleString()}건을 불러왔어요.`);
+  } catch (e) {
+    log("오류: " + e.message);
+  }
+}
+
+function renderLogs() {
+  initLogFilters();
+  const cat = $("logCategory").value;
+  const user = $("logUser").value;
+  const q = $("logSearch").value.trim().toLowerCase();
+  const sort = $("logSort").value;
+
+  let list = logsData.filter((l) =>
+    (!cat || l.k === cat) &&
+    (!user || l.u === user) &&
+    (!q || `${l.c} ${l.a} ${l.r} ${logUserName(l)}`.toLowerCase().includes(q))
+  );
+
+  const byTime = (a, b) => b.t - a.t;
+  if (sort === "old") list.sort((a, b) => a.t - b.t);
+  else if (sort === "user") list.sort((a, b) => logUserName(a).localeCompare(logUserName(b), "ko") || byTime(a, b));
+  else if (sort === "cat") list.sort((a, b) => a.k.localeCompare(b.k, "ko") || byTime(a, b));
+  else list.sort(byTime);
+
+  // 분류별 건수 요약
+  const counts = {};
+  for (const l of list) counts[l.k] = (counts[l.k] || 0) + 1;
+  const summary = Object.entries(counts).map(([k, n]) => `${k} ${n}`).join(" · ");
+  $("logCount").textContent = logsData.length
+    ? `${list.length.toLocaleString()}건${summary ? ` (${summary})` : ""}${list.length > LOG_LIMIT ? ` — 위 ${LOG_LIMIT}건만 표시` : ""}`
+    : "";
+
+  $("logTable").innerHTML = list.slice(0, LOG_LIMIT).map((l) => `
+    <tr>
+      <td class="logtime">${esc(kstFull(l.t))}</td>
+      <td>${esc(logUserName(l))}</td>
+      <td><span class="tag ${tagClass(l.k)}">${esc(l.k)}</span></td>
+      <td>${esc(l.c)}</td>
+      <td class="muted">${esc(l.a)}</td>
+      <td>${esc(l.r)}</td>
+    </tr>`).join("") || `<tr><td colspan="6" class="muted">${logsData.length ? "조건에 맞는 로그가 없어요." : "[불러오기]를 눌러주세요."}</td></tr>`;
+}
+
+async function purgeLogs() {
+  const keepDays = Number($("purgeDays").value);
+  if (!Number.isInteger(keepDays) || keepDays < 1 || keepDays > 365) return log("보관 일수는 1~365 사이의 정수로 입력해 주세요.");
+  if (!confirm(`${keepDays}일보다 오래된 활동 로그를 모두 삭제할까요?\n(되돌릴 수 없어요)`)) return;
+  try {
+    const r = await call("purgeLogs", { keepDays });
+    log(`오래된 로그 ${r.deleted.toLocaleString()}건을 삭제했어요.`);
+  } catch (e) {
+    log("오류: " + e.message);
+  }
+}
+
+// ----- 관리자 비밀번호 -----
+const PW_RULE = /^[\x21-\x7E]{6,64}$/;
+
+async function changePassword() {
+  const a = $("newPw").value;
+  const b = $("newPw2").value;
+  if (!PW_RULE.test(a)) return log("비밀번호는 영문·숫자·기호 6~64자(공백·한글 불가)로 입력해 주세요.");
+  if (a !== b) return log("두 칸의 비밀번호가 서로 달라요.");
+  if (!confirm("관리자 비밀번호를 바꿀까요?")) return;
+  try {
+    await call("setPassword", { newPassword: a });
+    // 바뀐 비밀번호를 이 브라우저에도 저장해서 바로 이어서 쓸 수 있게 해요
+    localStorage.setItem(PW_KEY, a);
+    $("pw").value = a;
+    $("newPw").value = "";
+    $("newPw2").value = "";
+    log("비밀번호를 바꿨어요. 이 브라우저에는 새 비밀번호가 저장됐어요.");
+    await reload(true);
+  } catch (e) {
+    log("오류: " + e.message);
+  }
+}
+
+async function clearPassword() {
+  if (!confirm("콘솔에서 바꾼 비밀번호를 지우고 Vercel의 ADMIN_PANEL_PASSWORD로 되돌릴까요?\n(지금 접속은 풀려요. Vercel에 적어둔 비밀번호를 알고 있어야 해요)")) return;
+  try {
+    await call("clearPassword", {});
+    forgetPw();
+    log("기본(Vercel) 비밀번호로 되돌렸어요. Vercel에 적어둔 ADMIN_PANEL_PASSWORD로 다시 접속하세요.");
+  } catch (e) {
+    log("오류: " + e.message);
+  }
+}
+
+// ----- 출석 설정 -----
+function renderAttendance(cfg) {
+  $("attEnabled").checked = !!cfg.enabled;
+  $("attReward").value = cfg.reward ?? 0;
+  $("attStatus").innerHTML =
+    `현재 상태: <b>${cfg.enabled ? "✅ 켜짐" : "❌ 꺼짐"}</b> · 보상: <b>${Number(cfg.reward || 0).toLocaleString()}해정</b>`;
+}
+
+async function reloadAttendance() {
+  try {
+    renderAttendance(await call("getAttendance"));
+    log("출석 설정을 불러왔습니다.");
+  } catch (e) {
+    log("오류: " + e.message);
+  }
+}
+
+// ----- 가격 변동 알림 (주식채널 공지) -----
+function renderAnnounce(cfg) {
+  $("announceEnabled").checked = !!cfg.enabled;
+  $("announceStatus").innerHTML =
+    `현재 상태: <b>${cfg.enabled ? "✅ 켜짐 (시세 변동 시 공지)" : "❌ 꺼짐 (공지 안 함)"}</b>`;
+}
+
+function saveAnnounce() {
+  const enabled = $("announceEnabled").checked;
+  act(() => call("setAnnounce", { enabled }), enabled ? "가격 변동 알림을 켰습니다." : "가격 변동 알림을 껐습니다.");
+}
+
+// ----- 자동 상장 설정 -----
+function renderListing(cfg, stocks = []) {
+  const names = String(cfg.names || "").split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+  const listed = new Set(stocks.map((s) => s.name));
+  const available = names.filter((n) => !listed.has(n)).length;
+  $("listStatus").innerHTML =
+    `이름 목록 <b>${names.length}개</b> · 지금 상장 가능한 이름 <b>${available}개</b>`;
+
+  // 저장 안 한 입력이 있으면 입력칸은 덮어쓰지 않음
+  if (listingDirty) return;
+  $("listTrigger").value = cfg.triggerCount ?? 5;
+  $("listAdd").value = cfg.addCount ?? 15;
+  $("listDaily").value = cfg.dailyLimit ?? 3;
+  $("listNames").value = cfg.names || "";
+  $("listKeep").checked = cfg.keepNames !== false;
+}
+
+function saveListing() {
+  const body = {
+    triggerCount: Number($("listTrigger").value),
+    addCount: Number($("listAdd").value),
+    dailyLimit: Number($("listDaily").value),
+    names: $("listNames").value,
+    keepNames: $("listKeep").checked,
+  };
+  act(async () => {
+    await call("setListing", body);
+    listingDirty = false; // 저장 성공 후에만 해제
+  }, "자동 상장 설정을 저장했습니다.");
+}
+
+function saveAttendance() {
+  const enabled = $("attEnabled").checked;
+  const reward = Number($("attReward").value);
+  if (!Number.isInteger(reward) || reward < 0) {
+    return log("보상은 0 이상의 정수여야 합니다.");
+  }
+  act(() => call("setAttendance", { enabled, reward }), "출석 설정을 저장했습니다.");
+}
+</script>
+</body>
+</html>
