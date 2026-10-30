@@ -1331,6 +1331,7 @@ const CATEGORY = {
   선물: "선물",
   선물청산: "선물",
   보험가입: "보험",
+  보험해지: "보험",
   예금: "은행",
   출금: "은행",
   송금: "은행",
@@ -3954,16 +3955,16 @@ export async function transferMoney(env, fromId, toId, amount, { toIsBot = false
 export const INSURANCE_COVER_RATE = 0.5; // 보험금 = 가입 때 현재가의 50%
 export const INSURANCE_LOAD = 1.15; // 보험료 = 공정한 값 × 1.15 (보험사 몫)
 export const INSURANCE_MAX = 5; // 동시에 가질 수 있는 보험 수
-export const INSURANCE_TERMS = [1, 3]; // 고를 수 있는 기간(일)
-// 가격대별 "그 기간 안에 폐지될 확률" (평소 변동 ±20%, 급등락 -80~+120% 시뮬레이션 기준)
+export const INSURANCE_MIN_TERM = 1; // 최소 가입 기간(일)
+export const INSURANCE_MAX_TERM = 30; // 최대 가입 기간(일) — 길게 가입할수록 복리로 비싸져요
+export const INSURANCE_CANCEL_REFUND_RATE = 0.4; // 해지 시 "남은 기간 비율 × 보험료"의 40%만 환급 (나머지는 위약금)
+// 가격대별 "하루 동안 폐지될 확률"(일일 위험률). 기존 1일/3일 시뮬레이션 결과를 묶어서 추정했어요.
 const INSURANCE_PRICE_POINTS = [350, 500, 1000, 2000, 5000];
-const INSURANCE_PROB = {
-  1: [0.476, 0.381, 0.212, 0.112, 0.044],
-  3: [0.774, 0.72, 0.596, 0.472, 0.306],
-};
+const INSURANCE_DAILY_PROB = [0.434, 0.364, 0.237, 0.152, 0.08];
 
-function insuranceProb(price, term) {
-  const probs = INSURANCE_PROB[term] || INSURANCE_PROB[1];
+// 가격대별 일일 위험률(로그보간)
+function insuranceDailyProb(price) {
+  const probs = INSURANCE_DAILY_PROB;
   const xs = INSURANCE_PRICE_POINTS;
   if (price <= xs[0]) return probs[0];
   if (price >= xs[xs.length - 1]) return probs[probs.length - 1]; // 더 비싼 종목도 가장 낮은 값으로(보험사에 유리하게)
@@ -3973,7 +3974,13 @@ function insuranceProb(price, term) {
   return probs[i] + (probs[i + 1] - probs[i]) * t;
 }
 
-// 주당 견적: { payout: 주당 보험금, perShare: 주당 보험료 }
+// 기간이 길어질수록 "그 기간 안에 폐지될 확률"이 복리로 커져요: 1 - (1-일일위험률)^기간
+function insuranceProb(price, term) {
+  const daily = insuranceDailyProb(price);
+  return 1 - Math.pow(1 - daily, term);
+}
+
+// 주당 견적: { payout: 주당 보험금, perShare: 주당 보험료 }. 기간(일)이 늘어날수록 확률이 복리로 커져서 보험료도 같이 비싸져요.
 export function insuranceQuote(price, term) {
   const payout = Math.floor(price * INSURANCE_COVER_RATE);
   const chance = Math.min(0.9, insuranceProb(price, term) * INSURANCE_LOAD); // 보험료가 보험금의 90%를 넘지 않게
@@ -3997,10 +4004,10 @@ function leftText(ms) {
 
 export async function buyInsurance(env, userId, stockName, qty, term) {
   const name = String(stockName ?? "").trim();
-  if (!INSURANCE_TERMS.includes(Number(term))) {
-    return { ok: false, message: `보험 기간은 ${INSURANCE_TERMS.map((t) => `${t}일`).join(" / ")} 중에서 골라 주세요.` };
-  }
   term = Number(term);
+  if (!Number.isInteger(term) || term < INSURANCE_MIN_TERM || term > INSURANCE_MAX_TERM) {
+    return { ok: false, message: `보험 기간은 ${INSURANCE_MIN_TERM}~${INSURANCE_MAX_TERM}일 사이의 정수로 적어주세요. (길게 가입할수록 보험료가 비싸져요)` };
+  }
 
   const [user, stocks] = await Promise.all([getUser(env, userId), listStocks(env)]);
   const stock = stocks.find((s) => s.name === name);
@@ -4062,9 +4069,9 @@ export async function insuranceInfo(env, userId) {
   const lines = [
     "**🛡️ 상장폐지 보험**",
     `가진 종목이 보험 기간 안에 상장폐지되면 **가입할 때 현재가의 ${pctText(INSURANCE_COVER_RATE)}**를 주당 보험금으로 받아요.`,
-    `싼 종목일수록, 기간이 길수록 보험료가 비싸요. 위기 종목(⚠️ ${DANGER_PRICE.toLocaleString()}해정 이하)은 못 들어요.`,
-    `종목마다 1개씩, 동시에 ${INSURANCE_MAX}개까지 · 기간 ${INSURANCE_TERMS.map((t) => `${t}일`).join(" / ")} · 보험료는 돌려받지 못해요.`,
-    `가입: \`${commandPath("보험가입")} 종목 기간\` (수량을 안 적으면 가진 만큼 전부)`,
+    `싼 종목일수록, 기간이 길수록 보험료가 비싸요(기간 ${INSURANCE_MIN_TERM}~${INSURANCE_MAX_TERM}일 자유 선택). 위기 종목(⚠️ ${DANGER_PRICE.toLocaleString()}해정 이하)은 못 들어요.`,
+    `종목마다 1개씩, 동시에 ${INSURANCE_MAX}개까지. 해지하면 남은 기간 비율만큼 보험료의 ${pctText(INSURANCE_CANCEL_REFUND_RATE)}를 환급해요.`,
+    `가입: \`${commandPath("보험가입")} 종목 기간\` · 해지: \`${commandPath("보험해지")} 종목\` (수량을 안 적으면 가진 만큼 전부)`,
     "",
     "**내 보험**",
   ];
@@ -4083,6 +4090,40 @@ export async function insuranceInfo(env, userId) {
 
   if (user.insuranceTotal) lines.push("", `💰 지금까지 받은 보험금 합계: ${Number(user.insuranceTotal).toLocaleString()}해정`);
   return lines.join("\n");
+}
+
+// 보험 해지: 남은 기간 비율만큼 보험료의 INSURANCE_CANCEL_REFUND_RATE를 환급해요.
+// (전액 돌려주면 "일단 들고 안 터지면 바로 해지"로 사실상 공짜 보험이 되니, 비율+위약금으로 손해는 남게 함)
+export async function cancelInsurance(env, userId, stockName) {
+  const name = String(stockName ?? "").trim();
+  const user = await getUser(env, userId);
+  const now = Date.now();
+  const active = activeInsurance(user, now);
+  const policy = active[name];
+  if (!policy) return { ok: false, message: `${name}에 가입한 보험이 없어요.` };
+
+  const totalMs = policy.term * DAY_MS;
+  const remainMs = Math.max(0, policy.expiresAt - now);
+  const refund = Math.floor(policy.premium * (remainMs / totalMs) * INSURANCE_CANCEL_REFUND_RATE);
+
+  delete active[name];
+  const balanceBefore = user.balance;
+  user.balance += refund;
+  user.insurance = active;
+
+  await Promise.all([
+    saveUser(env, userId, user),
+    addHistory(env, userId, `보험 해지: ${name} (환급 +${refund.toLocaleString()}해정)`),
+  ]);
+
+  return {
+    ok: true,
+    message: [
+      `🛡️ **${name}** 보험을 해지했어요.`,
+      `- 환급: ${refund.toLocaleString()}해정 (남은 기간 ${leftText(remainMs)} · 낸 보험료 ${policy.premium.toLocaleString()}해정의 ${pctText(INSURANCE_CANCEL_REFUND_RATE)})`,
+      balanceLine(balanceBefore, user.balance),
+    ].join("\n"),
+  };
 }
 
 // ---------- 배당금 (보유 종목 가치의 일정 %를 매일 지급) ----------
@@ -4763,11 +4804,18 @@ export const commandDefinitions = [
   { name: "보험", description: "상장폐지 보험 설명과 내가 가입한 보험을 봅니다." },
   {
     name: "보험가입",
-    description: "가진 종목이 상장폐지되면 보험금을 받는 보험에 가입합니다. (보험료는 돌려받지 못해요)",
+    description: "가진 종목이 상장폐지되면 보험금을 받는 보험에 가입합니다. (기간이 길수록 보험료가 비싸요)",
     options: [
       { name: "종목", description: "보험에 들 종목 (가진 종목만, 칸을 누르면 보험료가 떠요)", type: 3, required: true, autocomplete: true },
-      { name: "기간", description: "보험 기간", type: 4, required: true, choices: [{ name: "1일", value: 1 }, { name: "3일", value: 3 }] },
+      { name: "기간", description: "보험 기간(일, 1~30). 길수록 보험료가 비싸져요", type: 4, required: true, min_value: 1, max_value: 30 },
       { name: "수량", description: "보장할 주식 수 (안 적으면 가진 만큼 전부)", type: 4, required: false, min_value: 1 },
+    ],
+  },
+  {
+    name: "보험해지",
+    description: "가입한 보험을 해지하고 보험료 일부를 돌려받습니다.",
+    options: [
+      { name: "종목", description: "해지할 보험의 종목", type: 3, required: true, autocomplete: true },
     ],
   },
   { name: "주식상점", description: "구입할 수 있는 상품 목록을 모두에게 보여줍니다. (가격 낮은 순, 알림 없이 표시)" },
@@ -5243,14 +5291,30 @@ export async function autocomplete(interaction, env) {
     }
 
     if (command === "보험가입") {
-      // 가진 종목만, 위기 종목 제외. 주당 보험료(1일/3일)를 같이 보여줘요
+      // 가진 종목만, 위기 종목 제외. 주당 보험료(1일/3일/7일 예시)를 같이 보여줘요
       return textChoices(
         stocks
           .filter((s) => (user.holdings[s.name] || 0) > 0 && s.price > DANGER_PRICE)
           .map((s) => ({
-            label: `${s.name} (보유 ${user.holdings[s.name].toLocaleString()}주 · ${s.price.toLocaleString()}해정 · 주당 보험료 1일 ${insuranceQuote(s.price, 1).perShare.toLocaleString()} / 3일 ${insuranceQuote(s.price, 3).perShare.toLocaleString()})`,
+            label: `${s.name} (보유 ${user.holdings[s.name].toLocaleString()}주 · ${s.price.toLocaleString()}해정 · 주당 보험료 1일 ${insuranceQuote(s.price, 1).perShare.toLocaleString()} / 3일 ${insuranceQuote(s.price, 3).perShare.toLocaleString()} / 30일 ${insuranceQuote(s.price, 30).perShare.toLocaleString()})`,
             value: s.name,
           })),
+        keyword
+      );
+    }
+
+    if (command === "보험해지") {
+      // 내가 가입 중인 보험만 자동완성으로 보여주고, 예상 환급액도 같이 보여줘요
+      const active = activeInsurance(user);
+      return textChoices(
+        Object.entries(active).map(([name, p]) => {
+          const remainMs = Math.max(0, p.expiresAt - Date.now());
+          const refund = Math.floor(p.premium * (remainMs / (p.term * DAY_MS)) * INSURANCE_CANCEL_REFUND_RATE);
+          return {
+            label: `${name} (보장 ${p.qty.toLocaleString()}주 · ${leftText(remainMs)} 남음 · 예상 환급 ${refund.toLocaleString()}해정)`,
+            value: name,
+          };
+        }),
         keyword
       );
     }
@@ -6311,6 +6375,9 @@ export const handlers = {
 
   보험가입: async (interaction, env) =>
     (await buyInsurance(env, interaction.member.user.id, opt(interaction, "종목"), opt(interaction, "수량"), opt(interaction, "기간"))).message,
+
+  보험해지: async (interaction, env) =>
+    (await cancelInsurance(env, interaction.member.user.id, opt(interaction, "종목"))).message,
 
   대출: async (interaction, env) =>
     (await takeLoan(env, interaction.member.user.id, opt(interaction, "금액"), opt(interaction, "기간"))).message,
