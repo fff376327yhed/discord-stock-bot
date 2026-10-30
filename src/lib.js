@@ -5291,17 +5291,17 @@ export async function autocomplete(interaction, env) {
     }
 
     if (command === "보험가입") {
-      // 가진 종목만, 위기 종목 제외. 주당 보험료(1일/3일/7일 예시)를 같이 보여줘요
-      return textChoices(
-        stocks
-          .filter((s) => (user.holdings[s.name] || 0) > 0 && s.price > DANGER_PRICE)
-          .map((s) => ({
-            label: `${s.name} (보유 ${user.holdings[s.name].toLocaleString()}주 · ${s.price.toLocaleString()}해정 · 주당 보험료 1일 ${insuranceQuote(s.price, 1).perShare.toLocaleString()} / 3일 ${insuranceQuote(s.price, 3).perShare.toLocaleString()} / 30일 ${insuranceQuote(s.price, 30).perShare.toLocaleString()})`,
-            value: s.name,
-          })),
-        keyword
-      );
-    }
+  const items = stocks
+    .filter((s) => (user.holdings[s.name] || 0) > 0 && s.price > DANGER_PRICE)
+    .map((s) => ({
+      label: `${s.name} (보유 ${user.holdings[s.name].toLocaleString()}주 · ${s.price.toLocaleString()}해정 · 주당 보험료 1일 ${insuranceQuote(s.price, 1).perShare.toLocaleString()} / 3일 ${insuranceQuote(s.price, 3).perShare.toLocaleString()} / 30일 ${insuranceQuote(s.price, 30).perShare.toLocaleString()})`,
+      value: s.name,
+    }));
+  if (items.length === 0) {
+    return [{ name: "보험에 들 수 있는 종목이 없어요 (보유 주식이 없거나 위기 종목뿐)", value: "없음" }];
+  }
+  return textChoices(items, keyword);
+}
 
     if (command === "보험해지") {
       // 내가 가입 중인 보험만 자동완성으로 보여주고, 예상 환급액도 같이 보여줘요
