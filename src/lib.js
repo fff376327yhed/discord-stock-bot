@@ -2712,7 +2712,7 @@ export async function openFuture(env, userId, { stock: stockName, side, margin, 
 
   const items = await getFutureItems(env, userId);
   if (Object.keys(items).length >= MAX_FUTURES_PER_USER) {
-    return { ok: false, message: `선물은 최대 ${MAX_FUTURES_PER_USER}개까지 열 수 있어요. \`/선물청산\`으로 먼저 정산해 주세요.` };
+    return { ok: false, message: `선물은 최대 ${MAX_FUTURES_PER_USER}개까지 열 수 있어요. \`/주식 선물거래 선물청산\`으로 먼저 정산해 주세요.` };
   }
 
   const user = await getUser(env, userId);
@@ -3232,7 +3232,7 @@ export async function depositMoney(env, userId, amount) {
 export async function withdrawMoney(env, userId, amount) {
   const bank = accrueBank(await getBank(env, userId), Date.now());
   const have = depositOf(bank);
-  if (have < 1) return { ok: false, message: "예금이 없어요. `/예금`으로 먼저 맡겨 보세요." };
+  if (have < 1) return { ok: false, message: "예금이 없어요. `/주식 은행업무 예금`으로 먼저 맡겨 보세요." };
   const pay = amount === undefined || amount === null ? have : amount;
   if (!Number.isSafeInteger(pay) || pay < 1) return { ok: false, message: "출금할 금액은 1 이상의 정수로 입력해 주세요." };
   if (pay > have) return { ok: false, message: `예금이 부족해요. (출금 가능: ${have.toLocaleString()}해정)` };
@@ -3284,7 +3284,7 @@ export async function takeLoan(env, userId, amount, termDays) {
   const rate = +Math.max(baseRate * grade.rateMul, LOAN_RATE_FLOOR).toFixed(4);
 
   if (Object.values(bank.loans).some((l) => isOverdue(l, now))) {
-    return { ok: false, message: "🚨 연체 중인 대출이 있어서 새로 빌릴 수 없어요. `/상환`으로 먼저 갚아 주세요." };
+    return { ok: false, message: "🚨 연체 중인 대출이 있어서 새로 빌릴 수 없어요. `/주식 은행업무 상환`으로 먼저 갚아 주세요." };
   }
   if (Object.keys(bank.loans).length >= MAX_LOANS_PER_USER) {
     return { ok: false, message: `대출은 최대 ${MAX_LOANS_PER_USER}건까지 가능해요. 먼저 갚아 주세요.` };
@@ -3350,7 +3350,7 @@ export async function repayLoans(env, userId, target, amount) {
       funds -= pay;
     }
     if (Object.keys(bank.loans).length === 0) return { ok: false, message: "갚을 대출이 없어요. 👍" };
-    if (plan.length === 0) return { ok: false, message: "잔고가 없어서 갚을 수 없어요. `/출금`으로 예금을 찾아 보세요." };
+    if (plan.length === 0) return { ok: false, message: "잔고가 없어서 갚을 수 없어요. `/주식 은행업무 출금`으로 예금을 찾아 보세요." };
   } else {
     const loan = bank.loans[target];
     if (!loan) return { ok: false, message: "해당 대출을 찾지 못했어요. 칸을 눌러 목록에서 골라 주세요." };
@@ -3711,7 +3711,7 @@ export async function processDividends(env) {
   if (paid > 0 && env.ALLOWED_CHANNEL_ID) {
     try {
       await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, {
-        content: `💰 **오늘의 배당금 지급!** ${paid.toLocaleString()}명에게 총 ${total.toLocaleString()}해정을 나눠줬어요. (자세한 내용은 \`/배당\`)`,
+        content: `💰 **오늘의 배당금 지급!** ${paid.toLocaleString()}명에게 총 ${total.toLocaleString()}해정을 나눠줬어요. (자세한 내용은 \`/주식 은행업무 배당\`)`,
         flags: 4096,
         allowed_mentions: { parse: [] },
       });
@@ -4364,6 +4364,70 @@ export const commandDefinitions = [
   { name: "공시목록", description: "최근 올라온 공시와 그 결과를 봅니다." },
 ];
 
+// ---- 1-2) /주식 아래로 묶기 ----
+// 디스코드는 한 명령어에 서브명령을 25개까지만 둘 수 있어요. 그래서 자주 쓰는 건 /주식 매수 처럼 바로,
+// 나머지는 /주식 은행업무 예금 처럼 묶음(그룹) 안에 넣어요. (바로 + 묶음 합쳐서 25개 이하로 유지!)
+export const ROOT_COMMAND = "주식";
+
+// 묶음 이름 -> { 설명, 안에 들어갈 명령어 이름들 }. 여기에 없는 명령어는 /주식 바로 아래에 붙어요.
+export const COMMAND_GROUPS = {
+  예약주문: { description: "가격을 정해두고 자동으로 사고파는 예약 주문", commands: ["예약매수", "예약매도", "예약목록", "예약취소"] },
+  은행업무: { description: "예금·대출·송금 같은 은행 업무", commands: ["은행", "은행설명", "배당", "예금", "출금", "송금", "대출", "상환"] },
+  선물거래: { description: "롱/숏 + 배율로 하는 선물 거래", commands: ["선물", "선물목록", "선물청산", "선물설명"] },
+  채굴장: { description: "채굴로 해정 벌기", commands: ["채굴", "채굴정보", "채굴업그레이드"] },
+  관리: { description: "[관리자] 종목·시세·공시 관리", commands: ["종목추가", "종목삭제", "시세설정", "출석설정", "공시", "공시설정"] },
+};
+
+const groupOfCommand = {};
+for (const [g, info] of Object.entries(COMMAND_GROUPS)) for (const c of info.commands) groupOfCommand[c] = g;
+
+// 설명 문구에 쓰는 전체 입력 경로. 예: "매수" -> "/주식 매수", "예금" -> "/주식 은행업무 예금"
+export function commandPath(name) {
+  const g = groupOfCommand[name];
+  return g ? `/${ROOT_COMMAND} ${g} ${name}` : `/${ROOT_COMMAND} ${name}`;
+}
+
+const toSub = (def) => {
+  const sub = { type: 1, name: def.name, description: def.description };
+  if (def.options?.length) sub.options = def.options;
+  return sub;
+};
+
+// 디스코드에 실제로 등록하는 목록 (tools.js의 register가 이걸 써요)
+export function buildRegisterPayload() {
+  const direct = commandDefinitions.filter((c) => !groupOfCommand[c.name]).map(toSub);
+  const groups = Object.entries(COMMAND_GROUPS).map(([name, info]) => ({
+    type: 2,
+    name,
+    description: info.description,
+    options: info.commands.map((cn) => {
+      const def = commandDefinitions.find((c) => c.name === cn);
+      if (!def) throw new Error(`COMMAND_GROUPS에 적은 "${cn}" 명령어가 commandDefinitions에 없어요.`);
+      return toSub(def);
+    }),
+  }));
+  const options = [...direct, ...groups];
+  if (options.length > 25) throw new Error(`/${ROOT_COMMAND} 아래 항목이 ${options.length}개예요. 25개 이하로 줄여주세요. (묶음에 넣어보세요)`);
+  return [{ name: ROOT_COMMAND, description: "해정 주식 게임 명령어", options }];
+}
+
+// 들어온 요청에서 "/주식 은행업무 예금" 껍데기를 벗겨서 예전처럼 name="예금", options=[…] 로 만들어요.
+// (이렇게 하면 handlers / autocomplete / opt 같은 기존 코드는 하나도 안 고쳐도 돼요)
+export function flattenInteraction(interaction) {
+  const data = interaction.data;
+  if (!data || data.name !== ROOT_COMMAND) return interaction;
+  let node = data.options?.[0];
+  while (node && (node.type === 1 || node.type === 2)) {
+    if (node.type === 1) {
+      data.name = node.name;
+      data.options = node.options || [];
+      return interaction;
+    }
+    node = node.options?.[0]; // 묶음(type 2)이면 한 칸 더 들어가요
+  }
+  return interaction;
+}
+
 // ---- 2) 옵션 파싱 헬퍼 ----
 function opt(interaction, name) {
   const found = interaction.data.options?.find((o) => o.name === name);
@@ -4478,7 +4542,7 @@ function helpText() {
   const user = [];
   const admin = [];
   for (const c of commandDefinitions) {
-    const line = `\`/${c.name}\` — ${c.description}`;
+    const line = `\`${commandPath(c.name)}\` — ${c.description}`;
     (c.description.includes("[관리자]") ? admin : user).push(line);
   }
   return [
@@ -4914,7 +4978,7 @@ async function reserveOrder(side, interaction, env) {
   const current = Object.keys(items).length;
   if (current + slots.length > MAX_ORDERS_PER_USER) {
     errors.push(
-      `예약은 최대 ${MAX_ORDERS_PER_USER}개까지 걸 수 있어요. (지금 ${current}개 + 이번 ${slots.length}개) \`/예약취소\`로 정리한 뒤 다시 시도해 주세요.`
+      `예약은 최대 ${MAX_ORDERS_PER_USER}개까지 걸 수 있어요. (지금 ${current}개 + 이번 ${slots.length}개) \`/주식 예약주문 예약취소\`로 정리한 뒤 다시 시도해 주세요.`
     );
   }
 
@@ -4929,13 +4993,13 @@ async function reserveOrder(side, interaction, env) {
     if (!stock) return;
     if (side === "buy") {
       if (stock.price <= s.price) {
-        errors.push(`${tag(s)}현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이하예요. 바로 \`/매수\`를 쓰거나, 더 낮은 가격으로 예약해 주세요.`);
+        errors.push(`${tag(s)}현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이하예요. 바로 \`/주식 매수\`를 쓰거나, 더 낮은 가격으로 예약해 주세요.`);
       } else if (user.balance < s.price * s.qty) {
         errors.push(`${tag(s)}잔고가 부족해요. (예약가 기준 필요: ${(s.price * s.qty).toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정)`);
       }
     } else {
       if (stock.price >= s.price) {
-        errors.push(`${tag(s)}현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이상이에요. 바로 \`/매도\`를 쓰거나, 더 높은 가격으로 예약해 주세요.`);
+        errors.push(`${tag(s)}현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이상이에요. 바로 \`/주식 매도\`를 쓰거나, 더 높은 가격으로 예약해 주세요.`);
         return;
       }
       const held = user.holdings[s.name] || 0;
@@ -5018,7 +5082,7 @@ function futuresHelpText() {
   return [
     "**📈 주식 선물 사용법**",
     "\"이 주식이 오를까, 내릴까?\"를 **배율**을 걸고 맞히는 게임이에요.",
-    "`/선물 종목 방향 증거금 배율` 칸 4개만 채우면 시작!",
+    "`/주식 선물거래 선물 종목 방향 증거금 배율` 칸 4개만 채우면 시작!",
     "",
     "**용어는 3개만 알면 돼요**",
     "- 📈 **롱**: 오르면 이득, 내리면 손해",
@@ -5031,7 +5095,7 @@ function futuresHelpText() {
     "- 가격 약 -33% → 💥 강제청산 (증거금 전부 잃어요)",
     "",
     "**명령어**",
-    "`/선물` 시작 · `/선물목록` 내 손익 보기 · `/선물청산` 정산하고 해정 받기",
+    "`/주식 선물거래 선물` 시작 · `/주식 선물거래 선물목록` 내 손익 보기 · `/주식 선물거래 선물청산` 정산하고 해정 받기",
     "",
     "**꼭 알아두세요**",
     "- 시세는 15분마다 크게 움직여요. 배율이 높을수록 한 번에 강제청산되기 쉬워요",
@@ -5055,10 +5119,10 @@ function bankHelpText(rate) {
     `금리는 **매시 정각**에 랜덤으로 바뀌어요 (배율 ×${MARKET_RATE_MIN_MULT}~×${MARKET_RATE_MAX_MULT}). 예금 하루 ${pctText(DEPOSIT_RATE * MARKET_RATE_MIN_MULT)}~${pctText(DEPOSIT_RATE * MARKET_RATE_MAX_MULT)}, 대출은 하루 ${pctText(LOAN_RATE_FLOOR)} 밑으로는 안 내려가요.`,
     "",
     "**🐷 예금** — 지금 하루 " + pctText(depositRate) + " (이자는 바뀐 금리대로 구간마다 쌓여요)",
-    "`/예금 금액` 맡기기 · `/출금` 찾기 (금액을 안 적으면 전액)",
+    "`/주식 은행업무 예금 금액` 맡기기 · `/주식 은행업무 출금` 찾기 (금액을 안 적으면 전액)",
     "",
     "**💸 대출**",
-    "`/대출 금액 기간` — 기간: 1일 / 3일 / 7일 (지금 이자율은 기간 칸을 누르면 보여요)",
+    "`/주식 은행업무 대출 금액 기간` — 기간: 1일 / 3일 / 7일 (지금 이자율은 기간 칸을 누르면 보여요)",
     "- 이자율은 **빌린 순간의 시장금리**로 정해지고, **만기까지 안 바뀌어요** (신용등급 배율도 그때 기준)",
     `- 빌릴 때 수수료 ${pctText(LOAN_FEE_RATE)}를 먼저 떼고 받아요 (빚은 빌린 금액 그대로)`,
     "- 이자는 빌린 순간부터 시간 단위로 계속 쌓여요",
@@ -5071,7 +5135,7 @@ function bankHelpText(rate) {
     "- 1일 만에 갚으면 이자 약 " + Math.round(1000 * rate3) + "해정",
     "",
     "**💳 상환**",
-    "`/상환 대출 금액` — 금액을 안 적으면 전액. 일부만 갚아도 돼요 (이자 먼저, 그다음 원금)",
+    "`/주식 은행업무 상환 대출 금액` — 금액을 안 적으면 전액. 일부만 갚아도 돼요 (이자 먼저, 그다음 원금)",
     "",
     "**🚨 못 갚으면?**",
     "1. 만기가 되면 은행이 내 **잔고 → 예금** 순서로 자동으로 가져가요",
@@ -5088,9 +5152,9 @@ function bankHelpText(rate) {
     CREDIT_GRADES.map((g) => `${g.name}(${g.min}점~) 한도×${g.limitMul}·이자×${g.rateMul}`).join(" / "),
     "",
     "**💸 송금**",
-    `\`/송금 받는사람 금액\` — 다른 유저에게 해정 보내기. 은행 수수료 ${pctText(TRANSFER_FEE_RATE)}(최소 ${TRANSFER_FEE_MIN}해정)는 보내는 사람이 따로 내고, 받는 사람은 금액을 그대로 받아요`,
+    `\`/주식 은행업무 송금 받는사람 금액\` — 다른 유저에게 해정 보내기. 은행 수수료 ${pctText(TRANSFER_FEE_RATE)}(최소 ${TRANSFER_FEE_MIN}해정)는 보내는 사람이 따로 내고, 받는 사람은 금액을 그대로 받아요`,
     "",
-    "`/은행` — 내 예금·대출·이자·한도를 지금 이 순간 기준으로 보기",
+    "`/주식 은행업무 은행` — 내 예금·대출·이자·한도를 지금 이 순간 기준으로 보기",
   ].join("\n");
 }
 
@@ -5124,7 +5188,7 @@ export const handlers = {
   // 나만 보이는 응답이라 내가 보유한 종목만 ⭐로 표시
   주식목록: async (interaction, env) => {
     const stocks = await listStocks(env); // 이름순으로 이미 정렬돼 있음
-    if (stocks.length === 0) return "등록된 종목이 없어요. 관리자가 `/종목추가`로 등록할 수 있어요.";
+    if (stocks.length === 0) return "등록된 종목이 없어요. 관리자가 `/주식 관리 종목추가`로 등록할 수 있어요.";
 
     // 직전 시세 대비 변동률(%) 계산 (기록이 2개 미만이면 0)
     for (const s of stocks) {
@@ -5228,7 +5292,7 @@ export const handlers = {
     );
 
     // 디스코드 메시지 한도(2000자) 보호
-    let text = `**🪦 상장폐지된 종목 (${list.length}건, 최신순)**\n그래프는 \`/상장폐지종류 종목:이름\`으로 볼 수 있어요.`;
+    let text = `**🪦 상장폐지된 종목 (${list.length}건, 최신순)**\n그래프는 \`/주식 상장폐지종류 종목:이름\`으로 볼 수 있어요.`;
     for (const line of lines) {
       if (text.length + line.length + 1 > 1900) {
         text += "\n…(이하 생략 · `개수`를 줄여 보세요)";
@@ -5378,7 +5442,7 @@ export const handlers = {
     const userId = interaction.member.user.id;
     const [orders, stocks] = await Promise.all([getOrders(env, userId), listStocks(env)]);
     if (orders.length === 0) {
-      return "걸어둔 예약이 없어요. `/예약매수`, `/예약매도`로 가격을 정해 예약해 보세요.";
+      return "걸어둔 예약이 없어요. `/주식 예약주문 예약매수`, `/주식 예약주문 예약매도`로 가격을 정해 예약해 보세요.";
     }
     const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
     return [
@@ -5421,7 +5485,7 @@ export const handlers = {
     const userId = interaction.member.user.id;
     const [items, stocks] = await Promise.all([getFutureItems(env, userId), listStocks(env)]);
     const list = futureList(items);
-    if (list.length === 0) return "열어둔 선물이 없어요. `/선물`로 시작하거나 `/선물설명`을 읽어 보세요.";
+    if (list.length === 0) return "열어둔 선물이 없어요. `/주식 선물거래 선물`로 시작하거나 `/주식 선물거래 선물설명`을 읽어 보세요.";
     const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
     return [
       `**📊 내 선물 (${list.length}/${MAX_FUTURES_PER_USER}개)**`,
@@ -5520,7 +5584,7 @@ export const handlers = {
     const userId = interaction.member.user.id;
     const user = await getUser(env, userId);
     const entries = Object.entries(user.items).sort(([a], [b]) => compareKo(a, b));
-    if (entries.length === 0) return "보유한 상품이 없어요. `/주식상점`에서 구경해 보세요.";
+    if (entries.length === 0) return "보유한 상품이 없어요. `/주식 주식상점`에서 구경해 보세요.";
     return entries.map(([name, count]) => `- ${name} x${count}`).join("\n");
   },
 

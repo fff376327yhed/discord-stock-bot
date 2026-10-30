@@ -2,7 +2,7 @@ import { verifyKey } from "discord-interactions";
 import { waitUntil } from "@vercel/functions";
 import {
   handlers, autocomplete, loadEnv, touchUsername,
-  logAction, summarizeOptions, firstLine, VIEW_ONLY,
+  logAction, summarizeOptions, firstLine, VIEW_ONLY, flattenInteraction,
 } from "../src/lib.js";
 
 // Node.js 런타임으로 동작 (Edge는 discord-interactions가 쓰는 Node crypto를 지원하지 않아 제외)
@@ -114,7 +114,8 @@ async function handler(request) {
     return new Response("서명 검증 실패", { status: 401 });
   }
 
-  const interaction = JSON.parse(body);
+  // /주식 은행업무 예금 처럼 들어온 요청을 예전 모양(name="예금")으로 풀어줘요. 아래 코드는 그대로 써도 돼요.
+  const interaction = flattenInteraction(JSON.parse(body));
 
   // ---- PING: Discord가 엔드포인트 등록 시 헬스체크로 보냄 ----
   if (interaction.type === InteractionType.PING) {

@@ -9,7 +9,7 @@
 //   CHANNEL_ID           (slowmode) 슬로우모드를 걸 채널 ID
 //   SLOWMODE_SECONDS     (slowmode, 선택) 기본 3
 
-import { commandDefinitions } from "../src/lib.js";
+import { buildRegisterPayload, ROOT_COMMAND } from "../src/lib.js";
 
 const API = "https://discord.com/api/v10";
 const appId = process.env.DISCORD_APPLICATION_ID;
@@ -41,6 +41,7 @@ async function put(url, body, label) {
 
 async function register() {
   need("DISCORD_APPLICATION_ID", "DISCORD_BOT_TOKEN");
+  const commandDefinitions = buildRegisterPayload(); // /주식 하나로 묶인 목록
   const globalUrl = `${API}/applications/${appId}/commands`;
   if (guildId) {
     const saved = await put(`${API}/applications/${appId}/guilds/${guildId}/commands`, commandDefinitions, "서버 전용");
@@ -63,7 +64,12 @@ async function show(url, label) {
   const list = await res.json();
   console.log(`[${label}] ${list.length}개`);
   console.log(list.length ? list.map((c) => `/${c.name}`).join("  ") : "(없음)");
-  console.log(`  → /그래프 ${list.some((c) => c.name === "그래프") ? "등록되어 있어요 ✅" : "없어요 ❌"}\n`);
+  const root = list.find((c) => c.name === ROOT_COMMAND);
+  console.log(`  → /${ROOT_COMMAND} ${root ? `등록되어 있어요 ✅ (아래 항목 ${root.options?.length ?? 0}개)` : "없어요 ❌"}`);
+  // 예전처럼 따로 등록된 옛 명령어가 남아 있으면 알려줘요
+  const old = list.filter((c) => c.name !== ROOT_COMMAND);
+  if (old.length) console.log(`  ⚠️ 옛 명령어가 ${old.length}개 남아 있어요. register를 다시 실행하면 지워져요.`);
+  console.log();
 }
 
 async function list() {
