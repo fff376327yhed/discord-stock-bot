@@ -414,6 +414,43 @@ main{max-width:none;margin:0;padding:0}
 </section>
 
 
+<section class="panel" id="sum">
+<h2><i>📋</i>한눈 요약</h2>
+<div class="kid"><b>이것만 알면 돼요!</b> 자세한 건 왼쪽 목차에서 항목별로 볼 수 있어요.</div>
+<div class="grid">
+<div class="card"><span class="big">1,000</span>처음 받는 해정</div>
+<div class="card"><span class="big">0.3%</span>사고팔 때 수수료</div>
+<div class="card"><span class="big">15분</span>마다 가격 변동 (±20%)</div>
+<div class="card"><span class="big">100 이하</span>상장폐지</div>
+</div>
+<h3>🎢 가격</h3>
+<ul>
+<li>15분마다 <span class="down">-20%</span> ~ <span class="up">+20%</span>. 빨강은 오름, 파랑은 내림.</li>
+<li>하루 3번(0시 · 18시 · 21시) 급등락: <span class="down">-80%</span> ~ <span class="up">+120%</span>.</li>
+<li>가격이 100해정 이하면 상장폐지, 101~300은 폐지 위기예요.</li>
+</ul>
+<h3>🛒 거래</h3>
+<ul>
+<li>매수 = 가격 × 수량 + 수수료, 매도 = 가격 × 수량 − 수수료.</li>
+<li>예약 5건 · 가격알림 10개 · 관심종목 20개까지.</li>
+</ul>
+<h3>🎯 선물 · 🏦 은행</h3>
+<ul>
+<li>선물: 롱/숏, 배율 2·3·5배, 증거금 100해정 이상, 동시 3개. 강제청산되면 증거금을 전부 잃어요.</li>
+<li>대출: 순자산의 30%(×신용등급 배율)까지, 동시 3건. 연체하면 주식이 강제 매도돼요.</li>
+<li>송금 수수료 3%는 보내는 사람이 내요.</li>
+</ul>
+<h3>🛡️ 보험 · 배당</h3>
+<ul>
+<li>보험금은 가입 때 현재가의 50%(주당). 보험료는 폐지 확률이 높을수록 비싸요.</li>
+<li>배당: 매일 오전 9시 이후, 평가액의 1% (300 초과 종목, 하루 최대 10,000해정).</li>
+</ul>
+<h3>⛏️ 돈 버는 법</h3>
+<ul>
+<li>출석체크(하루 1번, 기본 100해정) · 채굴 · 주식 거래.</li>
+<li>📌 첫 3걸음: <code>/출석체크</code> → <code>/주식목록</code> → <code>/매수</code></li>
+</ul>
+</section>
 <section class="panel" id="patch">
 <h2><i>🆕</i>패치노트</h2>
 <p class="lead">날짜를 누르면 접고 펼 수 있어요 · 최신순 · 한국 시간(KST)</p>
@@ -435,12 +472,12 @@ main{max-width:none;margin:0;padding:0}
 (function(){
 var $=function(i){return document.getElementById(i)};
 function mk(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
-var TABS=[['start','🌱','시작'],['price','🎢','가격변동'],['surge','⚡','급등락'],['delist','💀','상장폐지'],['trade','🛒','사고팔기'],['order','⏰','예약·알림'],['futures','🎯','선물'],['bank','🏦','은행'],['ins','🛡️','보험·배당'],['news','📰','공시·봇'],['earn','⛏️','돈벌기'],['cmd','⌨️','명령어'],['admin','🔧','관리자'],['tech','⚙️','구조'],['patch','🆕','패치노트']];
+var TABS=[['patch','🆕','패치노트'],['start','🌱','시작'],['sum','📋','한눈 요약'],['price','🎢','가격변동'],['surge','⚡','급등락'],['delist','💀','상장폐지'],['trade','🛒','사고팔기'],['order','⏰','예약·알림'],['futures','🎯','선물'],['bank','🏦','은행'],['ins','🛡️','보험·배당'],['news','📰','공시·봇'],['earn','⛏️','돈벌기'],['cmd','⌨️','명령어'],['admin','🔧','관리자'],['tech','⚙️','구조']];
 
 // ── 패치노트: 새 소식은 맨 위에 추가하세요 (종류: '' 개선 · 'new' 신규 · 'fix' 수정) ──
 var LOG=[
- {date:'2026-10-30',title:'🌙 다크모드 · 📂 메뉴 위치 개편 · 🆕 패치노트',groups:[
-  ['new','신규',['🌙 화면 모드 버튼: 자동 → 라이트 → 다크 순서로 바뀌고, 고른 모드를 기억해요.','🆕 패치노트 탭을 만들었어요 (지금 보는 화면).','각 항목 맨 아래에 ← 이전 / 다음 → 버튼이 생겼어요.']],
+ {date:'2026-10-30',title:'🌙 다크모드 · 📂 메뉴 개편 · 🆕 패치노트 · 📋 한눈 요약',groups:[
+  ['new','신규',['🌙 화면 모드 버튼: 자동 → 라이트 → 다크 순서로 바뀌고, 고른 모드를 기억해요.','🆕 패치노트 탭을 만들었어요 (지금 보는 화면). 1번 칸이고, 2번 칸이 시작이에요.','📋 한눈 요약 탭: 핵심 숫자와 규칙만 짧게 모았어요.','각 항목 맨 아래에 ← 이전 / 다음 → 버튼이 생겼어요.']],
   ['','개선',['PC: 왼쪽에 목차가 고정돼요. ◀ 버튼으로 접을 수 있어요.','모바일: 화면 위에 ☰ 목차 버튼이 항상 붙어 있고, 누르면 전체 목차가 열려요.','한 번에 한 항목만 보여서 길게 스크롤하지 않아도 돼요.']],
   ['','정리',['화면에 떠 있던 ☰ 메뉴 버튼과 위쪽 칩 목차를 없앴어요.']]
  ]}
@@ -461,7 +498,7 @@ TABS.forEach(function(t){panels[t[0]]=$(t[0]);
   b.append(mk('span','ic',t[1]),mk('span','lb',t[2]));b.onclick=function(){show(t[0])};h.append(b)})});
 function setDrawer(o){dr.hidden=!o;$('menuBtn').setAttribute('aria-expanded',String(o));document.body.style.overflow=o?'hidden':''}
 function show(id,scroll){
- if(!panels[id])id='start';var idx=0;
+ if(!panels[id])id='patch';var idx=0;
  TABS.forEach(function(t,i){var on=t[0]===id;panels[t[0]].hidden=!on;if(on){idx=i;ttl.textContent=t[1]+' '+t[2]}});
  hero.hidden=id!=='start';
  document.querySelectorAll('.navbtn').forEach(function(b){b.setAttribute('aria-selected',String(b.dataset.tab===id))});
@@ -492,8 +529,8 @@ function applyTheme(){var t=THEMES[ti],r=document.documentElement;
 document.querySelectorAll('.themebtn').forEach(function(b){b.onclick=function(){ti=(ti+1)%THEMES.length;applyTheme();try{localStorage.setItem('hj-guide-theme',THEMES[ti][0])}catch(e){}}});
 applyTheme();
 
-show((location.hash||'').slice(1)||'start',false);
-window.addEventListener('hashchange',function(){show((location.hash||'').slice(1)||'start')});
+show((location.hash||'').slice(1)||'patch',false);
+window.addEventListener('hashchange',function(){show((location.hash||'').slice(1)||'patch')});
 })();
 </script>
 <script>
