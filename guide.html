@@ -5,20 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>해정 주식 완전 가이드</title>
 <style>
-:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+:root{color-scheme:light dark;
 --bg:#fbf8f1;--fg:#1d2433;--mute:#5d667a;--card:#fff;--line:#e4dfd0;--red:#d93a3a;--blue:#2a6fd6;--gold:#e8a317;--acc:#1b7f5c}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#12161f;--fg:#ecebe4;--mute:#9aa3b5;--card:#1b2130;--line:#2d3548;--red:#ff6b6b;--blue:#6aa5ff;--gold:#f5c04a;--acc:#4cc79b}}
 :root[data-theme="dark"]{--bg:#12161f;--fg:#ecebe4;--mute:#9aa3b5;--card:#1b2130;--line:#2d3548;--red:#ff6b6b;--blue:#6aa5ff;--gold:#f5c04a;--acc:#4cc79b}
-html{scroll-padding-top:calc(env(safe-area-inset-top,0px) + 64px);scroll-behavior:smooth}
+html{scroll-padding-top:calc(env(safe-area-inset-top,0px) + 70px)}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.75 "Pretendard","Noto Sans KR",system-ui,sans-serif}
-header{padding:48px 20px 28px;max-width:860px;margin:auto}
+
 h1{font-size:clamp(30px,6vw,46px);line-height:1.25;margin:0 0 10px;letter-spacing:-.03em}
 h1 span{color:var(--red)}
 .lead{color:var(--mute);margin:0}
-nav{position:sticky;top:env(safe-area-inset-top,0px);background:var(--bg);border-bottom:1px solid var(--line);z-index:5;overflow-x:auto;white-space:nowrap;padding:10px 16px}
-nav a{display:inline-block;margin-right:6px;padding:4px 12px;border-radius:99px;background:var(--card);border:1px solid var(--line);color:var(--fg);text-decoration:none;font-size:14px}
-nav a:hover{border-color:var(--acc)}
 main{max-width:860px;margin:auto;padding:0 20px 80px}
 section{margin-top:44px}
 h2{font-size:26px;margin:0 0 6px;letter-spacing:-.02em}
@@ -43,15 +40,11 @@ code{background:color-mix(in srgb,var(--blue) 14%,transparent);padding:1px 6px;b
 footer{text-align:center;color:var(--mute);padding:30px 20px;font-size:14px}
 button{padding:10px 18px;border-radius:10px;border:0;background:var(--acc);color:#fff;font:inherit;font-weight:700;cursor:pointer}
 body{-webkit-text-size-adjust:100%;overflow-wrap:break-word;word-break:keep-all}
-nav{scrollbar-width:none}nav::-webkit-scrollbar{display:none}
 @media (max-width:600px){
 body{font-size:15.5px;line-height:1.7}
-header{padding:28px 16px 18px}
 main{padding:0 14px 60px}
 section{margin-top:34px}
 h2{font-size:22px}h3{font-size:17px}
-nav{padding:8px 12px}
-nav a{padding:8px 14px;font-size:15px;margin-right:6px}
 .card{padding:12px 14px}
 .big{font-size:24px}
 .grid{grid-template-columns:1fr 1fr;gap:8px}
@@ -84,44 +77,102 @@ table{border-radius:12px;overflow:hidden}
 .warn{font-weight:600}
 .big{color:var(--acc);margin-bottom:2px}
 code{font-weight:600;white-space:nowrap}
-nav a{font-weight:600}
-nav{position:static;overflow:visible;white-space:normal;display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px}
-nav a{margin:0;flex:0 0 auto;padding:8px 14px}
 code{white-space:normal;word-break:break-all}
 img,table,.card,.kid,.warn{max-width:100%}
-@media (min-width:1000px){nav{position:sticky;top:env(safe-area-inset-top,0px);max-width:860px;margin:auto;border-radius:0 0 14px 14px}}
 @media (max-width:600px){
-nav{position:static;overflow:visible;white-space:normal;display:flex;flex-wrap:wrap;gap:8px;padding:12px 14px}
-nav a{margin:0;flex:0 0 auto;padding:9px 14px}
 body{font-size:16.5px;line-height:1.85}
 h2{font-size:24px}
 h3{font-size:18px}
 th{white-space:normal}
 code{white-space:normal}
 }
-#fab{position:fixed;right:16px;bottom:calc(env(safe-area-inset-bottom,0px) + 16px);z-index:20;padding:12px 18px;border-radius:99px;box-shadow:0 4px 14px rgba(0,0,0,.3);font-size:16px}
-#sheet{position:fixed;inset:0;z-index:30;display:none;background:rgba(0,0,0,.45)}
-#sheet.open{display:block}
-#panel{position:absolute;left:0;right:0;bottom:0;max-height:80%;overflow-y:auto;background:var(--card);color:var(--fg);border-radius:20px 20px 0 0;padding:16px 16px calc(env(safe-area-inset-bottom,0px) + 20px);box-shadow:0 -6px 24px rgba(0,0,0,.3)}
-#panel h4{margin:0 0 10px;font-size:17px;display:flex;justify-content:space-between;align-items:center}
-#panel h4 button{padding:6px 12px;background:var(--line);color:var(--fg)}
-#panel .links{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
-#panel .links a{display:block;padding:12px;border-radius:10px;border:1px solid var(--line);color:var(--fg);text-decoration:none;font-weight:600;text-align:center}
-#panel .links a.now{background:var(--acc);color:#fff;border-color:var(--acc)}
-@media (min-width:700px){#panel{max-width:520px;left:auto;right:16px;bottom:16px;border-radius:16px}}
+
+/* ── 새 레이아웃 (다크모드 · 목차 · 패치노트) ── */
+:root[data-theme="light"]{color-scheme:light}
+:root[data-theme="dark"]{color-scheme:dark}
+[hidden]{display:none!important}
+button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+main{max-width:none;margin:0;padding:0}
+.panel{padding-top:0;border-top:0;margin-top:0}
+.hero{padding:4px 0 8px}
+.app{display:block}
+.side{display:none}
+.topbar{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:8px;background:var(--bg);border-bottom:1px solid var(--line);padding:calc(env(safe-area-inset-top,0px) + 8px) 12px 8px}
+.topbar .ttl{flex:1;min-width:0;font-weight:800;font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.iconbtn{min-height:44px;min-width:44px;padding:0 13px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;font-size:14.5px;font-weight:700;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:4px}
+.wrap{max-width:780px;margin:0 auto;padding:16px 16px 72px}
+.drawer{position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.55);display:flex;align-items:flex-end}
+.sheet{width:100%;max-height:88vh;overflow:auto;background:var(--bg);border-radius:22px 22px 0 0;padding:16px 14px calc(env(safe-area-inset-bottom,0px) + 20px)}
+.sheet .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;font-size:18px;font-weight:800}
+.dgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
+.navbtn{display:flex;align-items:center;gap:8px;text-align:left;width:100%;min-height:48px;padding:10px 14px;border-radius:13px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;font-size:15px;font-weight:700;cursor:pointer}
+.navbtn[aria-selected=true]{background:var(--acc);border-color:var(--acc);color:#fff}
+.pager{display:flex;gap:10px;margin-top:40px}
+.pager .sp{flex:1}
+.pg{flex:1;min-height:56px;padding:8px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;font-weight:700;line-height:1.4;cursor:pointer;text-align:left}
+.pg small{display:block;color:var(--mute);font-weight:600;font-size:12px}
+.pg:last-child{text-align:right}
+.sidehead{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:0 4px 0 8px}
+.brand{font-size:19px;font-weight:800;display:flex;gap:6px;white-space:nowrap}
+.brandsub{font-size:12.5px;color:var(--mute);padding:0 8px 14px}
+@media (min-width:900px){
+.app{display:grid;grid-template-columns:260px minmax(0,1fr);min-height:100vh;transition:grid-template-columns .2s}
+.side{display:flex;flex-direction:column;gap:6px;position:sticky;top:0;height:100vh;overflow:auto;padding:24px 14px;border-right:1px solid var(--line);background:var(--card)}
+.side nav{display:flex;flex-direction:column;gap:4px}
+.side .navbtn{border-color:transparent;background:transparent;min-height:44px}
+.side .navbtn:hover{background:var(--bg)}
+.side .navbtn[aria-selected=true]{background:var(--acc);color:#fff}
+.sidefoot{margin-top:auto;padding-top:14px}.sidefoot .iconbtn{width:100%}
+.topbar,.drawer{display:none!important}
+.wrap{padding:34px 40px 90px}
+.app.collapsed{grid-template-columns:76px minmax(0,1fr)}
+.app.collapsed .lb,.app.collapsed .brandsub{display:none}
+.app.collapsed .side{padding:20px 8px;align-items:center}
+.app.collapsed .sidehead{flex-direction:column;padding:0}
+.app.collapsed .navbtn{justify-content:center;padding:10px 0}
+.app.collapsed .navbtn .ic{font-size:21px}
+.app.collapsed .sidefoot,.app.collapsed .side nav{width:100%}
+.app.collapsed .sidefoot .iconbtn{padding:0}
+}
+@media (prefers-reduced-motion:no-preference){.navbtn,.iconbtn,.pg{transition:background .15s,color .15s,border-color .15s}}
+/* 패치노트 */
+.upd{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:2px 16px;margin:12px 0}
+.upd.latest{border-color:var(--acc)}
+.upd summary{cursor:pointer;list-style:none;padding:12px 0;min-height:46px}
+.upd summary::-webkit-details-marker{display:none}
+.upd .dt{display:flex;align-items:center;gap:8px;font-weight:800;font-size:15px}
+.upd .dt::after{content:'▼';margin-left:auto;color:var(--mute);font-size:12px}
+.upd:not([open]) .dt::after{content:'▶'}
+.upd .ut{font-size:17px;font-weight:800;line-height:1.5;margin-top:2px}
+.badge{background:var(--acc);color:#fff;font-size:11px;font-weight:800;border-radius:99px;padding:2px 9px}
+.ui{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line);font-size:15.5px;line-height:1.7}
+.ui .tx{flex:1;min-width:0}
+.tag{flex:0 0 auto;min-width:52px;text-align:center;font-size:11.5px;font-weight:800;border-radius:7px;padding:2px 7px;margin-top:3px;background:color-mix(in srgb,var(--blue) 16%,var(--card));color:var(--blue)}
+.tag.new{background:color-mix(in srgb,var(--acc) 18%,var(--card));color:var(--acc)}
+.tag.fix{background:color-mix(in srgb,var(--red) 14%,var(--card));color:var(--red)}
 </style>
 </head>
 <body>
-<header>
-<h1>📈 <span>해정</span> 주식<br>완전 가이드</h1>
-<p class="lead">디스코드 봇의 주식 게임이 어떻게 돌아가는지, 실제 코드의 숫자 그대로 쉽게 풀어 썼어요. 돈 단위는 모두 <b>해정</b>이에요.</p>
+<div class="app">
+<aside class="side" aria-label="목차">
+<div class="sidehead"><div class="brand"><span>📈</span><span class="lb">해정 주식 가이드</span></div><button type="button" class="iconbtn" id="collapseBtn" aria-expanded="true" title="목차 접기">◀</button></div>
+<div class="brandsub">규칙 · 숫자 · 명령어 정리</div>
+<nav id="sideNav" aria-label="목차"></nav>
+<div class="sidefoot"><button type="button" class="iconbtn themebtn"></button></div>
+</aside>
+<div class="main">
+<header class="topbar">
+<button type="button" class="iconbtn" id="menuBtn" aria-expanded="false" aria-controls="drawer">☰ 목차</button>
+<div class="ttl" id="ttl"></div>
+<button type="button" class="iconbtn themebtn"></button>
 </header>
-<nav>
-<a href="#start">시작</a><a href="#price">가격변동</a><a href="#surge">급등락</a><a href="#delist">상장폐지</a><a href="#trade">사고팔기</a><a href="#order">예약·알림</a><a href="#futures">선물</a><a href="#bank">은행</a><a href="#ins">보험·배당</a><a href="#news">공시·봇</a><a href="#earn">돈벌기</a><a href="#cmd">명령어</a><a href="#admin">관리자</a><a href="#tech">구조</a>
-</nav>
-<main>
+<div class="wrap">
+<div class="hero" id="hero"><h1>📈 <span>해정</span> 주식<br>완전 가이드</h1>
+<p class="lead">디스코드 봇의 주식 게임이 어떻게 돌아가는지, 실제 코드의 숫자 그대로 쉽게 풀어 썼어요. 돈 단위는 모두 <b>해정</b>이에요.</p>
+</div>
+<main id="panels">
 
-<section id="start">
+<section class="panel" id="start">
 <h2><i>🌱</i>처음 시작하기</h2>
 <div class="kid"><b>쉽게 말하면?</b> 가짜 돈(해정)으로 "오를 것 같은 주식"을 사고, 비싸질 때 파는 게임이에요. 진짜 돈은 하나도 안 들어요!</div>
 <div class="grid">
@@ -134,7 +185,7 @@ code{white-space:normal}
 <p>📌 첫 3걸음: <code>/출석체크</code>로 용돈 받기 → <code>/주식목록</code>으로 종목 구경 → <code>/매수</code>로 하나 사보기.</p>
 </section>
 
-<section id="price">
+<section class="panel" id="price">
 <h2><i>🎢</i>가격은 어떻게 움직여요?</h2>
 <div class="kid"><b>쉽게 말하면?</b> 15분마다 주사위를 굴려서 모든 종목 가격이 한꺼번에 오르거나 내려가요. 빨강 📈 은 오름, 파랑 📉 은 내림이에요(한국식).</div>
 <ul>
@@ -147,7 +198,7 @@ code{white-space:normal}
 <p>모든 종목의 평균 가격이에요. 오늘 0시(한국시간)의 평균과 지금 평균을 비교해서 "오늘 시장이 올랐나?"를 보여줘요. (<code>/지수</code>)</p>
 </section>
 
-<section id="surge">
+<section class="panel" id="surge">
 <h2><i>⚡</i>하루 3번 급등락</h2>
 <div class="kid"><b>쉽게 말하면?</b> 하루에 세 번, 주사위가 엄청 커져요. 대박도 쪽박도 크게 나요!</div>
 <div class="tw"><table>
@@ -162,7 +213,7 @@ code{white-space:normal}
 <div class="warn">급등락 때 가격이 -50%만 돼도 500 → 250이에요. 폐지선(100)이 가까워지니까 조심하세요!</div>
 </section>
 
-<section id="delist">
+<section class="panel" id="delist">
 <h2><i>💀</i>상장폐지</h2>
 <div class="kid"><b>쉽게 말하면?</b> 주식이 너무 싸지면(100해정 이하) 회사가 문을 닫아요. 들고 있던 주식은 휴지조각이 돼요.</div>
 <ul>
@@ -174,7 +225,7 @@ code{white-space:normal}
 </ul>
 </section>
 
-<section id="trade">
+<section class="panel" id="trade">
 <h2><i>🛒</i>사고 팔기</h2>
 <div class="kid"><b>쉽게 말하면?</b> 싸게 사서 비싸게 팔면 차이만큼 내 돈이에요. 사고팔 때마다 작은 수수료(0.3%)를 내요.</div>
 <div class="card">
@@ -192,7 +243,7 @@ code{white-space:normal}
 <p>여러 종목을 한 번에: <code>종목2~5</code> 칸을 쓰면 최대 5개를 같이 사고팔 수 있어요.</p>
 </section>
 
-<section id="order">
+<section class="panel" id="order">
 <h2><i>⏰</i>예약 · 손절/익절 · 알림</h2>
 <div class="tw"><table>
 <tr><th>기능</th><th>하는 일</th><th>한도</th></tr>
@@ -206,7 +257,7 @@ code{white-space:normal}
 <p>예약은 시세가 바뀐 직후(15분마다) 한꺼번에 확인해서 체결돼요.</p>
 </section>
 
-<section id="futures">
+<section class="panel" id="futures">
 <h2><i>🎯</i>선물 (오를까? 내릴까?)</h2>
 <div class="kid"><b>쉽게 말하면?</b> "이 주식 오를 거야!"(롱) 또는 "내릴 거야!"(숏)에 <b>배율</b>을 걸고 내기해요. 맞히면 크게 먹고, 틀리면 걸어둔 돈(증거금)을 잃어요.</div>
 <div class="grid">
@@ -223,7 +274,7 @@ code{white-space:normal}
 <p>명령어: <code>/선물</code> 시작 · <code>/선물목록</code> 손익 보기 · <code>/선물청산</code> 정산 · <code>/선물설명</code></p>
 </section>
 
-<section id="bank">
+<section class="panel" id="bank">
 <h2><i>🏦</i>은행 · 대출 · 신용등급 · 송금</h2>
 <div class="kid"><b>쉽게 말하면?</b> 돈을 맡기면 이자를 주고, 빌리면 이자를 내야 해요. 약속을 잘 지키면 "신용 점수"가 올라가서 더 많이, 더 싸게 빌릴 수 있어요.</div>
 <h3>금리</h3>
@@ -265,7 +316,7 @@ code{white-space:normal}
 <p><code>/송금</code>: 최소 10해정, 수수료 3%(올림, 최소 1)는 <b>보내는 사람</b>이 따로 내요. 받는 사람은 금액 그대로 받아요.</p>
 </section>
 
-<section id="ins">
+<section class="panel" id="ins">
 <h2><i>🛡️</i>보험 · 배당</h2>
 <h3>상장폐지 보험</h3>
 <div class="kid"><b>쉽게 말하면?</b> 내 주식이 망해도 돈을 일부 돌려받는 안전장치예요. 대신 보험료를 내야 해요.</div>
@@ -284,7 +335,7 @@ code{white-space:normal}
 </ul>
 </section>
 
-<section id="news">
+<section class="panel" id="news">
 <h2><i>📰</i>공시 · AI 봇</h2>
 <h3>공시 (호재/악재 예고)</h3>
 <ul>
@@ -304,7 +355,7 @@ code{white-space:normal}
 </ul>
 </section>
 
-<section id="earn">
+<section class="panel" id="earn">
 <h2><i>⛏️</i>주식 말고 돈 버는 법</h2>
 <div class="grid">
 <div class="card"><b>출석체크</b><br>하루 1번, 기본 100해정 (관리자가 바꿀 수 있어요)</div>
@@ -315,7 +366,7 @@ code{white-space:normal}
 <p>🏆 총 자산 = 잔고 + 주식 평가액 + 예금 + 선물 − 빚. <code>/랭킹</code>에서 순위를 볼 수 있어요.</p>
 </section>
 
-<section id="cmd">
+<section class="panel" id="cmd">
 <h2><i>⌨️</i>명령어 한눈에 보기</h2>
 <div class="tw"><table>
 <tr><th>분류</th><th>명령어</th></tr>
@@ -333,7 +384,7 @@ code{white-space:normal}
 <p>※ 디스코드에서는 <code>/도움말</code>, <code>/랭킹</code>, <code>/출석체크</code>가 <code>/주식도움말</code>, <code>/주식랭킹</code>, <code>/주식출석체크</code>로 등록돼요.</p>
 </section>
 
-<section id="admin">
+<section class="panel" id="admin">
 <h2><i>🔧</i>관리자 콘솔 기능</h2>
 <ul>
 <li>비밀번호는 서버에 <b>암호화(PBKDF2, 10만 번)</b>해서 저장돼요. 영문·숫자·기호 6~64자.</li>
@@ -346,7 +397,7 @@ code{white-space:normal}
 </ul>
 </section>
 
-<section id="tech">
+<section class="panel" id="tech">
 <h2><i>⚙️</i>뒤에서는 이렇게 돌아가요</h2>
 <div class="card">
 <b>cron-job.org</b> → <code>/api/cron?task=…</code> (비밀키 인증)<br>
@@ -362,25 +413,87 @@ code{white-space:normal}
 <div class="card"><b>도구</b> <code>node scripts/tools.js register | list | slowmode</code> — 명령어 등록, 확인, 채널 슬로우모드(기본 3초) 설정.</div>
 </section>
 
+
+<section class="panel" id="patch">
+<h2><i>🆕</i>패치노트</h2>
+<p class="lead">날짜를 누르면 접고 펼 수 있어요 · 최신순 · 한국 시간(KST)</p>
+<div id="log"></div>
+</section>
 </main>
+<div class="pager" id="pager"></div>
 <footer>해정 주식 가이드 · 코드에 적힌 숫자 기준이에요. 숫자를 바꾸면 이 문서도 같이 고쳐주세요.</footer>
-<button id="fab" aria-label="메뉴 열기">☰ 메뉴</button>
-<div id="sheet"><div id="panel"><h4>어디로 갈까요?<button id="x">닫기</button></h4><div class="links" id="links"></div></div></div>
+</div>
+</div>
+</div>
+<div class="drawer" id="drawer" hidden>
+<div class="sheet" role="dialog" aria-label="전체 목차">
+<div class="hd"><b>📂 어디로 갈까요?</b><button type="button" class="iconbtn" id="closeBtn">닫기 ✕</button></div>
+<div class="dgrid" id="drawerGrid"></div>
+</div>
+</div>
 <script>
 (function(){
-  var sheet=document.getElementById('sheet'),box=document.getElementById('links');
-  document.querySelectorAll('nav a').forEach(function(a){
-    var c=a.cloneNode(true);c.addEventListener('click',function(){sheet.classList.remove('open')});box.appendChild(c);
-  });
-  document.getElementById('fab').onclick=function(){sheet.classList.add('open')};
-  document.getElementById('x').onclick=function(){sheet.classList.remove('open')};
-  sheet.addEventListener('click',function(e){if(e.target===sheet)sheet.classList.remove('open')});
-  if('IntersectionObserver' in window){
-    var io=new IntersectionObserver(function(es){es.forEach(function(e){
-      if(e.isIntersecting){box.querySelectorAll('a').forEach(function(a){a.classList.toggle('now',a.getAttribute('href')==='#'+e.target.id)})}
-    })},{rootMargin:'-20% 0px -70% 0px'});
-    document.querySelectorAll('main section').forEach(function(s){io.observe(s)});
-  }
+var $=function(i){return document.getElementById(i)};
+function mk(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
+var TABS=[['start','🌱','시작'],['price','🎢','가격변동'],['surge','⚡','급등락'],['delist','💀','상장폐지'],['trade','🛒','사고팔기'],['order','⏰','예약·알림'],['futures','🎯','선물'],['bank','🏦','은행'],['ins','🛡️','보험·배당'],['news','📰','공시·봇'],['earn','⛏️','돈벌기'],['cmd','⌨️','명령어'],['admin','🔧','관리자'],['tech','⚙️','구조'],['patch','🆕','패치노트']];
+
+// ── 패치노트: 새 소식은 맨 위에 추가하세요 (종류: '' 개선 · 'new' 신규 · 'fix' 수정) ──
+var LOG=[
+ {date:'2026-10-30',title:'🌙 다크모드 · 📂 메뉴 위치 개편 · 🆕 패치노트',groups:[
+  ['new','신규',['🌙 화면 모드 버튼: 자동 → 라이트 → 다크 순서로 바뀌고, 고른 모드를 기억해요.','🆕 패치노트 탭을 만들었어요 (지금 보는 화면).','각 항목 맨 아래에 ← 이전 / 다음 → 버튼이 생겼어요.']],
+  ['','개선',['PC: 왼쪽에 목차가 고정돼요. ◀ 버튼으로 접을 수 있어요.','모바일: 화면 위에 ☰ 목차 버튼이 항상 붙어 있고, 누르면 전체 목차가 열려요.','한 번에 한 항목만 보여서 길게 스크롤하지 않아도 돼요.']],
+  ['','정리',['화면에 떠 있던 ☰ 메뉴 버튼과 위쪽 칩 목차를 없앴어요.']]
+ ]}
+];
+LOG.forEach(function(u,i){
+ var d=mk('details','upd'+(i===0?' latest':''));if(i===0)d.open=true;
+ var s=mk('summary'),dt=mk('div','dt');dt.append(mk('span','',u.date));if(i===0)dt.append(mk('span','badge','NEW'));
+ s.append(dt,mk('div','ut',u.title));d.append(s);
+ u.groups.forEach(function(g){g[2].forEach(function(t){var r=mk('div','ui');r.append(mk('span','tag '+g[0],g[1]),mk('div','tx',t));d.append(r)})});
+ $('log').append(d);
+});
+
+// ── 목차 · 페이지 전환 ──
+var panels={},hero=$('hero'),ttl=$('ttl'),pager=$('pager'),dr=$('drawer');
+TABS.forEach(function(t){panels[t[0]]=$(t[0]);
+ [$('sideNav'),$('drawerGrid')].forEach(function(h){
+  var b=mk('button','navbtn');b.type='button';b.dataset.tab=t[0];b.title=t[1]+' '+t[2];b.setAttribute('aria-selected','false');
+  b.append(mk('span','ic',t[1]),mk('span','lb',t[2]));b.onclick=function(){show(t[0])};h.append(b)})});
+function setDrawer(o){dr.hidden=!o;$('menuBtn').setAttribute('aria-expanded',String(o));document.body.style.overflow=o?'hidden':''}
+function show(id,scroll){
+ if(!panels[id])id='start';var idx=0;
+ TABS.forEach(function(t,i){var on=t[0]===id;panels[t[0]].hidden=!on;if(on){idx=i;ttl.textContent=t[1]+' '+t[2]}});
+ hero.hidden=id!=='start';
+ document.querySelectorAll('.navbtn').forEach(function(b){b.setAttribute('aria-selected',String(b.dataset.tab===id))});
+ pager.replaceChildren();
+ [-1,1].forEach(function(d){var t=TABS[idx+d];if(!t){pager.append(mk('span','sp'));return}
+  var b=mk('button','pg');b.type='button';b.append(mk('small','',d<0?'← 이전':'다음 →'),document.createTextNode(t[1]+' '+t[2]));b.onclick=function(){show(t[0])};pager.append(b)});
+ try{history.replaceState(null,'','#'+id)}catch(e){}
+ setDrawer(false);if(scroll!==false)window.scrollTo(0,0);
+}
+$('menuBtn').onclick=function(){setDrawer(true)};
+$('closeBtn').onclick=function(){setDrawer(false)};
+dr.addEventListener('click',function(e){if(e.target===dr)setDrawer(false)});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')setDrawer(false)});
+
+// ── 왼쪽 목차 접기 (PC) ──
+var app=document.querySelector('.app');
+function setCollapsed(c){app.classList.toggle('collapsed',c);var b=$('collapseBtn');b.textContent=c?'▶':'◀';b.title=c?'목차 펼치기':'목차 접기';b.setAttribute('aria-expanded',String(!c));try{localStorage.setItem('hj-guide-side',c?'1':'0')}catch(e){}}
+$('collapseBtn').onclick=function(){setCollapsed(!app.classList.contains('collapsed'))};
+var c0=false;try{c0=localStorage.getItem('hj-guide-side')==='1'}catch(e){}
+setCollapsed(c0);
+
+// ── 다크모드: 자동 → 라이트 → 다크 ──
+var THEMES=[['auto','🌓','자동'],['light','☀️','라이트'],['dark','🌙','다크']],ti=0;
+try{var sv=localStorage.getItem('hj-guide-theme'),k=THEMES.findIndex(function(t){return t[0]===sv});if(k>=0)ti=k}catch(e){}
+function applyTheme(){var t=THEMES[ti],r=document.documentElement;
+ if(t[0]==='auto')r.removeAttribute('data-theme');else r.setAttribute('data-theme',t[0]);
+ document.querySelectorAll('.themebtn').forEach(function(b){b.replaceChildren(mk('span','',t[1]),mk('span','lb',t[2]));b.title='화면 모드 바꾸기 · '+t[1]+' '+t[2]})}
+document.querySelectorAll('.themebtn').forEach(function(b){b.onclick=function(){ti=(ti+1)%THEMES.length;applyTheme();try{localStorage.setItem('hj-guide-theme',THEMES[ti][0])}catch(e){}}});
+applyTheme();
+
+show((location.hash||'').slice(1)||'start',false);
+window.addEventListener('hashchange',function(){show((location.hash||'').slice(1)||'start')});
 })();
 </script>
 <script>
