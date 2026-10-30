@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>해정 주식 완전 가이드</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#fbf8f1;--fg:#1d2433;--mute:#5d667a;--card:#fff;--line:#e4dfd0;--red:#d93a3a;--blue:#2a6fd6;--gold:#e8a317;--acc:#1b7f5c}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#12161f;--fg:#ecebe4;--mute:#9aa3b5;--card:#1b2130;--line:#2d3548;--red:#ff6b6b;--blue:#6aa5ff;--gold:#f5c04a;--acc:#4cc79b}}
+:root[data-theme="dark"]{--bg:#12161f;--fg:#ecebe4;--mute:#9aa3b5;--card:#1b2130;--line:#2d3548;--red:#ff6b6b;--blue:#6aa5ff;--gold:#f5c04a;--acc:#4cc79b}
+html{scroll-padding-top:calc(env(safe-area-inset-top,0px) + 64px);scroll-behavior:smooth}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.75 "Pretendard","Noto Sans KR",system-ui,sans-serif}
+header{padding:48px 20px 28px;max-width:860px;margin:auto}
+h1{font-size:clamp(30px,6vw,46px);line-height:1.25;margin:0 0 10px;letter-spacing:-.03em}
+h1 span{color:var(--red)}
+.lead{color:var(--mute);margin:0}
+nav{position:sticky;top:env(safe-area-inset-top,0px);background:var(--bg);border-bottom:1px solid var(--line);z-index:5;overflow-x:auto;white-space:nowrap;padding:10px 16px}
+nav a{display:inline-block;margin-right:6px;padding:4px 12px;border-radius:99px;background:var(--card);border:1px solid var(--line);color:var(--fg);text-decoration:none;font-size:14px}
+nav a:hover{border-color:var(--acc)}
+main{max-width:860px;margin:auto;padding:0 20px 80px}
+section{margin-top:44px}
+h2{font-size:26px;margin:0 0 6px;letter-spacing:-.02em}
+h2 i{font-style:normal;margin-right:6px}
+h3{font-size:18px;margin:24px 0 6px}
+.kid{background:color-mix(in srgb,var(--gold) 18%,var(--card));border-left:5px solid var(--gold);padding:12px 16px;border-radius:10px;margin:12px 0}
+.kid b{color:var(--gold)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 18px;margin:12px 0}
+.tw{overflow-x:auto;margin:12px 0}
+table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--line);font-size:15px}
+th,td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:color-mix(in srgb,var(--acc) 14%,var(--card))}
+code{background:color-mix(in srgb,var(--blue) 14%,transparent);padding:1px 6px;border-radius:6px;font-size:.92em}
+.up{color:var(--red);font-weight:700}.down{color:var(--blue);font-weight:700}
+.warn{border-left:5px solid var(--red);background:color-mix(in srgb,var(--red) 10%,var(--card));padding:10px 16px;border-radius:10px;margin:12px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+.grid .card{margin:0}
+.big{font-size:28px;font-weight:800;display:block}
+.calc{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.calc input,.calc select{padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit;width:130px}
+#out{margin-top:8px;font-weight:700}
+footer{text-align:center;color:var(--mute);padding:30px 20px;font-size:14px}
+button{padding:10px 18px;border-radius:10px;border:0;background:var(--acc);color:#fff;font:inherit;font-weight:700;cursor:pointer}
+body{-webkit-text-size-adjust:100%;overflow-wrap:break-word;word-break:keep-all}
+nav{scrollbar-width:none}nav::-webkit-scrollbar{display:none}
+@media (max-width:600px){
+body{font-size:15.5px;line-height:1.7}
+header{padding:28px 16px 18px}
+main{padding:0 14px 60px}
+section{margin-top:34px}
+h2{font-size:22px}h3{font-size:17px}
+nav{padding:8px 12px}
+nav a{padding:8px 14px;font-size:15px;margin-right:6px}
+.card{padding:12px 14px}
+.big{font-size:24px}
+.grid{grid-template-columns:1fr 1fr;gap:8px}
+table{font-size:13.5px}
+th,td{padding:7px 8px}
+code{font-size:.88em;word-break:break-all}
+.calc input,.calc select{width:100%;font-size:16px;padding:12px}
+.calc button{width:100%;padding:13px}
+.kid,.warn{padding:10px 12px}
+}
+@media (max-width:380px){.grid{grid-template-columns:1fr}}
+/* 가독성 */
+body{font-size:17px;line-height:1.85;letter-spacing:-.01em}
+main{max-width:760px}
+section{padding-top:28px;border-top:3px solid var(--line);margin-top:48px}
+h2{font-size:28px;padding-bottom:8px;margin-bottom:14px;border-bottom:4px solid var(--acc);display:inline-block}
+h3{font-size:19px;margin:30px 0 8px;padding-left:10px;border-left:5px solid var(--acc)}
+p{margin:12px 0}
+ul,ol{padding-left:22px;margin:12px 0}
+li{margin:8px 0}
+li::marker{color:var(--acc);font-weight:700}
+b{font-weight:800}
+th{font-size:14px;color:var(--fg);white-space:nowrap}
+tr:nth-child(even) td{background:color-mix(in srgb,var(--fg) 4%,transparent)}
+td:first-child{font-weight:700}
+table{border-radius:12px;overflow:hidden}
+.kid{font-size:17px;line-height:1.8;margin:16px 0 20px;border-radius:12px}
+.kid b:first-child{display:block;margin-bottom:2px}
+.card{line-height:1.8}
+.warn{font-weight:600}
+.big{color:var(--acc);margin-bottom:2px}
+code{font-weight:600;white-space:nowrap}
+nav a{font-weight:600}
+nav{position:static;overflow:visible;white-space:normal;display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px}
+nav a{margin:0;flex:0 0 auto;padding:8px 14px}
+code{white-space:normal;word-break:break-all}
+img,table,.card,.kid,.warn{max-width:100%}
+@media (min-width:1000px){nav{position:sticky;top:env(safe-area-inset-top,0px);max-width:860px;margin:auto;border-radius:0 0 14px 14px}}
+@media (max-width:600px){
+nav{position:static;overflow:visible;white-space:normal;display:flex;flex-wrap:wrap;gap:8px;padding:12px 14px}
+nav a{margin:0;flex:0 0 auto;padding:9px 14px}
+body{font-size:16.5px;line-height:1.85}
+h2{font-size:24px}
+h3{font-size:18px}
+th{white-space:normal}
+code{white-space:normal}
+}
+#fab{position:fixed;right:16px;bottom:calc(env(safe-area-inset-bottom,0px) + 16px);z-index:20;padding:12px 18px;border-radius:99px;box-shadow:0 4px 14px rgba(0,0,0,.3);font-size:16px}
+#sheet{position:fixed;inset:0;z-index:30;display:none;background:rgba(0,0,0,.45)}
+#sheet.open{display:block}
+#panel{position:absolute;left:0;right:0;bottom:0;max-height:80%;overflow-y:auto;background:var(--card);color:var(--fg);border-radius:20px 20px 0 0;padding:16px 16px calc(env(safe-area-inset-bottom,0px) + 20px);box-shadow:0 -6px 24px rgba(0,0,0,.3)}
+#panel h4{margin:0 0 10px;font-size:17px;display:flex;justify-content:space-between;align-items:center}
+#panel h4 button{padding:6px 12px;background:var(--line);color:var(--fg)}
+#panel .links{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+#panel .links a{display:block;padding:12px;border-radius:10px;border:1px solid var(--line);color:var(--fg);text-decoration:none;font-weight:600;text-align:center}
+#panel .links a.now{background:var(--acc);color:#fff;border-color:var(--acc)}
+@media (min-width:700px){#panel{max-width:520px;left:auto;right:16px;bottom:16px;border-radius:16px}}
+</style>
+</head>
+<body>
+<header>
+<h1>📈 <span>해정</span> 주식<br>완전 가이드</h1>
+<p class="lead">디스코드 봇의 주식 게임이 어떻게 돌아가는지, 실제 코드의 숫자 그대로 쉽게 풀어 썼어요. 돈 단위는 모두 <b>해정</b>이에요.</p>
+</header>
+<nav>
+<a href="#start">시작</a><a href="#price">가격변동</a><a href="#surge">급등락</a><a href="#delist">상장폐지</a><a href="#trade">사고팔기</a><a href="#order">예약·알림</a><a href="#futures">선물</a><a href="#bank">은행</a><a href="#ins">보험·배당</a><a href="#news">공시·봇</a><a href="#earn">돈벌기</a><a href="#cmd">명령어</a><a href="#admin">관리자</a><a href="#tech">구조</a>
+</nav>
+<main>
+
+<section id="start">
+<h2><i>🌱</i>처음 시작하기</h2>
+<div class="kid"><b>쉽게 말하면?</b> 가짜 돈(해정)으로 "오를 것 같은 주식"을 사고, 비싸질 때 파는 게임이에요. 진짜 돈은 하나도 안 들어요!</div>
+<div class="grid">
+<div class="card"><span class="big">1,000</span>처음 받는 해정 (신규 유저)</div>
+<div class="card"><span class="big">0.3%</span>사고팔 때 수수료 (올림, 최소 1해정)</div>
+<div class="card"><span class="big">100 이하</span>가격이 여기까지 떨어지면 상장폐지</div>
+<div class="card"><span class="big">1,000</span>새로 상장되는 종목의 시작 가격</div>
+</div>
+<p>명령어는 <b>주식 채널</b>에서만 쓸 수 있어요. 기본 답변은 "나만 보기"이고, 주식목록·랭킹·매수·매도 같은 일부 명령어만 모두에게 보여요(알림 소리 없이).</p>
+<p>📌 첫 3걸음: <code>/출석체크</code>로 용돈 받기 → <code>/주식목록</code>으로 종목 구경 → <code>/매수</code>로 하나 사보기.</p>
+</section>
+
+<section id="price">
+<h2><i>🎢</i>가격은 어떻게 움직여요?</h2>
+<div class="kid"><b>쉽게 말하면?</b> 15분마다 주사위를 굴려서 모든 종목 가격이 한꺼번에 오르거나 내려가요. 빨강 📈 은 오름, 파랑 📉 은 내림이에요(한국식).</div>
+<ul>
+<li><b>평소 변동</b>: 15분마다, 종목마다 <span class="down">-20%</span> ~ <span class="up">+20%</span> 사이 무작위.</li>
+<li>새 가격 = 지금 가격 × (1 + 변동률). 반올림하고 최소 1해정.</li>
+<li>변동률에는 <b>AI 봇들의 매매 영향</b>과 <b>공시(호재/악재) 기울기</b>가 더해져요.</li>
+<li>시세 기록은 종목마다 최근 300개까지 보관하고, 최고가도 따로 기억해요.</li>
+</ul>
+<h3>해정지수</h3>
+<p>모든 종목의 평균 가격이에요. 오늘 0시(한국시간)의 평균과 지금 평균을 비교해서 "오늘 시장이 올랐나?"를 보여줘요. (<code>/지수</code>)</p>
+</section>
+
+<section id="surge">
+<h2><i>⚡</i>하루 3번 급등락</h2>
+<div class="kid"><b>쉽게 말하면?</b> 하루에 세 번, 주사위가 엄청 커져요. 대박도 쪽박도 크게 나요!</div>
+<div class="tw"><table>
+<tr><th>시각(한국시간)</th><th>변동 범위</th><th>특별 규칙</th></tr>
+<tr><td>새벽 0시 · 오후 6시 · 오후 9시</td><td><span class="down">-80%</span> ~ <span class="up">+120%</span></td><td>종목마다 <b>0.5% 확률로 -100%</b> (즉시 폐지)</td></tr>
+</table></div>
+<ul>
+<li>급등락 <b>5~6분 전</b>에 채널에 예고 공지가 올라와요.</li>
+<li>슬롯 시각 3분 전~5분 후에는 평소 변동을 쉬어서 겹치지 않아요.</li>
+<li>한 슬롯은 하루에 딱 1번만 실행돼요. (실행 기록을 저장해서 중복 방지)</li>
+</ul>
+<div class="warn">급등락 때 가격이 -50%만 돼도 500 → 250이에요. 폐지선(100)이 가까워지니까 조심하세요!</div>
+</section>
+
+<section id="delist">
+<h2><i>💀</i>상장폐지</h2>
+<div class="kid"><b>쉽게 말하면?</b> 주식이 너무 싸지면(100해정 이하) 회사가 문을 닫아요. 들고 있던 주식은 휴지조각이 돼요.</div>
+<ul>
+<li>변동 후 가격이 <b>100해정 이하</b>면 자동 폐지. 모든 유저의 보유분이 사라지고, 산 값만큼 손실로 기록돼요.</li>
+<li>⚠️ <b>폐지 위기</b> 표시: 가격이 101~300일 때.</li>
+<li>보험에 들어 둔 종목이면 폐지 순간 <b>보험금</b>을 받아요. (보험 항목 참고)</li>
+<li>폐지된 종목과 하락률은 <code>/상장폐지종류</code>로 볼 수 있어요.</li>
+<li><b>자동 상장</b>: 종목이 5개 이하로 줄면 후보 이름 목록에서 15개를 1,000해정에 새로 상장해요. 유저도 <code>/종목생성</code>으로 1,000해정짜리 종목을 만들 수 있고, 하루 횟수 제한(기본 3회)이 있어요.</li>
+</ul>
+</section>
+
+<section id="trade">
+<h2><i>🛒</i>사고 팔기</h2>
+<div class="kid"><b>쉽게 말하면?</b> 싸게 사서 비싸게 팔면 차이만큼 내 돈이에요. 사고팔 때마다 작은 수수료(0.3%)를 내요.</div>
+<div class="card">
+<b>매수</b>: 가격 × 수량 + 수수료 ≤ 내 잔고여야 해요.<br>
+<b>매도</b>: 가격 × 수량 − 수수료가 내 잔고로 들어와요. 이득/손해는 내 평균 매수가 기준으로 계산해요.
+</div>
+<h3>🧮 수수료 계산기</h3>
+<div class="card calc">
+<input id="p" type="number" min="1" value="1000" aria-label="가격">
+<input id="q" type="number" min="1" value="3" aria-label="수량">
+<select id="s"><option value="b">매수</option><option value="s">매도</option></select>
+<button onclick="calc()">계산</button>
+<div id="out" style="width:100%"></div>
+</div>
+<p>여러 종목을 한 번에: <code>종목2~5</code> 칸을 쓰면 최대 5개를 같이 사고팔 수 있어요.</p>
+</section>
+
+<section id="order">
+<h2><i>⏰</i>예약 · 손절/익절 · 알림</h2>
+<div class="tw"><table>
+<tr><th>기능</th><th>하는 일</th><th>한도</th></tr>
+<tr><td><code>/예약매수</code></td><td>지정가 <b>이하</b>가 되면 자동 매수</td><td>유저당 예약 5건</td></tr>
+<tr><td><code>/예약매도</code></td><td>지정가 <b>이상</b>이 되면 자동 매도</td><td>(위와 합산)</td></tr>
+<tr><td><code>/자동매도</code></td><td>내 평균 매수가 기준 손절(-%)·익절(+%). 하나가 체결되면 나머지 취소</td><td></td></tr>
+<tr><td><code>/가격알림</code></td><td>정한 가격 도달 시 DM, 한 번 알리면 자동 삭제</td><td>10개</td></tr>
+<tr><td><code>/관심추가</code></td><td>관심종목 목록에 담기</td><td>20개</td></tr>
+<tr><td><code>/알림설정</code></td><td>시세 변동 DM 켜기 + 받을 시간대 고르기</td><td></td></tr>
+</table></div>
+<p>예약은 시세가 바뀐 직후(15분마다) 한꺼번에 확인해서 체결돼요.</p>
+</section>
+
+<section id="futures">
+<h2><i>🎯</i>선물 (오를까? 내릴까?)</h2>
+<div class="kid"><b>쉽게 말하면?</b> "이 주식 오를 거야!"(롱) 또는 "내릴 거야!"(숏)에 <b>배율</b>을 걸고 내기해요. 맞히면 크게 먹고, 틀리면 걸어둔 돈(증거금)을 잃어요.</div>
+<div class="grid">
+<div class="card"><span class="up">📈 롱</span>오르면 이득<br>내리면 손해</div>
+<div class="card"><span class="down">📉 숏</span>내리면 이득<br>오르면 손해</div>
+<div class="card"><b>배율</b> 2 · 3 · 5배<br><b>증거금</b> 100해정 이상<br><b>동시</b> 최대 3개</div>
+</div>
+<div class="card">
+<b>평가금</b> = 증거금 + 증거금 × 배율 × 방향 × (현재가 − 진입가) ÷ 진입가<br>
+<b>강제청산가</b>: 롱 = 진입가 × (1 − 1/배율) 이하, 숏 = 진입가 × (1 + 1/배율) 이상 → 증거금 전부 잃음
+</div>
+<p><b>예</b> 증거금 1,000 · 롱 · 3배: +10% → +300해정, −10% → −300해정, 약 −33% → 💥강제청산.</p>
+<div class="warn">15분마다 ±20%, 급등락엔 −80%까지 움직여요. 2~3배만 걸어도 한 번에 청산될 수 있어요! 상장폐지되면 폐지 가격으로 자동 정산돼요.</div>
+<p>명령어: <code>/선물</code> 시작 · <code>/선물목록</code> 손익 보기 · <code>/선물청산</code> 정산 · <code>/선물설명</code></p>
+</section>
+
+<section id="bank">
+<h2><i>🏦</i>은행 · 대출 · 신용등급 · 송금</h2>
+<div class="kid"><b>쉽게 말하면?</b> 돈을 맡기면 이자를 주고, 빌리면 이자를 내야 해요. 약속을 잘 지키면 "신용 점수"가 올라가서 더 많이, 더 싸게 빌릴 수 있어요.</div>
+<h3>금리</h3>
+<ul>
+<li>금리는 <b>매시 정각</b>에 랜덤으로 바뀌어요 (기준의 ×0.2 ~ ×2.0배).</li>
+<li>예금: 기본 하루 1% → 실제로는 하루 <b>0.2% ~ 2%</b>. 이자는 시간 단위로 실시간 쌓여요.</li>
+<li>대출 이자는 하루 2.4% 밑으로는 안 내려가요.</li>
+</ul>
+<h3>대출</h3>
+<div class="tw"><table>
+<tr><th>기간</th><th>기본 하루 이자</th></tr>
+<tr><td>1일</td><td>12%</td></tr><tr><td>3일</td><td>10%</td></tr><tr><td>7일</td><td>8%</td></tr>
+</table></div>
+<ul>
+<li>이자율은 <b>빌린 순간의 시장금리</b>로 정해지고 만기까지 안 바뀌어요.</li>
+<li>빌릴 때 원금의 <b>1% 수수료</b>를 먼저 떼고 받아요 (빚은 원금 그대로).</li>
+<li>한도: 순자산(해정+주식+예금+선물−빚)의 <b>30%</b> × 신용등급 배율, 최소 1,000해정. 동시 3건까지, 한 번에 100해정 이상.</li>
+<li>일찍 갚으면 그때까지 쌓인 이자만 내요. 갚을 땐 이자 먼저, 그다음 원금.</li>
+</ul>
+<h3>못 갚으면?</h3>
+<ol>
+<li>만기에 은행이 <b>잔고 → 예금</b> 순서로 자동 회수 (6시간 전 DM 알림).</li>
+<li>모자라면 <b>연체</b>: 하루 +15%p 연체이자, 새 대출 금지.</li>
+<li>연체 <b>6시간</b> 뒤에도 못 갚으면 <b>보유 주식 강제 매도</b> (큰 종목부터).</li>
+<li>그래도 빚이 남으면 해정이 들어올 때마다 자동으로 갚아져요.</li>
+</ol>
+<h3>신용등급 (시작 600점)</h3>
+<div class="tw"><table>
+<tr><th>등급</th><th>점수</th><th>한도 배율</th><th>이자 배율</th></tr>
+<tr><td>S</td><td>900~</td><td>×1.2</td><td>×0.8</td></tr>
+<tr><td>A</td><td>750~</td><td>×1.1</td><td>×0.9</td></tr>
+<tr><td>B</td><td>600~</td><td>×1.0</td><td>×1.0</td></tr>
+<tr><td>C</td><td>450~</td><td>×0.8</td><td>×1.1</td></tr>
+<tr><td>D</td><td>300~</td><td>×0.6</td><td>×1.25</td></tr>
+<tr><td>F</td><td>0~</td><td>×0.4</td><td>×1.5</td></tr>
+</table></div>
+<p>제때 완납 <span class="up">+25점</span> (500해정 이상, 6시간 이상 쓴 대출만) · 연체 <span class="down">-100점</span> · 강제매도 <span class="down">-150점</span> · 최대 1,000점.</p>
+<h3>송금</h3>
+<p><code>/송금</code>: 최소 10해정, 수수료 3%(올림, 최소 1)는 <b>보내는 사람</b>이 따로 내요. 받는 사람은 금액 그대로 받아요.</p>
+</section>
+
+<section id="ins">
+<h2><i>🛡️</i>보험 · 배당</h2>
+<h3>상장폐지 보험</h3>
+<div class="kid"><b>쉽게 말하면?</b> 내 주식이 망해도 돈을 일부 돌려받는 안전장치예요. 대신 보험료를 내야 해요.</div>
+<ul>
+<li>보험금 = 가입 때 현재가의 <b>50%</b> (주당).</li>
+<li>보험료 = 폐지 확률 × 보험금 × 1.15. 싼 종목일수록, 기간이 길수록 비싸요.</li>
+<li>하루 폐지 확률 추정: 350해정 43% · 500해정 36% · 1,000해정 24% · 2,000해정 15% · 5,000해정 8%.</li>
+<li>기간 1~30일, 동시에 5개까지. 해지하면 남은 기간 비율 × 보험료의 40%만 돌려줘요.</li>
+</ul>
+<h3>배당금</h3>
+<div class="kid"><b>쉽게 말하면?</b> 주식을 들고만 있어도 매일 아침 용돈을 줘요!</div>
+<ul>
+<li>매일 <b>오전 9시(한국시간)</b> 이후 첫 변동 때 하루 1번 지급.</li>
+<li>주식 평가액의 <b>1%</b> (가격이 300 초과인 종목만).</li>
+<li>한 사람당 하루 최대 10,000해정. 공시로 "배당 2배" 또는 "배당 없음"이 걸릴 수 있어요.</li>
+</ul>
+</section>
+
+<section id="news">
+<h2><i>📰</i>공시 · AI 봇</h2>
+<h3>공시 (호재/악재 예고)</h3>
+<ul>
+<li>하루 약 4번, 자동으로 종목 소식이 올라와요. 변동 5분 전에 공지돼요.</li>
+<li>다음 시세 변동의 범위가 한쪽으로 기울어져요: 소 <b>±6%p</b> · 중 <b>±10%p</b> · 대 <b>±14%p</b> (한 종목에 겹쳐도 최대 ±20%p).</li>
+<li>⚠️ <b>소문</b>도 있어요. 소문은 약 60%만 진짜예요!</li>
+<li>어떤 공시는 "다음 배당 2배"나 "배당 없음"을 붙여요. 관리자는 <code>/공시</code>로 직접 올릴 수도 있어요.</li>
+</ul>
+<h3>AI 봇 시장</h3>
+<div class="kid"><b>쉽게 말하면?</b> 사람처럼 사고파는 로봇 친구들이 시장에 있어요. 로봇들이 한쪽으로 몰리면 가격이 따라 움직여요.</div>
+<ul>
+<li>봇은 기본 200명(환경설정으로 변경), 각자 시작 현금 1,000해정.</li>
+<li>변동 때마다 약 30%의 봇이 행동하고, 한 번에 주는 영향은 최대 35%p.</li>
+<li>한 종목을 한 번에 살 수 있는 봇은 전체의 3%까지 (몰림 방지).</li>
+<li>성격이 <b>26가지</b>예요: 모멘텀, 줍줍, 존버, 공포매도, 역발상, 단타족, 가치투자자, 도박꾼, 올인러, 관망러, 컬렉터, 물타기, 돌파매매, 신상털이, 시장추종, 짝사랑, 펌프앤덤프, 복권러 등등.</li>
+<li><code>/봇현황</code>으로 봇들의 평균 자산과 인기 종목을 볼 수 있어요.</li>
+</ul>
+</section>
+
+<section id="earn">
+<h2><i>⛏️</i>주식 말고 돈 버는 법</h2>
+<div class="grid">
+<div class="card"><b>출석체크</b><br>하루 1번, 기본 100해정 (관리자가 바꿀 수 있어요)</div>
+<div class="card"><b>채굴</b><br>체력을 쓰고 해정 획득. 레벨 1: 체력 15, 보상 40~80. 레벨마다 체력 +1, 보상 +5. 체력은 10분에 1 회복. 최고 100레벨.</div>
+<div class="card"><b>채굴 업그레이드</b><br>1→2레벨 600해정, 15레벨까지 ×1.3씩, 이후 ×1.08씩. 또는 채굴 횟수(30회부터 레벨마다 +10)를 채우면 무료.</div>
+<div class="card"><b>주식상점</b><br>해정으로 상품을 사요 (<code>/구입</code>, <code>/보유상품</code>).</div>
+</div>
+<p>🏆 총 자산 = 잔고 + 주식 평가액 + 예금 + 선물 − 빚. <code>/랭킹</code>에서 순위를 볼 수 있어요.</p>
+</section>
+
+<section id="cmd">
+<h2><i>⌨️</i>명령어 한눈에 보기</h2>
+<div class="tw"><table>
+<tr><th>분류</th><th>명령어</th></tr>
+<tr><td>기본</td><td>/도움말 /출석체크 /잔고 /내정보 /내역 /랭킹</td></tr>
+<tr><td>시장 보기</td><td>/주식목록 /그래프 /종목정보 /지수 /봇현황 /보유종목 /상장폐지종류 /공시목록</td></tr>
+<tr><td>거래</td><td>/매수 /매도 /예약매수 /예약매도 /자동매도 /예약목록 /예약취소</td></tr>
+<tr><td>관심·알림</td><td>/관심추가 /관심삭제 /관심목록 /가격알림 /알림취소 /알림설정 /알림확인</td></tr>
+<tr><td>선물</td><td>/선물 /선물목록 /선물청산 /선물설명</td></tr>
+<tr><td>은행</td><td>/은행 /은행설명 /예금 /출금 /대출 /상환 /송금</td></tr>
+<tr><td>보험·배당</td><td>/보험 /보험가입 /보험해지 /배당</td></tr>
+<tr><td>채굴·상점</td><td>/채굴 /채굴정보 /채굴업그레이드 /주식상점 /구입 /보유상품</td></tr>
+<tr><td>유저 상장</td><td>/종목생성</td></tr>
+<tr><td>관리자</td><td>/종목추가 /종목삭제 /시세설정 /출석설정 /체력회복 /공시 /공시설정</td></tr>
+</table></div>
+<p>※ 디스코드에서는 <code>/도움말</code>, <code>/랭킹</code>, <code>/출석체크</code>가 <code>/주식도움말</code>, <code>/주식랭킹</code>, <code>/주식출석체크</code>로 등록돼요.</p>
+</section>
+
+<section id="admin">
+<h2><i>🔧</i>관리자 콘솔 기능</h2>
+<ul>
+<li>비밀번호는 서버에 <b>암호화(PBKDF2, 10만 번)</b>해서 저장돼요. 영문·숫자·기호 6~64자.</li>
+<li>종목: 저장·삭제·이름변경·<b>전체 가격 초기화</b> (기본 1,000해정).</li>
+<li>유저: 잔고 수정, 전체 잔고 초기화, 보유 상품 수정/초기화.</li>
+<li>봇 초기화 (현금 100 이상, 성격 새로 뽑기 선택).</li>
+<li>상품 추가·삭제·이름변경, 출석 보상/사용 여부, 가격 변동 공지 켜기/끄기.</li>
+<li>자동 상장 설정: 기준 종목 수, 추가 개수, 하루 횟수, 후보 이름 목록.</li>
+<li>활동 로그 보기(최근 1~7일)와 오래된 로그 삭제. 관리자가 한 작업도 자동으로 기록돼요.</li>
+</ul>
+</section>
+
+<section id="tech">
+<h2><i>⚙️</i>뒤에서는 이렇게 돌아가요</h2>
+<div class="card">
+<b>cron-job.org</b> → <code>/api/cron?task=…</code> (비밀키 인증)<br>
+· <code>fluctuate</code> 15분마다 평소 변동 · <code>midnight</code> 5분마다 호출, 급등락 슬롯일 때만 실행<br>
+· <code>prealert</code> 급등락 예고 · <code>news</code> 공시 공지 · <code>bankRate</code> 매시 정각 금리 변경
+</div>
+<div class="card">
+<b>변동 한 번의 순서</b>: 봇 주문 모으기 → 공시 가져오기 → 가격 변동 → 폐지 처리 → 채널 공지 → 예약 체결 → 가격 알림 → 선물 정산 → 은행(정각 근처만) → 배당 → DM 알림
+</div>
+<div class="card">
+<b>디스코드 명령어</b> → <code>/api/interactions</code> (서명 검증 필수). 2초 안에 못 끝나면 "처리 중…"으로 먼저 답하고 나중에 결과로 바꿔요. 데이터는 <b>Firestore</b>에 저장되고, 서버리스(Vercel)에서 필요할 때만 실행돼요.
+</div>
+<div class="card"><b>도구</b> <code>node scripts/tools.js register | list | slowmode</code> — 명령어 등록, 확인, 채널 슬로우모드(기본 3초) 설정.</div>
+</section>
+
+</main>
+<footer>해정 주식 가이드 · 코드에 적힌 숫자 기준이에요. 숫자를 바꾸면 이 문서도 같이 고쳐주세요.</footer>
+<button id="fab" aria-label="메뉴 열기">☰ 메뉴</button>
+<div id="sheet"><div id="panel"><h4>어디로 갈까요?<button id="x">닫기</button></h4><div class="links" id="links"></div></div></div>
+<script>
+(function(){
+  var sheet=document.getElementById('sheet'),box=document.getElementById('links');
+  document.querySelectorAll('nav a').forEach(function(a){
+    var c=a.cloneNode(true);c.addEventListener('click',function(){sheet.classList.remove('open')});box.appendChild(c);
+  });
+  document.getElementById('fab').onclick=function(){sheet.classList.add('open')};
+  document.getElementById('x').onclick=function(){sheet.classList.remove('open')};
+  sheet.addEventListener('click',function(e){if(e.target===sheet)sheet.classList.remove('open')});
+  if('IntersectionObserver' in window){
+    var io=new IntersectionObserver(function(es){es.forEach(function(e){
+      if(e.isIntersecting){box.querySelectorAll('a').forEach(function(a){a.classList.toggle('now',a.getAttribute('href')==='#'+e.target.id)})}
+    })},{rootMargin:'-20% 0px -70% 0px'});
+    document.querySelectorAll('main section').forEach(function(s){io.observe(s)});
+  }
+})();
+</script>
+<script>
+function calc(){
+  var p=+document.getElementById('p').value,q=+document.getElementById('q').value,t=document.getElementById('s').value;
+  var o=document.getElementById('out');
+  if(!(p>0&&q>0)){o.textContent='가격과 수량을 1 이상으로 넣어주세요.';return}
+  var a=p*q,f=Math.max(1,Math.ceil(a*3/1000));
+  o.textContent=t==='b'?('내는 돈: '+(a+f).toLocaleString()+'해정 (수수료 '+f+')'):('받는 돈: '+(a-f).toLocaleString()+'해정 (수수료 '+f+')');
+}
+calc();
+</script>
+</body>
+</html>
