@@ -1,7 +1,7 @@
 import {
   loadEnv, isAuthorizedCron, currentSurgeSlot, surgeSlotKey, isSurgeMoment,
   fluctuatePrices, announcePriceChanges, notifyPriceChanges, announcePreAlert,
-  processOrders, processFutures, processBank, processDividends, takeNews, finishNews, publishNews, prepareCrowd, finishCrowd, getDoc, setDoc,
+  processOrders, processPriceAlerts, processFutures, processBank, processDividends, takeNews, finishNews, publishNews, prepareCrowd, finishCrowd, getDoc, setDoc,
   rollBankRate,
 } from "../src/lib.js";
 
@@ -56,6 +56,14 @@ async function runFluctuation(env, range, label) {
     console.error("예약 주문 처리 실패:", err.message);
   }
 
+  // 2-1) 가격 알림: 도달한 종목은 DM으로 알리고 알림 삭제 (실패해도 시세 변동 결과는 그대로 응답)
+  let alerts = null;
+  try {
+    alerts = await processPriceAlerts(env);
+  } catch (err) {
+    console.error("가격 알림 처리 실패:", err.message);
+  }
+
   // 2-2) 선물 강제청산/폐지 정산 (실패해도 시세 변동 결과는 그대로 응답)
   let futures = null;
   try {
@@ -88,6 +96,7 @@ async function runFluctuation(env, range, label) {
     ok: true,
     announce,
     orders,
+    alerts,
     futures,
     bank,
     dividends,

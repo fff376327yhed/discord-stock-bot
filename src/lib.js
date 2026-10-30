@@ -410,10 +410,29 @@ export function costOf(user, name, currentPrice) {
   return Number.isFinite(saved) ? saved : held * currentPrice;
 }
 
-// 매수 미리보기 (저장 안 함): 명령어 입력 중 자동완성에서 사용
+// ---------- 거래 수수료·세금 ----------
+// 주식을 사고팔 때마다 거래 금액의 0.3%를 떼요. (올림, 최소 1해정, 떼간 돈은 사라져요)
+//  - 매수: (주가 × 수량) + 수수료를 내고, 수수료도 매수 원가에 들어가요. (평균 매수가에 반영)
+//  - 매도: (주가 × 수량) − 수수료를 받아요. 손익도 수수료를 뺀 금액 기준이에요.
+// 퍼센트를 바꾸려면 아래 숫자(천분율)만 바꾸면 돼요. 3 = 0.3%, 0이면 수수료 없음.
+export const TRADE_FEE_PERMILLE = 3;
+export const TRADE_FEE_TEXT = `${TRADE_FEE_PERMILLE / 10}%`;
+
+export const tradeFee = (amount) => (TRADE_FEE_PERMILLE > 0 ? Math.max(1, Math.ceil((amount * TRADE_FEE_PERMILLE) / 1000)) : 0);
+
+// 잔고로 살 수 있는 최대 수량 (수수료 포함해서 잔고를 넘지 않는 가장 큰 값)
+export function maxBuyQty(balance, price) {
+  if (!(price > 0) || balance <= 0) return 0;
+  let q = Math.floor(balance / price);
+  while (q > 0 && price * q + tradeFee(price * q) > balance) q--;
+  return q;
+}
+
+// 매수 미리보기 (저장 안 함): 명령어 입력 중 자동완성에서 사용 (cost는 수수료 포함 금액)
 export function previewBuy(user, stock, qty) {
-  const cost = stock.price * qty;
-  return { ok: user.balance >= cost, cost, after: user.balance - cost };
+  const fee = tradeFee(stock.price * qty);
+  const cost = stock.price * qty + fee;
+  return { ok: user.balance >= cost, cost, fee, after: user.balance - cost };
 }
 
 // 매도 미리보기 (저장 안 함): 얼마 들어오고, 이득/손해가 얼마인지
@@ -422,8 +441,9 @@ export function previewSell(user, stock, qty) {
   if (held < qty) return { ok: false, held };
   const prevCost = costOf(user, stock.name, stock.price);
   const basis = Math.round((prevCost * qty) / held);
-  const earned = stock.price * qty;
-  return { ok: true, held, earned, basis, profit: earned - basis, after: user.balance + earned };
+  const fee = tradeFee(stock.price * qty);
+  const earned = stock.price * qty - fee; // 수수료를 뺀 실수령액
+  return { ok: true, held, earned, fee, basis, profit: earned - basis, after: user.balance + earned };
 }
 
 // ---------- 종목 ----------
@@ -478,6 +498,91 @@ export function getPriceHistory(stock) {
   return Object.entries((stock && stock.history) || {})
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([k, p]) => ({ t: Number(k), p }));
+}
+
+// ---------- 해정지수 (시장 지수) ----------
+// 지금 상장된 모든 종목의 "평균 주가"를 해정지수로 보여줘요. (저장하는 데이터 없이 종목의 시세 기록(history)으로 계산)
+//  - 오늘 등락: 한국시간 오늘 0시 시점의 평균 주가 대비 지금 평균 주가
+//  - 같은 종목들끼리 비교해요. (오늘 새로 상장한 종목은 상장가 기준, 상장폐지된 종목은 빠져요)
+//  - 최근 24시간 미니 그래프는 2시간 간격 12개 점이에요.
+const IDX_KST_MS = 9 * 60 * 60 * 1000;
+const IDX_DAY_MS = 24 * 60 * 60 * 1000;
+const IDX_SPARK = "▁▂▃▄▅▆▇█";
+
+// 시세 기록에서 t 시각 이전의 마지막 가격 (그 전 기록이 없으면 첫 기록)
+function priceAtTime(points, t) {
+  let price = points[0].p;
+  for (const pt of points) {
+    if (pt.t <= t) price = pt.p;
+    else break;
+  }
+  return price;
+}
+
+// stocks: listStocks() 결과. 종목이 없으면 null
+export function marketIndex(stocks, now = Date.now()) {
+  const rows = stocks.map((s) => {
+    const pts = getPriceHistory(s);
+    return { name: s.name, price: s.price, pts: pts.length ? pts : [{ t: now, p: s.price }] };
+  });
+  if (rows.length === 0) return null;
+
+  const dayStart = Math.floor((now + IDX_KST_MS) / IDX_DAY_MS) * IDX_DAY_MS - IDX_KST_MS;
+  const avgOf = (fn) => rows.reduce((sum, r) => sum + fn(r), 0) / rows.length;
+
+  const level = avgOf((r) => r.price);
+  const open = avgOf((r) => priceAtTime(r.pts, dayStart));
+  const diff = level - open;
+  const pct = open > 0 ? (diff / open) * 100 : 0;
+
+  // 종목별 오늘 등락 (상승/하락/보합 수, 최고 상승·최대 하락)
+  let up = 0, down = 0, flat = 0, pctSum = 0;
+  let best = null, worst = null;
+  for (const r of rows) {
+    const o = priceAtTime(r.pts, dayStart);
+    const p = o > 0 ? ((r.price - o) / o) * 100 : 0;
+    r.todayPct = p;
+    pctSum += p;
+    if (r.price > o) up++;
+    else if (r.price < o) down++;
+    else flat++;
+    if (!best || p > best.todayPct) best = r;
+    if (!worst || p < worst.todayPct) worst = r;
+  }
+
+  // 최근 24시간 미니 그래프 (맨 끝은 항상 지금 값)
+  const samples = Array.from({ length: 12 }, (_, i) => {
+    if (i === 11) return level;
+    const t = now - (11 - i) * 2 * 60 * 60 * 1000;
+    return avgOf((r) => priceAtTime(r.pts, t));
+  });
+  const lo = Math.min(...samples);
+  const hi = Math.max(...samples);
+  const spark = samples
+    .map((v) => IDX_SPARK[hi === lo ? 3 : Math.round(((v - lo) / (hi - lo)) * (IDX_SPARK.length - 1))])
+    .join("");
+
+  return { count: rows.length, level, open, diff, pct, up, down, flat, avgPct: pctSum / rows.length, best, worst, spark };
+}
+
+export function marketIndexText(stocks, now = Date.now()) {
+  const m = marketIndex(stocks, now);
+  if (!m) return "등록된 종목이 없어요.";
+
+  const f1 = (n) => (Math.round(n * 10) / 10).toLocaleString();
+  const sgn = (n, digits = 1) => `${n > 0 ? "+" : n < 0 ? "-" : ""}${Math.abs(n).toFixed(digits)}`;
+  const arrow = m.pct > 0.05 ? "🔺" : m.pct < -0.05 ? "🔻" : "➖";
+  const mood =
+    m.pct > 0.05 ? "🟢 오늘 시장은 **올랐어요**" : m.pct < -0.05 ? "🔴 오늘 시장은 **내렸어요**" : "⚪ 오늘 시장은 **보합**이에요";
+
+  return [
+    `**📊 해정지수 ${f1(m.level)}** ${arrow} ${sgn(m.diff)} (${sgn(m.pct, 2)}%)`,
+    `${mood} · 오늘 0시 ${f1(m.open)} → 지금 ${f1(m.level)}`,
+    `최근 24시간 \`${m.spark}\``,
+    `종목 ${m.count}개: 🔺 상승 ${m.up} · 🔻 하락 ${m.down} · ➖ 보합 ${m.flat} (종목 평균 ${sgn(m.avgPct, 2)}%)`,
+    `🏆 오늘 최고 상승: **${m.best.name}** ${sgn(m.best.todayPct)}% · 💥 최대 하락: **${m.worst.name}** ${sgn(m.worst.todayPct)}%`,
+    "-# 해정지수 = 상장된 모든 종목의 평균 주가예요. (오늘은 한국시간 0시부터)",
+  ].join("\n");
 }
 
 // 종목 등록/가격 변경. 역대 최고가(maxPrice)와 그래프용 시세 기록(history)도 함께 저장해요.
@@ -628,9 +733,10 @@ export async function buyStock(env, userId, stockName, qty) {
   if (!stock) return { ok: false, message: `"${stockName}" 종목을 찾을 수 없어요.` };
 
   const user = await getUser(env, userId);
-  const cost = stock.price * qty;
+  const fee = tradeFee(stock.price * qty);
+  const cost = stock.price * qty + fee; // 수수료 포함
   if (user.balance < cost) {
-    return { ok: false, message: `잔고가 부족해요. (필요: ${cost.toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정)` };
+    return { ok: false, message: `잔고가 부족해요. (필요: ${cost.toLocaleString()}해정 = 주식 ${(cost - fee).toLocaleString()} + 수수료 ${fee.toLocaleString()}, 보유: ${user.balance.toLocaleString()}해정)` };
   }
 
   // 기존 보유분의 원가를 먼저 구한 뒤(수량 늘리기 전에) 이번 매수 금액을 더함
@@ -644,7 +750,7 @@ export async function buyStock(env, userId, stockName, qty) {
   const totalQty = user.holdings[stockName];
   const avg = Math.round(user.costs[stockName] / totalQty);
 
-  const summary = `${stockName} ${qty}주 매수 완료 (-${cost.toLocaleString()}해정)`;
+  const summary = `${stockName} ${qty}주 매수 완료 (-${cost.toLocaleString()}해정, 수수료 ${fee.toLocaleString()} 포함)`;
   // 저장과 기록을 동시에 처리해서 응답 시간을 늘리지 않음
   await Promise.all([
     saveUser(env, userId, user),
@@ -675,7 +781,8 @@ export async function sellStock(env, userId, stockName, qty) {
   // 팔 수량만큼의 매수 원가(평균 매수가 기준)를 계산해서 이득/손해를 구함
   const prevCost = costOf(user, stockName, stock.price);
   const basis = Math.round((prevCost * qty) / held);
-  const earned = stock.price * qty;
+  const fee = tradeFee(stock.price * qty);
+  const earned = stock.price * qty - fee; // 수수료를 뺀 실수령액
   const profit = earned - basis;
   const balanceBefore = user.balance;
 
@@ -689,7 +796,7 @@ export async function sellStock(env, userId, stockName, qty) {
   user.balance += earned;
   user.realizedProfit = (user.realizedProfit || 0) + profit;
 
-  const summary = `${stockName} ${qty}주 매도 완료 (+${earned.toLocaleString()}해정)`;
+  const summary = `${stockName} ${qty}주 매도 완료 (+${earned.toLocaleString()}해정, 수수료 ${fee.toLocaleString()} 차감)`;
   await Promise.all([
     saveUser(env, userId, user),
     addHistory(
@@ -755,7 +862,11 @@ export async function buyStocks(env, userId, items) {
     return { ok: false, message: `찾을 수 없는 종목이 있어요: ${missing.map((i) => `"${i.name}"`).join(", ")}\n(아무것도 매수하지 않았어요.)` };
   }
 
-  const rows = items.map((it, i) => ({ name: it.name, qty: it.qty, price: stocks[i].price, cost: stocks[i].price * it.qty }));
+  const rows = items.map((it, i) => {
+    const principal = stocks[i].price * it.qty;
+    const fee = tradeFee(principal);
+    return { name: it.name, qty: it.qty, price: stocks[i].price, fee, cost: principal + fee }; // cost는 수수료 포함
+  });
   const total = rows.reduce((sum, r) => sum + r.cost, 0);
   if (!Number.isSafeInteger(total)) return { ok: false, message: "금액이 너무 커서 처리할 수 없어요. 수량을 줄여 주세요." };
   if (user.balance < total) {
@@ -763,7 +874,7 @@ export async function buyStocks(env, userId, items) {
       ok: false,
       message: [
         `잔고가 부족해요. (합계 필요: ${fmt(total)}해정, 보유: ${fmt(user.balance)}해정, 부족: ${fmt(total - user.balance)}해정)`,
-        ...rows.map((r) => `- ${r.name} ${fmt(r.qty)}주 × ${fmt(r.price)} = ${fmt(r.cost)}해정`),
+        ...rows.map((r) => `- ${r.name} ${fmt(r.qty)}주 × ${fmt(r.price)} + 수수료 ${fmt(r.fee)} = ${fmt(r.cost)}해정`),
         "(아무것도 매수하지 않았어요.)",
       ].join("\n"),
     };
@@ -779,7 +890,7 @@ export async function buyStocks(env, userId, items) {
   });
   user.balance -= total;
 
-  const summary = `${rows.length}종목 매수 완료 (-${fmt(total)}해정)`;
+  const summary = `${rows.length}종목 매수 완료 (-${fmt(total)}해정, 수수료 ${fmt(rows.reduce((a, r) => a + r.fee, 0))} 포함)`;
   await Promise.all([
     saveUser(env, userId, user),
     addHistory(env, userId, `매수: ${rows.map((r) => `${r.name} ${fmt(r.qty)}주`).join(", ")} (-${fmt(total)}해정) → 잔고 ${fmt(user.balance)}해정`),
@@ -808,7 +919,7 @@ export async function sellStocks(env, userId, items) {
     const held = user.holdings[it.name];
     const prevCost = costOf(user, it.name, price);
     const basis = Math.round((prevCost * it.qty) / held);
-    const earned = price * it.qty;
+    const earned = price * it.qty - tradeFee(price * it.qty); // 수수료를 뺀 실수령액
     const profit = earned - basis;
 
     user.holdings[it.name] = held - it.qty;
@@ -1208,7 +1319,7 @@ const collectionOf = (day) => `logs_${day}`;
 // 이것도 남기고 싶으면 이름을 이 목록에서 지우세요.
 export const VIEW_ONLY = new Set([
   "도움말", "주식목록", "그래프", "상장폐지종류", "보유종목", "잔고", "내정보",
-  "봇현황", "랭킹", "내역", "예약목록", "보유상품", "알림확인", "채굴정보", "주식상점",
+  "지수", "종목정보", "관심목록", "봇현황", "랭킹", "내역", "예약목록", "보유상품", "알림확인", "채굴정보", "주식상점",
   "선물목록", "선물설명", "은행", "은행설명", "배당", "공시목록", "보험",
 ]);
 
@@ -1227,6 +1338,7 @@ const CATEGORY = {
   상환: "은행",
   예약매수: "예약",
   예약매도: "예약",
+  자동매도: "예약",
   예약취소: "예약",
   예약체결: "예약",
   출석체크: "출석",
@@ -2502,6 +2614,8 @@ export async function announcePreAlert(env, slotLabel, leadMin) {
 // orders/{유저ID} 문서: { items: { [예약번호]: { stock, side, qty, price, at } } }
 //  - side "buy" : 현재가가 price 이하가 되면 qty주 매수
 //  - side "sell": 현재가가 price 이상이 되면 qty주 매도
+//  - dir "down" (손절): 매도인데 현재가가 price 이하가 되면 매도
+//  - kind "손절"/"익절", link: /자동매도로 만든 짝. 한쪽이 체결되면 같은 link의 나머지는 자동 취소돼요.
 //
 // - 가격은 시세가 변동될 때(평소 변동, 급등락)에만 확인해요.
 // - 체결가는 예약가가 아니라 그 순간의 현재가예요. (예약가보다 유리하게 움직였으면 더 유리한 가격으로 체결)
@@ -2546,8 +2660,24 @@ export const sideText = (side) => (side === "buy" ? "매수" : "매도");
 
 // 예: **종목A** 800해정 이하가 되면 3주 매수
 export function orderText(o) {
-  const cond = o.side === "buy" ? "이하가 되면" : "이상이 되면";
-  return `**${o.stock}** ${o.price.toLocaleString()}해정 ${cond} ${o.qty.toLocaleString()}주 ${sideText(o.side)}`;
+  const cond = o.side === "buy" || o.dir === "down" ? "이하가 되면" : "이상이 되면";
+  const tag = o.kind ? `[${o.kind}] ` : "";
+  return `${tag}**${o.stock}** ${o.price.toLocaleString()}해정 ${cond} ${o.qty.toLocaleString()}주 ${sideText(o.side)}`;
+}
+
+// 종목별로 이미 매도 예약에 묶인 수량. 손절/익절 짝(같은 link)은 한 번만 세요. (둘 중 하나만 체결되니까)
+export function reservedSellQty(items) {
+  const reserved = {};
+  const seenLinks = new Set();
+  for (const o of Object.values(items)) {
+    if (o.side !== "sell") continue;
+    if (o.link) {
+      if (seenLinks.has(o.link)) continue;
+      seenLinks.add(o.link);
+    }
+    reserved[o.stock] = (reserved[o.stock] || 0) + o.qty;
+  }
+  return reserved;
 }
 
 // target: 예약번호 또는 "all". 취소된 예약 목록을 돌려줘요.
@@ -2604,7 +2734,7 @@ export async function processOrders(env) {
         const price = priceMap[o.stock];
         if (price === undefined) {
           hits.push({ id, o, gone: true });
-        } else if (o.side === "buy" ? price <= o.price : price >= o.price) {
+        } else if (o.side === "buy" || o.dir === "down" ? price <= o.price : price >= o.price) {
           hits.push({ id, o, price });
         }
       }
@@ -2614,6 +2744,13 @@ export async function processOrders(env) {
       try {
         const fresh = await getOrderItems(env, userId);
         for (const h of hits) delete fresh[h.id];
+        // 손절/익절 짝이 있으면 한쪽이 체결될 때 나머지도 같이 지워요
+        for (const h of hits) {
+          if (!h.o.link) continue;
+          for (const [id, o] of Object.entries(fresh)) {
+            if (o.link === h.o.link) delete fresh[id];
+          }
+        }
         await saveOrderItems(env, userId, fresh);
       } catch (err) {
         console.error(`예약 정리 실패 (${userId}):`, err.message);
@@ -2645,13 +2782,14 @@ export async function processOrders(env) {
               a: label,
               r: `예약가 ${h.o.price.toLocaleString()} → 체결가 ${h.price.toLocaleString()}해정`,
             });
-            const cond = h.o.side === "buy" ? "이하" : "이상";
+            const cond = h.o.side === "buy" || h.o.dir === "down" ? "이하" : "이상";
             await safeDM(
               env,
               userId,
               [
-                `✅ **[예약 체결]** ${label}`,
-                `예약가 ${h.o.price.toLocaleString()}해정 ${cond} → 체결가 ${h.price.toLocaleString()}해정`,
+                `✅ **[${h.o.kind || "예약"} 체결]** ${label}`,
+                `${h.o.kind ? "기준가" : "예약가"} ${h.o.price.toLocaleString()}해정 ${cond} → 체결가 ${h.price.toLocaleString()}해정`,
+                ...(h.o.link ? ["(짝으로 걸어둔 손절/익절 주문은 자동으로 취소했어요.)"] : []),
                 result.message,
               ].join("\n")
             );
@@ -2664,6 +2802,110 @@ export async function processOrders(env) {
         } catch (err) {
           console.error(`예약 체결 실패 (${userId}, ${label}):`, err.message);
         }
+      }
+    })
+  );
+
+  return summary;
+}
+
+// ============================================================
+// [watch.js]
+// ============================================================
+// ---------- 관심종목 + 가격 알림 ----------
+// watch/{유저ID} 문서: { stocks: { [종목]: 담은시각 }, alerts: { [알림번호]: { stock, price, dir, at } } }
+//  - dir "up": 현재가가 price 이상이 되면 DM / "down": price 이하가 되면 DM
+//  - 알림을 만들 때 현재가와 비교해서 방향을 자동으로 정해요. (현재가보다 높게 걸면 "이상", 낮게 걸면 "이하")
+//  - 알림은 한 번 보내고 자동으로 삭제돼요. 가격은 시세가 변동될 때(평소 변동, 급등락)에만 확인해요.
+//  - 관심종목/알림이 걸린 종목이 상장폐지되면 DM으로 알리고 자동으로 정리해요.
+export const MAX_WATCH_STOCKS = 20;
+export const MAX_PRICE_ALERTS = 10;
+
+const watchPath = (userId) => `watch/${userId}`;
+
+export async function getWatch(env, userId) {
+  const doc = await getDoc(env, watchPath(userId));
+  return { stocks: { ...((doc && doc.stocks) || {}) }, alerts: { ...((doc && doc.alerts) || {}) } };
+}
+
+async function saveWatch(env, userId, w) {
+  await setDoc(env, watchPath(userId), { stocks: w.stocks, alerts: w.alerts });
+}
+
+const alertDirText = (dir) => (dir === "up" ? "이상" : "이하");
+
+// 예: **종목A** 1,500해정 이상이 되면 DM
+export function alertText(a) {
+  return `**${a.stock}** ${a.price.toLocaleString()}해정 ${alertDirText(a.dir)}이 되면 DM`;
+}
+
+// 오래된 알림부터: [{ id, stock, price, dir, at }]
+export function alertList(alerts) {
+  return Object.entries(alerts)
+    .map(([id, a]) => ({ id, ...a }))
+    .sort((a, b) => (a.at || 0) - (b.at || 0));
+}
+
+// 시세 변동 직후에 호출: 조건에 도달한 알림을 DM으로 보내고 지워요.
+// 반환: { sent: 보낸 알림 수, cleared: 상장폐지로 정리한 수 }
+export async function processPriceAlerts(env) {
+  const [docs, stocks] = await Promise.all([listCollection(env, "watch"), listStocks(env)]);
+  const summary = { sent: 0, cleared: 0 };
+  if (stocks.length === 0) return summary; // 목록을 못 읽었을 때 관심종목이 통째로 지워지지 않게
+  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+
+  await Promise.all(
+    docs.map(async (doc) => {
+      const userId = doc.id;
+      const alerts = doc.alerts || {};
+      const hits = [];
+      for (const [id, a] of Object.entries(alerts)) {
+        const price = priceMap[a.stock];
+        if (price === undefined) hits.push({ id, a, gone: true });
+        else if (a.dir === "up" ? price >= a.price : price <= a.price) hits.push({ id, a, price });
+      }
+      const goneStocks = Object.keys(doc.stocks || {}).filter((n) => priceMap[n] === undefined);
+      if (hits.length === 0 && goneStocks.length === 0) return;
+
+      // 보내기 전에 먼저 지워서, 중간에 문제가 생겨도 같은 알림이 두 번 가지 않게 함
+      try {
+        const fresh = await getWatch(env, userId);
+        for (const h of hits) delete fresh.alerts[h.id];
+        for (const n of goneStocks) delete fresh.stocks[n];
+        await saveWatch(env, userId, fresh);
+      } catch (err) {
+        console.error(`가격 알림 정리 실패 (${userId}):`, err.message);
+        return;
+      }
+
+      for (const h of hits) {
+        try {
+          if (h.gone) {
+            summary.cleared++;
+            await safeDM(env, userId, `⚠️ **[가격 알림 취소]** **${h.a.stock}**이(가) 상장폐지돼서 알림을 지웠어요.`);
+            continue;
+          }
+          summary.sent++;
+          await addHistory(env, userId, `가격 알림: ${h.a.stock} ${h.price.toLocaleString()}해정 (설정 ${h.a.price.toLocaleString()}해정 ${alertDirText(h.a.dir)})`);
+          await safeDM(
+            env,
+            userId,
+            [
+              `🔔 **[가격 알림]** **${h.a.stock}**`,
+              `현재가 **${h.price.toLocaleString()}해정** — 설정한 ${h.a.price.toLocaleString()}해정 ${alertDirText(h.a.dir)}에 도달했어요.`,
+              "(이 알림은 한 번 보내고 자동으로 삭제됐어요.)",
+            ].join("\n")
+          );
+        } catch (err) {
+          console.error(`가격 알림 전송 실패 (${userId}, ${h.a.stock}):`, err.message);
+        }
+      }
+
+      const alertedGone = new Set(hits.filter((h) => h.gone).map((h) => h.a.stock));
+      for (const n of goneStocks) {
+        if (alertedGone.has(n)) continue;
+        summary.cleared++;
+        await safeDM(env, userId, `⚠️ **[관심종목]** **${n}**이(가) 상장폐지돼서 관심종목에서 지웠어요.`);
       }
     })
   );
@@ -4321,6 +4563,12 @@ export const commandDefinitions = [
   { name: "보유종목", description: "유저들이 어떤 주식을 보유 중인지 모두에게 보여줍니다. (알림 없이 표시)" },
   { name: "잔고", description: "내 해정 잔고와 보유 종목을 봅니다." },
   { name: "내정보", description: "내 잔고, 보유 종목 평가액, 총자산, 순위를 한 번에 봅니다." },
+  {
+    name: "종목정보",
+    description: "종목의 상장일, 최고가, 오늘 변동폭, 배당 예상을 한 화면에 봅니다.",
+    options: [{ name: "종목", description: "정보를 볼 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true }],
+  },
+  { name: "지수", description: "해정지수(전체 종목 평균 주가)와 오늘 시장이 올랐는지 한눈에 봅니다." },
   { name: "봇현황", description: "시장에 참여 중인 AI 봇의 평균 자산과 인기 종목을 봅니다." },
   { name: "랭킹", description: "총 자산 기준 랭킹을 봅니다." },
   {
@@ -4332,7 +4580,7 @@ export const commandDefinitions = [
   },
   {
     name: "매수",
-    description: "종목을 매수합니다. 종목2~5를 쓰면 여러 종목을 한 번에 사요. 수량 기본 1주.",
+    description: "종목을 매수합니다. (수수료 0.3%) 종목2~5로 여러 종목을 한 번에 사요. 수량 기본 1주.",
     options: multi([
       { name: "종목", description: "종목 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
       { name: "수량", description: "매수할 수량 (기본 1, '최대'는 살 수 있는 만큼)", type: 4, required: false, autocomplete: true },
@@ -4340,7 +4588,7 @@ export const commandDefinitions = [
   },
   {
     name: "매도",
-    description: "종목을 매도합니다. 종목2~5를 쓰면 여러 종목을 한 번에 팔아요. 수량 기본 1주.",
+    description: "종목을 매도합니다. (수수료 0.3%) 종목2~5로 여러 종목을 한 번에 팔아요. 수량 기본 1주.",
     options: multi([
       { name: "종목", description: "내가 가진 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
       { name: "수량", description: "매도할 수량 (기본 1, '전량'은 보유 전부)", type: 4, required: false, autocomplete: true },
@@ -4364,7 +4612,41 @@ export const commandDefinitions = [
       { name: "수량", description: "매도할 수량 (기본 1)", type: 4, required: false, autocomplete: true },
     ]),
   },
-  { name: "예약목록", description: "내가 걸어둔 예약 매수/매도 목록을 봅니다." },
+  {
+    name: "자동매도",
+    description: "내 평균 매수가 기준으로 손절(-%)/익절(+%) 자동 매도를 걸어요. 하나가 체결되면 나머지는 취소돼요.",
+    options: [
+      { name: "종목", description: "내가 가진 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+      { name: "손절", description: "평균 매수가보다 이만큼(%) 떨어지면 매도 (예: 20)", type: 4, required: false, autocomplete: true, min_value: 1, max_value: 99 },
+      { name: "익절", description: "평균 매수가보다 이만큼(%) 오르면 매도 (예: 30)", type: 4, required: false, autocomplete: true, min_value: 1, max_value: 1000 },
+      { name: "수량", description: "매도할 수량 (안 적으면 보유 전량)", type: 4, required: false, autocomplete: true, min_value: 1 },
+    ],
+  },
+  { name: "예약목록", description: "내가 걸어둔 예약·손절·익절 목록을 봅니다." },
+  {
+    name: "관심추가",
+    description: "관심종목에 담아둡니다. (최대 20개, 관심목록에서 한눈에 봐요)",
+    options: [{ name: "종목", description: "담을 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true }],
+  },
+  {
+    name: "관심삭제",
+    description: "관심종목에서 뺍니다. (그 종목에 걸어둔 가격 알림도 같이 지워요)",
+    options: [{ name: "종목", description: "뺄 종목 (목록에서 선택, '전체 삭제'도 가능)", type: 3, required: true, autocomplete: true }],
+  },
+  { name: "관심목록", description: "내 관심종목의 현재가·오늘 등락과 가격 알림을 한눈에 봅니다." },
+  {
+    name: "가격알림",
+    description: "종목이 정한 가격에 도달하면 DM으로 알려줘요. (한 번 알리고 자동 삭제, 관심종목에도 담겨요)",
+    options: [
+      { name: "종목", description: "알림을 받을 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
+      { name: "가격", description: "이 가격에 도달하면 DM (현재가보다 높으면 이상, 낮으면 이하)", type: 4, required: true, autocomplete: true, min_value: 1 },
+    ],
+  },
+  {
+    name: "알림취소",
+    description: "걸어둔 가격 알림을 취소합니다.",
+    options: [{ name: "알림", description: "취소할 알림 (목록에서 선택, '전체 취소'도 가능)", type: 3, required: true, autocomplete: true }],
+  },
   {
     name: "예약취소",
     description: "걸어둔 예약을 취소합니다. 예약2~5로 여러 건을 한 번에 취소해요.",
@@ -4554,9 +4836,10 @@ export const ROOT_COMMAND = "주식";
 
 // 묶음 이름 -> { 설명, 안에 들어갈 명령어 이름들 }. 여기에 없는 명령어는 /주식 바로 아래에 붙어요.
 export const COMMAND_GROUPS = {
-  예약주문: { description: "가격을 정해두고 자동으로 사고파는 예약 주문", commands: ["예약매수", "예약매도", "예약목록", "예약취소"] },
+  예약주문: { description: "가격을 정해두고 자동으로 사고파는 예약 주문", commands: ["예약매수", "예약매도", "자동매도", "예약목록", "예약취소"] },
   은행업무: { description: "예금·대출·송금·보험 같은 은행 업무", commands: ["은행", "은행설명", "배당", "예금", "출금", "송금", "대출", "상환", "보험", "보험가입"] },
   선물거래: { description: "롱/숏 + 배율로 하는 선물 거래", commands: ["선물", "선물목록", "선물청산", "선물설명"] },
+  시장정보: { description: "해정지수·종목정보·관심종목·가격 알림 같은 시장 정보", commands: ["지수", "종목정보", "관심추가", "관심삭제", "관심목록", "가격알림", "알림취소", "봇현황", "상장폐지종류"] },
   채굴장: { description: "채굴로 해정 벌기", commands: ["채굴", "채굴정보", "채굴업그레이드"] },
   관리: { description: "[관리자] 종목·시세·공시 관리", commands: ["종목추가", "종목삭제", "시세설정", "출석설정", "공시", "공시설정"] },
 };
@@ -4829,12 +5112,12 @@ async function quantityChoices(command, interaction, env, keyword, slot = "") {
   let values;
 
   if (command === "매수") {
-    const max = stock.price > 0 ? Math.floor(user.balance / stock.price) : 0;
+    const max = maxBuyQty(user.balance, stock.price);
     labelFor = (q) => {
       if (q <= 0) return "1주 이상 입력해 주세요";
       const p = previewBuy(user, stock, q);
       return p.ok
-        ? `${q.toLocaleString()}주 매수 → -${p.cost.toLocaleString()}해정 · 잔고 ${p.after.toLocaleString()}해정`
+        ? `${q.toLocaleString()}주 매수 → -${p.cost.toLocaleString()}해정(수수료 ${p.fee.toLocaleString()}) · 잔고 ${p.after.toLocaleString()}해정`
         : `${q.toLocaleString()}주 매수 불가 (필요 ${p.cost.toLocaleString()} / 잔고 ${user.balance.toLocaleString()}해정)`;
     };
     values = max > 0 ? [...defaults.filter((n) => n < max), max] : defaults;
@@ -4923,7 +5206,17 @@ export async function autocomplete(interaction, env) {
     const rawUser = userId ? await getUser(env, userId) : { balance: 0, holdings: {}, costs: {} };
     const user = priorAdjusted(command, interaction, slot, rawUser, Object.fromEntries(stocks.map((s) => [s.name, s.price])));
 
-    if (command === "매도" || command === "예약매도") {
+    if (command === "관심삭제") {
+      // 내 관심종목만 보여줌
+      const w = userId ? await getWatch(env, userId) : { stocks: {}, alerts: {} };
+      const items = stocks
+        .filter((s) => w.stocks[s.name])
+        .map((s) => ({ label: `${s.name} (${s.price.toLocaleString()}해정)`, value: s.name }));
+      if (items.length > 1) items.push({ label: "전체 삭제", value: "all" });
+      return textChoices(items, keyword);
+    }
+
+    if (command === "매도" || command === "예약매도" || command === "자동매도") {
       // 매도는 내가 가진 종목만 보여줌 (현재가 기준 평가손익 함께 표시)
       return textChoices(
         stocks
@@ -4957,7 +5250,7 @@ export async function autocomplete(interaction, env) {
       // 매수는 지금 잔고로 최대 몇 주까지 살 수 있는지 함께 표시
       return textChoices(
         stocks.map((s) => ({
-          label: `${s.name}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정 · 최대 ${Math.floor(user.balance / s.price).toLocaleString()}주)`,
+          label: `${s.name}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정 · 최대 ${maxBuyQty(user.balance, s.price).toLocaleString()}주)`,
           value: s.name,
         })),
         keyword
@@ -5098,7 +5391,7 @@ export async function autocomplete(interaction, env) {
     const userId = interaction.member?.user?.id;
     const orders = userId ? await getOrders(env, userId) : [];
     const items = orders.map((o) => ({
-      label: `[${o.id}] ${sideText(o.side)} ${o.stock} · ${o.price.toLocaleString()}해정 ${o.side === "buy" ? "이하" : "이상"} · ${o.qty.toLocaleString()}주`,
+      label: `[${o.id}] ${o.kind ? `${o.kind} ` : ""}${sideText(o.side)} ${o.stock} · ${o.price.toLocaleString()}해정 ${o.side === "buy" || o.dir === "down" ? "이하" : "이상"} · ${o.qty.toLocaleString()}주`,
       value: o.id,
     }));
     const left = pickable(items);
@@ -5106,13 +5399,31 @@ export async function autocomplete(interaction, env) {
     return textChoices(left, keyword);
   }
 
+  // ----- 알림취소: 내 가격 알림 목록 -----
+  if (base === "알림" && command === "알림취소") {
+    const userId = interaction.member?.user?.id;
+    const list = userId ? alertList((await getWatch(env, userId)).alerts) : [];
+    const items = list.map((a) => ({
+      label: `[${a.id}] ${a.stock} · ${a.price.toLocaleString()}해정 ${alertDirText(a.dir)}`,
+      value: a.id,
+    }));
+    if (items.length > 1) items.push({ label: "전체 취소", value: "all" });
+    return textChoices(items, keyword);
+  }
+
   // ----- 숫자 옵션 -----
   if (base === "수량") {
     // 예약은 체결 시점 가격이 달라서 미리보기 없이 예시만 보여줌
-    if (command === "예약매수" || command === "예약매도") {
+    if (command === "예약매수" || command === "예약매도" || command === "자동매도") {
       return numberChoices([1, 5, 10, 50, 100].map((n) => ({ label: `${n}주`, value: n })), keyword);
     }
     return quantityChoices(command, interaction, env, keyword, slot);
+  }
+
+  if (command === "자동매도" && (focused.name === "손절" || focused.name === "익절")) {
+    const list = focused.name === "손절" ? [5, 10, 20, 30, 50] : [10, 20, 30, 50, 100];
+    const sign = focused.name === "손절" ? "-" : "+";
+    return numberChoices(list.map((n) => ({ label: `${sign}${n}%`, value: n })), keyword);
   }
 
   if (focused.name === "개수") {
@@ -5124,7 +5435,7 @@ export async function autocomplete(interaction, env) {
   }
 
   if (base === "가격") {
-    if (command === "시세설정" || command === "예약매수" || command === "예약매도") {
+    if (command === "시세설정" || command === "예약매수" || command === "예약매도" || command === "가격알림") {
       return numberChoices(await priceSuggestions(interaction, env, slot), keyword);
     }
     // 종목추가: 초기 가격 예시
@@ -5179,10 +5490,7 @@ async function reserveOrder(side, interaction, env) {
   }
 
   // 매도 예약 수량: 이미 걸어둔 것 + 이번 명령에서 앞 칸에 건 것까지 합쳐서 보유 수량을 넘지 않게
-  const reserved = {};
-  for (const o of Object.values(items)) {
-    if (o.side === "sell") reserved[o.stock] = (reserved[o.stock] || 0) + o.qty;
-  }
+  const reserved = reservedSellQty(items);
 
   slots.forEach((s, i) => {
     const stock = stocks[i];
@@ -5190,8 +5498,8 @@ async function reserveOrder(side, interaction, env) {
     if (side === "buy") {
       if (stock.price <= s.price) {
         errors.push(`${tag(s)}현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이하예요. 바로 \`/주식 매수\`를 쓰거나, 더 낮은 가격으로 예약해 주세요.`);
-      } else if (user.balance < s.price * s.qty) {
-        errors.push(`${tag(s)}잔고가 부족해요. (예약가 기준 필요: ${(s.price * s.qty).toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정)`);
+      } else if (user.balance < s.price * s.qty + tradeFee(s.price * s.qty)) {
+        errors.push(`${tag(s)}잔고가 부족해요. (예약가 기준 필요: ${(s.price * s.qty + tradeFee(s.price * s.qty)).toLocaleString()}해정(수수료 포함), 보유: ${user.balance.toLocaleString()}해정)`);
       }
     } else {
       if (stock.price >= s.price) {
@@ -5228,6 +5536,50 @@ async function reserveOrder(side, interaction, env) {
     `⏰ ${made.length}건을 예약했어요.`,
     ...made.map((m) => `- \`${m.id}\` ${orderText(m.order)} · 현재가 ${m.now.toLocaleString()}해정`),
     footer,
+  ].join("\n");
+}
+
+// 종목 1개의 정보 카드: 상장일 · 최고가 · 오늘 변동폭 · 배당 예상을 한 화면에
+// held: 내가 가진 수량, divMod: 공시로 정해진 배당 배수 (1 = 평소, 2 = 확대, 0 = 무배당)
+function stockInfoText(stock, held = 0, divMod = 1, now = Date.now()) {
+  const sgn = (n, d = 1) => `${n > 0 ? "+" : n < 0 ? "-" : ""}${Math.abs(n).toFixed(d)}`;
+  const mark = (n) => (n > 0 ? UP_MARK : n < 0 ? DOWN_MARK : "➖");
+
+  // 오늘(한국시간 0시~) 변동폭: 0시 시점 가격과 오늘 기록들 중 최고/최저
+  const pts = getPriceHistory(stock);
+  const dayStart = Math.floor((now + IDX_KST_MS) / IDX_DAY_MS) * IDX_DAY_MS - IDX_KST_MS;
+  const open = pts.length ? priceAtTime(pts, dayStart) : stock.price;
+  const todayPrices = [open, ...pts.filter((x) => x.t > dayStart).map((x) => x.p), stock.price];
+  const hi = Math.max(...todayPrices);
+  const lo = Math.min(...todayPrices);
+  const rangePct = lo > 0 ? ((hi - lo) / lo) * 100 : 0;
+  const dayPct = open > 0 ? ((stock.price - open) / open) * 100 : 0;
+
+  const maxPrice = Math.max(stock.maxPrice || 0, stock.price);
+  const ofMax = maxPrice > 0 ? (stock.price / maxPrice) * 100 : 100;
+  const days = Number.isFinite(stock.listedAt) ? Math.floor((now - stock.listedAt) / IDX_DAY_MS) + 1 : null;
+
+  // 배당 예상 (지급은 매일 오전 DIVIDEND_HOUR시 이후 첫 시세 변동 때, 지급 시점의 가격 기준)
+  let divLine;
+  if (stock.price <= DANGER_PRICE) {
+    divLine = `💵 배당: 위기 종목(${DANGER_PRICE.toLocaleString()}해정 이하)이라 **무배당**이에요.`;
+  } else if (divMod === 0) {
+    divLine = "💵 배당: 공시로 **무배당** 예정이에요.";
+  } else {
+    const pay = (qty) => Math.floor(dividendOf(stock.price, qty) * divMod).toLocaleString();
+    divLine =
+      `💵 배당 예상: 하루 ${pctText(DIVIDEND_RATE)}${divMod === 2 ? " ×2(공시 확대)" : ""} · 10주 약 **${pay(10)}해정** · 100주 약 **${pay(100)}해정**` +
+      `${held > 0 ? `\n   ↳ 내 보유 ${held.toLocaleString()}주 → 약 **+${pay(held)}해정**` : ""}` +
+      `\n   (매일 오전 ${DIVIDEND_HOUR}시 이후 첫 시세 변동 때 지급 · 지급 시점 가격 기준)`;
+  }
+
+  return [
+    `**🏷️ ${stock.name} 종목정보**`,
+    `${mark(dayPct)} 현재가 **${stock.price.toLocaleString()}해정**${dangerTag(stock.price) ? `${dangerTag(stock.price)} 상장폐지 위기` : ""} · 오늘 ${sgn(dayPct)}% (0시 ${open.toLocaleString()}해정)`,
+    `🗓️ 상장일: ${listedText(stock.listedAt)} (한국시간)${days ? ` · 상장 ${days.toLocaleString()}일째` : ""}`,
+    `🏆 역대 최고가: **${maxPrice.toLocaleString()}해정** (지금은 최고가의 ${ofMax.toFixed(1)}%)`,
+    `📏 오늘 변동폭: 최고 ${hi.toLocaleString()} ~ 최저 ${lo.toLocaleString()}해정 (**${rangePct.toFixed(1)}%**)`,
+    divLine,
   ].join("\n");
 }
 
@@ -5488,7 +5840,7 @@ export const handlers = {
     );
 
     // 디스코드 메시지 한도(2000자) 보호
-    let text = `**🪦 상장폐지된 종목 (${list.length}건, 최신순)**\n그래프는 \`/주식 상장폐지종류 종목:이름\`으로 볼 수 있어요.`;
+    let text = `**🪦 상장폐지된 종목 (${list.length}건, 최신순)**\n그래프는 \`/주식 시장정보 상장폐지종류 종목:이름\`으로 볼 수 있어요.`;
     for (const line of lines) {
       if (text.length + line.length + 1 > 1900) {
         text += "\n…(이하 생략 · `개수`를 줄여 보세요)";
@@ -5581,6 +5933,134 @@ export const handlers = {
   },
 
   // AI 봇 현황 (봇은 랭킹에 포함되지 않고 여기서만 요약으로 보여줘요)
+  지수: async (_interaction, env) => marketIndexText(await listStocks(env)),
+  관심추가: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const name = String(opt(interaction, "종목") ?? "").trim();
+    const [stock, w] = await Promise.all([getStock(env, name), getWatch(env, userId)]);
+    if (!stock) return `"${name}" 종목을 찾을 수 없어요.`;
+    if (w.stocks[name]) return `**${name}**은(는) 이미 관심종목이에요. \`/주식 시장정보 관심목록\`으로 확인해 보세요.`;
+    const count = Object.keys(w.stocks).length;
+    if (count >= MAX_WATCH_STOCKS) return `관심종목은 최대 ${MAX_WATCH_STOCKS}개까지 담을 수 있어요. \`/주식 시장정보 관심삭제\`로 정리한 뒤 다시 시도해 주세요.`;
+    w.stocks[name] = Date.now();
+    await saveWatch(env, userId, w);
+    return [
+      `⭐ **${name}**을(를) 관심종목에 담았어요. (${count + 1}/${MAX_WATCH_STOCKS}) · 현재가 ${stock.price.toLocaleString()}해정`,
+      "원하는 가격에 DM을 받으려면 `/주식 시장정보 가격알림`을 써 보세요.",
+    ].join("\n");
+  },
+
+  관심삭제: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const name = String(opt(interaction, "종목") ?? "").trim();
+    const w = await getWatch(env, userId);
+    if (name === "all") {
+      const n = Object.keys(w.stocks).length;
+      if (n === 0 && Object.keys(w.alerts).length === 0) return "관심종목이 비어 있어요.";
+      await saveWatch(env, userId, { stocks: {}, alerts: {} });
+      return `관심종목 ${n}개와 가격 알림을 모두 지웠어요.`;
+    }
+    if (!w.stocks[name]) return `**${name}**은(는) 관심종목이 아니에요. 칸을 눌러 목록에서 골라 주세요.`;
+    delete w.stocks[name];
+    let removedAlerts = 0;
+    for (const [id, a] of Object.entries(w.alerts)) {
+      if (a.stock === name) {
+        delete w.alerts[id];
+        removedAlerts++;
+      }
+    }
+    await saveWatch(env, userId, w);
+    return `**${name}**을(를) 관심종목에서 뺐어요.${removedAlerts ? ` (가격 알림 ${removedAlerts}개도 같이 지웠어요.)` : ""}`;
+  },
+
+  관심목록: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const [w, stocks] = await Promise.all([getWatch(env, userId), listStocks(env)]);
+    const names = Object.keys(w.stocks).sort((a, b) => w.stocks[a] - w.stocks[b]);
+    const alerts = alertList(w.alerts);
+    if (names.length === 0 && alerts.length === 0) {
+      return "관심종목이 없어요. `/주식 시장정보 관심추가`로 담거나 `/주식 시장정보 가격알림`으로 알림을 걸어 보세요.";
+    }
+
+    const byName = Object.fromEntries(stocks.map((s) => [s.name, s]));
+    const now = Date.now();
+    const dayStart = Math.floor((now + IDX_KST_MS) / IDX_DAY_MS) * IDX_DAY_MS - IDX_KST_MS;
+    const lines = [`**⭐ 내 관심종목 (${names.length}/${MAX_WATCH_STOCKS}개)**`];
+    for (const n of names) {
+      const s = byName[n];
+      if (!s) {
+        lines.push(`- ${n} · 상장폐지`);
+        continue;
+      }
+      const pts = getPriceHistory(s);
+      const open = pts.length ? priceAtTime(pts, dayStart) : s.price;
+      const pct = open > 0 ? ((s.price - open) / open) * 100 : 0;
+      const mark = pct > 0 ? UP_MARK : pct < 0 ? DOWN_MARK : "➖";
+      lines.push(`- **${n}**${dangerTag(s.price)} ${s.price.toLocaleString()}해정 ${mark} 오늘 ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`);
+    }
+    if (alerts.length) {
+      lines.push("", `**🔔 가격 알림 (${alerts.length}/${MAX_PRICE_ALERTS}개)**`);
+      for (const a of alerts) {
+        const s = byName[a.stock];
+        const left = s && s.price > 0 ? ` · 현재가 ${s.price.toLocaleString()}해정 (목표까지 ${(((a.price - s.price) / s.price) * 100).toFixed(1)}%)` : " · 상장폐지";
+        lines.push(`- \`${a.id}\` ${alertText(a)}${left}`);
+      }
+    }
+    return lines.join("\n");
+  },
+
+  가격알림: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const name = String(opt(interaction, "종목") ?? "").trim();
+    const price = opt(interaction, "가격");
+    if (!Number.isSafeInteger(price) || price < 1) return "가격은 1 이상의 정수여야 해요.";
+
+    const [stock, w] = await Promise.all([getStock(env, name), getWatch(env, userId)]);
+    if (!stock) return `"${name}" 종목을 찾을 수 없어요.`;
+    if (price === stock.price) return `현재가(${stock.price.toLocaleString()}해정)와 같은 가격이에요. 다른 가격으로 걸어 주세요.`;
+
+    const dir = price > stock.price ? "up" : "down";
+    if (Object.keys(w.alerts).length >= MAX_PRICE_ALERTS) {
+      return `가격 알림은 최대 ${MAX_PRICE_ALERTS}개까지 걸 수 있어요. \`/주식 시장정보 알림취소\`로 정리한 뒤 다시 시도해 주세요.`;
+    }
+    if (Object.values(w.alerts).some((a) => a.stock === name && a.price === price && a.dir === dir)) {
+      return "같은 알림이 이미 걸려 있어요. `/주식 시장정보 관심목록`으로 확인해 보세요.";
+    }
+
+    const id = newOrderId(w.alerts);
+    w.alerts[id] = { stock: name, price, dir, at: Date.now() };
+    const added = !w.stocks[name] && Object.keys(w.stocks).length < MAX_WATCH_STOCKS;
+    if (added) w.stocks[name] = Date.now();
+    await saveWatch(env, userId, w);
+
+    const gap = ((price - stock.price) / stock.price) * 100;
+    return [
+      `🔔 알림을 걸었어요. \`${id}\``,
+      alertText(w.alerts[id]),
+      `현재가 ${stock.price.toLocaleString()}해정 (목표까지 ${gap > 0 ? "+" : ""}${gap.toFixed(1)}%)${added ? " · 관심종목에도 담았어요." : ""}`,
+      "시세가 변동될 때(평소 변동, 급등락)마다 확인하고, 도달하면 DM으로 한 번 알려드려요. DM을 받을 수 있게 서버 개인 메시지 허용을 켜 두세요.",
+    ].join("\n");
+  },
+
+  알림취소: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const target = String(opt(interaction, "알림") ?? "").trim();
+    const w = await getWatch(env, userId);
+    const ids = target === "all" ? Object.keys(w.alerts) : w.alerts[target] ? [target] : [];
+    if (ids.length === 0) return "해당 알림을 찾지 못했어요. 칸을 눌러 목록에서 골라 주세요.";
+    const removed = ids.map((id) => ({ id, ...w.alerts[id] }));
+    for (const id of ids) delete w.alerts[id];
+    await saveWatch(env, userId, w);
+    return [`**가격 알림 ${removed.length}건을 취소했어요.**`, ...removed.map((a) => `- \`${a.id}\` ${alertText(a)}`)].join("\n");
+  },
+
+  종목정보: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const name = String(opt(interaction, "종목") ?? "").trim();
+    const [stock, user, newsDoc] = await Promise.all([getStock(env, name), getUser(env, userId), getDoc(env, NEWS_PATH).catch(() => null)]);
+    if (!stock) return `"${name}" 종목을 찾을 수 없어요. (상장폐지된 종목은 \`/주식 시장정보 상장폐지종류\`에서 볼 수 있어요)`;
+    return stockInfoText(stock, user.holdings[name] || 0, (newsDoc?.divMods || {})[name] ?? 1);
+  },
   봇현황: async (_interaction, env) => getCrowdStats(env),
 
   랭킹: async (_interaction, env) => {
@@ -5633,6 +6113,78 @@ export const handlers = {
 
   예약매수: (interaction, env) => reserveOrder("buy", interaction, env),
   예약매도: (interaction, env) => reserveOrder("sell", interaction, env),
+
+  자동매도: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const name = String(opt(interaction, "종목") ?? "").trim();
+    const stopPct = opt(interaction, "손절");
+    const takePct = opt(interaction, "익절");
+    const hasStop = stopPct !== undefined && stopPct !== null;
+    const hasTake = takePct !== undefined && takePct !== null;
+
+    if (!hasStop && !hasTake) return "손절(%) 또는 익절(%) 중 하나는 꼭 입력해 주세요. 예: 손절 20, 익절 30";
+    if (hasStop && (!Number.isSafeInteger(stopPct) || stopPct < 1 || stopPct > 99)) return "손절은 1~99 사이의 정수(%)여야 해요.";
+    if (hasTake && (!Number.isSafeInteger(takePct) || takePct < 1 || takePct > 1000)) return "익절은 1~1000 사이의 정수(%)여야 해요.";
+
+    const [stock, user, items] = await Promise.all([getStock(env, name), getUser(env, userId), getOrderItems(env, userId)]);
+    if (!stock) return `"${name}" 종목을 찾을 수 없어요.`;
+
+    const held = user.holdings[name] || 0;
+    if (held < 1) return `${name} 종목을 가지고 있지 않아요. 보유한 종목만 손절/익절을 걸 수 있어요.`;
+
+    const qtyInput = opt(interaction, "수량");
+    const qty = qtyInput === undefined || qtyInput === null ? held : qtyInput;
+    if (!Number.isSafeInteger(qty) || qty < 1) return "수량은 1 이상의 정수여야 해요.";
+
+    const already = reservedSellQty(items)[name] || 0;
+    if (held - already < qty) {
+      return `걸 수 있는 보유 수량이 부족해요. (보유 ${held.toLocaleString()}주 · 이미 매도 예약 ${already.toLocaleString()}주)`;
+    }
+
+    const need = (hasStop ? 1 : 0) + (hasTake ? 1 : 0);
+    const current = Object.keys(items).length;
+    if (current + need > MAX_ORDERS_PER_USER) {
+      return `예약은 최대 ${MAX_ORDERS_PER_USER}개까지 걸 수 있어요. (지금 ${current}개 + 이번 ${need}개) \`/주식 예약주문 예약취소\`로 정리한 뒤 다시 시도해 주세요.`;
+    }
+
+    // 기준은 내 평균 매수가
+    const avg = Math.round(costOf(user, name, stock.price) / held);
+    const stopPrice = hasStop ? Math.max(1, Math.round(avg * (1 - stopPct / 100))) : null;
+    const takePrice = hasTake ? Math.round(avg * (1 + takePct / 100)) : null;
+
+    const errors = [];
+    if (hasStop && stock.price <= stopPrice) {
+      errors.push(`현재가(${stock.price.toLocaleString()}해정)가 이미 손절가(${stopPrice.toLocaleString()}해정) 이하예요. 바로 \`/주식 매도\`를 쓰거나 손절 %를 줄여 주세요.`);
+    }
+    if (hasTake && stock.price >= takePrice) {
+      errors.push(`현재가(${stock.price.toLocaleString()}해정)가 이미 익절가(${takePrice.toLocaleString()}해정) 이상이에요. 바로 \`/주식 매도\`를 쓰거나 익절 %를 높여 주세요.`);
+    }
+    if (errors.length) return errors.join("\n");
+
+    const next = { ...items };
+    const link = newOrderId(next);
+    const made = [];
+    const base = Date.now();
+    if (hasStop) {
+      const id = newOrderId(next);
+      next[id] = { stock: name, side: "sell", dir: "down", kind: "손절", link, qty, price: stopPrice, at: base };
+      made.push({ id, order: next[id], pct: `-${stopPct}%` });
+    }
+    if (hasTake) {
+      const id = newOrderId(next);
+      next[id] = { stock: name, side: "sell", kind: "익절", link, qty, price: takePrice, at: base + 1 };
+      made.push({ id, order: next[id], pct: `+${takePct}%` });
+    }
+    await saveOrderItems(env, userId, next);
+
+    return [
+      `🛡️ **${name}** ${qty.toLocaleString()}주에 자동 매도를 걸었어요.`,
+      `평균 매수가 ${avg.toLocaleString()}해정 · 현재가 ${stock.price.toLocaleString()}해정`,
+      ...made.map((m) => `- \`${m.id}\` ${orderText(m.order)} (평균 매수가 ${m.pct})`),
+      made.length > 1 ? "둘 중 하나가 체결되면 나머지는 자동으로 취소돼요." : "",
+      "시세가 변동될 때(평소 변동, 급등락)마다 확인하고, 체결되면 DM으로 알려드려요. 체결가는 그때의 현재가라서, 급락하면 손절가보다 더 낮게 팔릴 수 있어요.",
+    ].filter(Boolean).join("\n");
+  },
 
   예약목록: async (interaction, env) => {
     const userId = interaction.member.user.id;
