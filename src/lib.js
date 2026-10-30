@@ -985,17 +985,32 @@ export async function delistStock(env, stockName, info) {
     const cost = Number.isFinite(costs[stockName]) ? costs[stockName] : held * lastPrice;
     delete holdings[stockName];
     delete costs[stockName];
-    const realizedProfit = (u.realizedProfit || 0) - cost;
+    // 보험: 기간 안의 보험이 있으면 폐지 순간 들고 있던 수량(최대 가입 수량)만큼 보험금을 줘요
+    const policy = u.insurance && u.insurance[stockName];
+    const insured = policy && policy.expiresAt > Date.now() ? Math.min(policy.qty, held) * policy.payout : 0;
+    const realizedProfit = (u.realizedProfit || 0) - cost + insured;
 
     try {
+      const saved = { holdings, costs, realizedProfit };
+      if (policy) {
+        const rest = { ...u.insurance };
+        delete rest[stockName]; // 폐지된 종목의 보험은 (기간이 끝났어도) 정리
+        saved.insurance = rest;
+      }
+      if (insured > 0) {
+        saved.balance = (u.balance || 0) + insured;
+        saved.insuranceTotal = (u.insuranceTotal || 0) + insured;
+      }
       await Promise.all([
-        setDoc(env, `users/${u.id}`, { holdings, costs, realizedProfit }),
+        setDoc(env, `users/${u.id}`, saved),
         addHistory(
           env,
           u.id,
           `상장폐지: ${stockName} ${held.toLocaleString()}주 소멸 (손실 -${cost.toLocaleString()}해정)`
         ),
       ]);
+      // 같은 기록 문서에 동시에 쓰면 한쪽이 덮어써져서, 보험금 기록은 뒤에 따로 남겨요
+      if (insured > 0) await addHistory(env, u.id, `보험금: +${insured.toLocaleString()}해정 (${stockName} 폐지 보험)`);
       holders.push(u.id);
     } catch (err) {
       console.error(`상장폐지 정산 실패 (${u.id}, ${stockName}):`, err.message);
@@ -1194,7 +1209,7 @@ const collectionOf = (day) => `logs_${day}`;
 export const VIEW_ONLY = new Set([
   "도움말", "주식목록", "그래프", "상장폐지종류", "보유종목", "잔고", "내정보",
   "봇현황", "랭킹", "내역", "예약목록", "보유상품", "알림확인", "채굴정보", "주식상점",
-  "선물목록", "선물설명", "은행", "은행설명", "배당", "공시목록",
+  "선물목록", "선물설명", "은행", "은행설명", "배당", "공시목록", "보험",
 ]);
 
 // 명령어 이름 -> 분류 (관리자 콘솔의 분류 선택칸에 그대로 나와요)
@@ -1204,6 +1219,7 @@ const CATEGORY = {
   구입: "상품구입",
   선물: "선물",
   선물청산: "선물",
+  보험가입: "보험",
   예금: "은행",
   출금: "은행",
   송금: "은행",
@@ -1362,19 +1378,21 @@ export async function checkAttendance(env, userId) {
 // [mining.js]
 // ============================================================
 // ---------- 튜닝 상수 ----------
+const MAX_LEVEL = 15;             // 채굴장 최고 레벨 (이 레벨부터는 더 못 올려요)
+
 const STAMINA_BASE = 10;          // Lv1 최대 체력
-const STAMINA_PER_LEVEL = 2;      // 레벨당 최대 체력 증가량
-const STAMINA_REGEN_MINUTES = 6;  // 체력 1 회복에 걸리는 시간(분)
+const STAMINA_PER_LEVEL = 1;      // 레벨당 최대 체력 증가량
+const STAMINA_REGEN_MINUTES = 10; // 체력 1 회복에 걸리는 시간(분)
 
 const REWARD_BASE_MIN = 15;       // Lv1 채굴 보상 최소
 const REWARD_BASE_MAX = 35;       // Lv1 채굴 보상 최대
-const REWARD_PER_LEVEL = 8;       // 레벨당 보상 증가량(최소/최대 동일하게)
+const REWARD_PER_LEVEL = 2;       // 레벨당 보상 증가량(최소/최대 동일하게)
 
-const UPGRADE_BASE_COST = 500;    // Lv1→2 업그레이드 비용(해정)
-const UPGRADE_COST_GROWTH = 1.6;  // 레벨마다 비용 배율
+const UPGRADE_BASE_COST = 600;    // Lv1→2 업그레이드 비용(해정)
+const UPGRADE_COST_GROWTH = 1.3;  // 레벨마다 비용 배율
 
-const UPGRADE_BASE_COUNT = 15;    // 노가다로 무료 업그레이드하려면 필요한 채굴 횟수(Lv1 기준)
-const UPGRADE_COUNT_GROWTH = 5;   // 레벨마다 필요 횟수 증가량
+const UPGRADE_BASE_COUNT = 30;    // 노가다로 무료 업그레이드하려면 필요한 채굴 횟수(Lv1 기준)
+const UPGRADE_COUNT_GROWTH = 10;  // 레벨마다 필요 횟수 증가량
 
 function staminaMaxFor(level) {
   return STAMINA_BASE + (level - 1) * STAMINA_PER_LEVEL;
@@ -1400,6 +1418,8 @@ function ensureMining(user) {
   if (!user.mining) {
     user.mining = { level: 1, stamina: STAMINA_BASE, staminaAt: Date.now(), count: 0 };
   }
+  // 최고 레벨을 만들기 전에 이미 더 높이 올린 유저는 최고 레벨로 맞춰요
+  if (user.mining.level > MAX_LEVEL) user.mining.level = MAX_LEVEL;
   return user.mining;
 }
 
@@ -1462,7 +1482,9 @@ export async function mineOnce(env, userId) {
       `⛏️ 채굴 완료! +${reward.toLocaleString()}해정`,
       `💰 잔고: ${balanceBefore.toLocaleString()} → **${user.balance.toLocaleString()}해정**`,
       `🔋 체력: ${mining.stamina}/${max}`,
-      `📈 Lv.${mining.level} 진행도: ${mining.count}/${required}회 (채우면 무료 업그레이드 가능)`,
+      mining.level >= MAX_LEVEL
+        ? `🏆 Lv.${mining.level} (최고 레벨)`
+        : `📈 Lv.${mining.level} 진행도: ${mining.count}/${required}회 (채우면 무료 업그레이드 가능)`,
     ].join("\n"),
   };
 }
@@ -1473,6 +1495,11 @@ export async function upgradeMining(env, userId) {
   const mining = regenStamina(ensureMining(user));
   const cost = upgradeCostFor(mining.level);
   const required = upgradeCountFor(mining.level);
+
+  if (mining.level >= MAX_LEVEL) {
+    await saveUser(env, userId, user);
+    return { ok: false, message: `🏆 채굴장이 이미 최고 레벨(Lv.${MAX_LEVEL})이에요!` };
+  }
 
   const canGrind = mining.count >= required;
   const canPay = user.balance >= cost;
@@ -1533,9 +1560,13 @@ export async function getMiningInfo(env, userId) {
     `**⛏️ 채굴장 정보 (Lv.${mining.level})**`,
     `체력: ${mining.stamina}/${max} (${nextIn})`,
     `1회 채굴 보상: ${min.toLocaleString()} ~ ${rewardMax.toLocaleString()}해정`,
-    `다음 업그레이드 (Lv.${mining.level + 1}):`,
-    `- 해정으로: ${cost.toLocaleString()}해정`,
-    `- 노가다로: ${required}회 채굴 (현재 ${mining.count}/${required})`,
+    ...(mining.level >= MAX_LEVEL
+      ? [`🏆 최고 레벨이에요! (Lv.${MAX_LEVEL})`]
+      : [
+          `다음 업그레이드 (Lv.${mining.level + 1}):`,
+          `- 해정으로: ${cost.toLocaleString()}해정`,
+          `- 노가다로: ${required}회 채굴 (현재 ${mining.count}/${required})`,
+        ]),
   ].join("\n");
 }
 
@@ -2871,7 +2902,7 @@ export async function processFutures(env, changes = []) {
 //  - 만기: 잔고 → 예금 순서로 자동 회수. 모자라면 연체, 연체 LIQUIDATE_AFTER_HOURS시간 뒤에는 보유 주식 강제 매도.
 //  - 저장: bank/{유저ID} = { deposit, depositAt, earned, loans: { 번호: 대출 } }
 //    대출 = { principal, unpaid, rate, term, takenAt, due, lastAt, borrowed, warned? }
-export const DEPOSIT_RATE = 0.02; // 예금 일 2% (시장 배율 0.2~2.0배 → 0.4%~4%)
+export const DEPOSIT_RATE = 0.01; // 예금 일 1% (시장 배율 0.2~2.0배 → 0.2%~2%)
 export const LOAN_TERMS = { 1: 0.12, 3: 0.1, 7: 0.08 }; // 기간(일) -> 일 이자율
 export const LOAN_PENALTY_RATE = 0.15; // 연체 시 일 +15%p
 export const LOAN_MIN = 100;
@@ -2885,15 +2916,15 @@ const BANK_HOUR_MS = 60 * 60 * 1000;
 
 // ---------- 시장 금리 (은행 이자 랜덤화) ----------
 // 매시 정각 크론이 배율(0.2~2.0배)을 하나 뽑아서 예금/대출 기준금리에 함께 곱해요.
-//  - 예금 2% 기준 → 0.4%~4.0% 사이에서 움직여요.
+//  - 예금 1% 기준 → 0.2%~2.0% 사이에서 움직여요.
 //  - index: 예금 복리 계산용 누적 지수. 금리가 바뀔 때마다 그 구간만큼 곱해서 쌓아요.
 //    (유저가 오래 안 들어와도 index 비율 하나로 정확히 계산 가능)
 //  - 저장: config/bankRate = { mult, depositRate, loanRates, index, indexAt }
 export const MARKET_RATE_MIN_MULT = 0.2;
 export const MARKET_RATE_MAX_MULT = 2.0;
-// 대출 금리 하한(일): 예금이 가장 높을 때(2% × 2.0배 = 4.0%)보다 항상 비싸게 해서
+// 대출 금리 하한(일): 예금이 가장 높을 때(1% × 2.0배 = 2.0%)보다 항상 비싸게 해서
 // "싸게 빌려서 예금" 차익거래를 막아요. 신용등급 배율까지 곱한 뒤에도 이 아래로는 안 내려가요.
-export const LOAN_RATE_FLOOR = +(DEPOSIT_RATE * MARKET_RATE_MAX_MULT * 1.2).toFixed(4); // 일 4.8%
+export const LOAN_RATE_FLOOR = +(DEPOSIT_RATE * MARKET_RATE_MAX_MULT * 1.2).toFixed(4); // 일 2.4%
 
 const bankRatePath = "config/bankRate";
 
@@ -3643,13 +3674,155 @@ export async function transferMoney(env, fromId, toId, amount, { toIsBot = false
   };
 }
 
+// ---------- 보험 (상장폐지 보험) ----------
+//  - 가지고 있는 종목이 "보험 기간 안에" 상장폐지되면, 가입할 때 정해둔 금액을 보험금으로 받아요.
+//  - 보험금 = 가입 때 현재가 × INSURANCE_COVER_RATE (주당). 폐지 순간 실제로 들고 있는 수량까지만 줘요.
+//    (보험 들고 주식을 팔아버리면 판 만큼은 보험금이 없어요)
+//  - 보험료는 "폐지될 확률 × 보험금 × INSURANCE_LOAD"로 계산해요. 확률은 시세 변동 시뮬레이션으로 뽑은 표예요.
+//    싼 종목일수록, 기간이 길수록 비싸요. 위기 종목(300해정 이하)은 가입할 수 없어요.
+//  - 종목 하나에 보험은 1개, 한 사람이 동시에 INSURANCE_MAX개까지. 보험료는 돌려받지 못해요.
+//  - 저장: users/{id}.insurance = { 종목이름: { qty, payout, premium, term, expiresAt, boughtAt } }
+export const INSURANCE_COVER_RATE = 0.5; // 보험금 = 가입 때 현재가의 50%
+export const INSURANCE_LOAD = 1.15; // 보험료 = 공정한 값 × 1.15 (보험사 몫)
+export const INSURANCE_MAX = 5; // 동시에 가질 수 있는 보험 수
+export const INSURANCE_TERMS = [1, 3]; // 고를 수 있는 기간(일)
+// 가격대별 "그 기간 안에 폐지될 확률" (평소 변동 ±20%, 급등락 -80~+120% 시뮬레이션 기준)
+const INSURANCE_PRICE_POINTS = [350, 500, 1000, 2000, 5000];
+const INSURANCE_PROB = {
+  1: [0.476, 0.381, 0.212, 0.112, 0.044],
+  3: [0.774, 0.72, 0.596, 0.472, 0.306],
+};
+
+function insuranceProb(price, term) {
+  const probs = INSURANCE_PROB[term] || INSURANCE_PROB[1];
+  const xs = INSURANCE_PRICE_POINTS;
+  if (price <= xs[0]) return probs[0];
+  if (price >= xs[xs.length - 1]) return probs[probs.length - 1]; // 더 비싼 종목도 가장 낮은 값으로(보험사에 유리하게)
+  let i = 0;
+  while (price > xs[i + 1]) i++;
+  const t = (Math.log(price) - Math.log(xs[i])) / (Math.log(xs[i + 1]) - Math.log(xs[i]));
+  return probs[i] + (probs[i + 1] - probs[i]) * t;
+}
+
+// 주당 견적: { payout: 주당 보험금, perShare: 주당 보험료 }
+export function insuranceQuote(price, term) {
+  const payout = Math.floor(price * INSURANCE_COVER_RATE);
+  const chance = Math.min(0.9, insuranceProb(price, term) * INSURANCE_LOAD); // 보험료가 보험금의 90%를 넘지 않게
+  return { payout, perShare: Math.max(1, Math.ceil(payout * chance)) };
+}
+
+// 만료된 보험을 걷어낸 새 지도 (원본은 건드리지 않아요)
+function activeInsurance(user, now = Date.now()) {
+  const out = {};
+  for (const [name, p] of Object.entries(user.insurance || {})) {
+    if (p && p.expiresAt > now) out[name] = p;
+  }
+  return out;
+}
+
+function leftText(ms) {
+  const h = Math.max(0, Math.ceil(ms / (60 * 60 * 1000)));
+  if (h < 24) return `${h}시간`;
+  return h % 24 === 0 ? `${h / 24}일` : `${Math.floor(h / 24)}일 ${h % 24}시간`;
+}
+
+export async function buyInsurance(env, userId, stockName, qty, term) {
+  const name = String(stockName ?? "").trim();
+  if (!INSURANCE_TERMS.includes(Number(term))) {
+    return { ok: false, message: `보험 기간은 ${INSURANCE_TERMS.map((t) => `${t}일`).join(" / ")} 중에서 골라 주세요.` };
+  }
+  term = Number(term);
+
+  const [user, stocks] = await Promise.all([getUser(env, userId), listStocks(env)]);
+  const stock = stocks.find((s) => s.name === name);
+  if (!stock) return { ok: false, message: `"${name}" 종목을 찾을 수 없어요.` };
+
+  const held = user.holdings[name] || 0;
+  if (held <= 0) return { ok: false, message: `${name} 주식을 가지고 있지 않아요. 보험은 보유한 종목에만 들 수 있어요.` };
+  if (stock.price <= DANGER_PRICE) {
+    return { ok: false, message: `${DANGER_MARK} ${name}은(는) 위기 종목(${DANGER_PRICE.toLocaleString()}해정 이하)이라 보험에 들 수 없어요.` };
+  }
+
+  const covered = qty === undefined || qty === null ? held : Number(qty);
+  if (!Number.isInteger(covered) || covered < 1) return { ok: false, message: "수량은 1 이상의 정수로 적어주세요." };
+  if (covered > held) return { ok: false, message: `${name}을(를) ${held.toLocaleString()}주만 가지고 있어서 ${covered.toLocaleString()}주는 보장할 수 없어요.` };
+
+  const now = Date.now();
+  const active = activeInsurance(user, now);
+  if (active[name]) {
+    return { ok: false, message: `${name}은(는) 이미 보험이 있어요. (${leftText(active[name].expiresAt - now)} 남음) 끝난 뒤에 다시 들 수 있어요.` };
+  }
+  if (Object.keys(active).length >= INSURANCE_MAX) {
+    return { ok: false, message: `보험은 동시에 ${INSURANCE_MAX}개까지 가질 수 있어요. ${commandPath("보험")}에서 내 보험을 확인해 보세요.` };
+  }
+
+  const { payout, perShare } = insuranceQuote(stock.price, term);
+  const premium = perShare * covered;
+  if (user.balance < premium) {
+    return { ok: false, message: `보험료가 모자라요. 필요 ${premium.toLocaleString()}해정 / 보유 ${user.balance.toLocaleString()}해정 (수량을 줄이면 싸져요)` };
+  }
+
+  const balanceBefore = user.balance;
+  user.balance -= premium;
+  active[name] = { qty: covered, payout, premium, term, expiresAt: now + term * DAY_MS, boughtAt: now };
+  user.insurance = active;
+
+  await Promise.all([
+    saveUser(env, userId, user),
+    addHistory(env, userId, `보험 가입: ${name} ${covered.toLocaleString()}주 ${term}일 (보험료 -${premium.toLocaleString()}해정)`),
+  ]);
+
+  return {
+    ok: true,
+    message: [
+      `🛡️ **${name}** 폐지 보험에 가입했어요!`,
+      `- 보장: ${covered.toLocaleString()}주 · ${term}일 (${leftText(term * DAY_MS)} 뒤 만료)`,
+      `- 폐지되면 받는 보험금: 주당 ${payout.toLocaleString()}해정 → 최대 **${(payout * covered).toLocaleString()}해정**`,
+      `- 보험료: ${premium.toLocaleString()}해정 (주당 ${perShare.toLocaleString()}해정)`,
+      balanceLine(balanceBefore, user.balance),
+    ].join("\n"),
+  };
+}
+
+export async function insuranceInfo(env, userId) {
+  const [user, stocks] = await Promise.all([getUser(env, userId), listStocks(env)]);
+  const now = Date.now();
+  const active = activeInsurance(user, now);
+  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+
+  const lines = [
+    "**🛡️ 상장폐지 보험**",
+    `가진 종목이 보험 기간 안에 상장폐지되면 **가입할 때 현재가의 ${pctText(INSURANCE_COVER_RATE)}**를 주당 보험금으로 받아요.`,
+    `싼 종목일수록, 기간이 길수록 보험료가 비싸요. 위기 종목(⚠️ ${DANGER_PRICE.toLocaleString()}해정 이하)은 못 들어요.`,
+    `종목마다 1개씩, 동시에 ${INSURANCE_MAX}개까지 · 기간 ${INSURANCE_TERMS.map((t) => `${t}일`).join(" / ")} · 보험료는 돌려받지 못해요.`,
+    `가입: \`${commandPath("보험가입")} 종목 기간\` (수량을 안 적으면 가진 만큼 전부)`,
+    "",
+    "**내 보험**",
+  ];
+
+  const entries = Object.entries(active);
+  if (entries.length === 0) {
+    lines.push("가입한 보험이 없어요.");
+  } else {
+    for (const [name, p] of entries) {
+      const price = priceMap[name];
+      lines.push(
+        `- ${name} ${p.qty.toLocaleString()}주 · ${p.term}일 · ${leftText(p.expiresAt - now)} 남음 · 최대 ${(p.qty * p.payout).toLocaleString()}해정 (현재가 ${price === undefined ? "?" : price.toLocaleString()}해정)`
+      );
+    }
+  }
+
+  if (user.insuranceTotal) lines.push("", `💰 지금까지 받은 보험금 합계: ${Number(user.insuranceTotal).toLocaleString()}해정`);
+  return lines.join("\n");
+}
+
 // ---------- 배당금 (보유 종목 가치의 일정 %를 매일 지급) ----------
 //  - 매일 한국시간 DIVIDEND_HOUR시 이후 첫 시세 변동(크론) 때 한 번만 지급해요. (지급 기록: config/dividend)
 //  - 지급 시점에 가지고 있는 주식 기준으로, 종목 가치(가격×수량)의 DIVIDEND_RATE만큼 받아요.
 //  - 위기 종목(300해정 이하)은 무배당이에요. 한 명이 하루에 받는 합계는 DIVIDEND_MAX_PER_USER까지예요.
-export const DIVIDEND_RATE = 0.003; // 하루 0.3%
+export const DIVIDEND_RATE = 0.01; // 하루 1%
 export const DIVIDEND_HOUR = 9; // 한국시간 오전 9시
-export const DIVIDEND_MAX_PER_USER = 5000;
+export const DIVIDEND_MAX_PER_USER = 10000;
 const DIVIDEND_PATH = "config/dividend";
 
 export const dividendOf = (price, qty) => (price > DANGER_PRICE ? Math.floor(price * qty * DIVIDEND_RATE) : 0);
@@ -4278,6 +4451,16 @@ export const commandDefinitions = [
       { name: "금액", description: "갚을 해정 (안 적으면 전액)", type: 4, required: false, autocomplete: true, min_value: 1 },
     ],
   },
+  { name: "보험", description: "상장폐지 보험 설명과 내가 가입한 보험을 봅니다." },
+  {
+    name: "보험가입",
+    description: "가진 종목이 상장폐지되면 보험금을 받는 보험에 가입합니다. (보험료는 돌려받지 못해요)",
+    options: [
+      { name: "종목", description: "보험에 들 종목 (가진 종목만, 칸을 누르면 보험료가 떠요)", type: 3, required: true, autocomplete: true },
+      { name: "기간", description: "보험 기간", type: 4, required: true, choices: [{ name: "1일", value: 1 }, { name: "3일", value: 3 }] },
+      { name: "수량", description: "보장할 주식 수 (안 적으면 가진 만큼 전부)", type: 4, required: false, min_value: 1 },
+    ],
+  },
   { name: "주식상점", description: "구입할 수 있는 상품 목록을 모두에게 보여줍니다. (가격 낮은 순, 알림 없이 표시)" },
   {
     name: "구입",
@@ -4372,7 +4555,7 @@ export const ROOT_COMMAND = "주식";
 // 묶음 이름 -> { 설명, 안에 들어갈 명령어 이름들 }. 여기에 없는 명령어는 /주식 바로 아래에 붙어요.
 export const COMMAND_GROUPS = {
   예약주문: { description: "가격을 정해두고 자동으로 사고파는 예약 주문", commands: ["예약매수", "예약매도", "예약목록", "예약취소"] },
-  은행업무: { description: "예금·대출·송금 같은 은행 업무", commands: ["은행", "은행설명", "배당", "예금", "출금", "송금", "대출", "상환"] },
+  은행업무: { description: "예금·대출·송금·보험 같은 은행 업무", commands: ["은행", "은행설명", "배당", "예금", "출금", "송금", "대출", "상환", "보험", "보험가입"] },
   선물거래: { description: "롱/숏 + 배율로 하는 선물 거래", commands: ["선물", "선물목록", "선물청산", "선물설명"] },
   채굴장: { description: "채굴로 해정 벌기", commands: ["채굴", "채굴정보", "채굴업그레이드"] },
   관리: { description: "[관리자] 종목·시세·공시 관리", commands: ["종목추가", "종목삭제", "시세설정", "출석설정", "공시", "공시설정"] },
@@ -4753,6 +4936,19 @@ export async function autocomplete(interaction, env) {
               value: s.name,
             };
           }),
+        keyword
+      );
+    }
+
+    if (command === "보험가입") {
+      // 가진 종목만, 위기 종목 제외. 주당 보험료(1일/3일)를 같이 보여줘요
+      return textChoices(
+        stocks
+          .filter((s) => (user.holdings[s.name] || 0) > 0 && s.price > DANGER_PRICE)
+          .map((s) => ({
+            label: `${s.name} (보유 ${user.holdings[s.name].toLocaleString()}주 · ${s.price.toLocaleString()}해정 · 주당 보험료 1일 ${insuranceQuote(s.price, 1).perShare.toLocaleString()} / 3일 ${insuranceQuote(s.price, 3).perShare.toLocaleString()})`,
+            value: s.name,
+          })),
         keyword
       );
     }
@@ -5548,6 +5744,11 @@ export const handlers = {
     const toIsBot = !!interaction.data.resolved?.users?.[toId]?.bot;
     return (await transferMoney(env, interaction.member.user.id, toId, opt(interaction, "금액"), { toIsBot })).message;
   },
+
+  보험: async (interaction, env) => insuranceInfo(env, interaction.member.user.id),
+
+  보험가입: async (interaction, env) =>
+    (await buyInsurance(env, interaction.member.user.id, opt(interaction, "종목"), opt(interaction, "수량"), opt(interaction, "기간"))).message,
 
   대출: async (interaction, env) =>
     (await takeLoan(env, interaction.member.user.id, opt(interaction, "금액"), opt(interaction, "기간"))).message,
