@@ -48,6 +48,8 @@ const SILENT_COMMANDS = new Set(["도움말", "랭킹", "지수", "종목정보"
 // 끝나는 대로 결과를 채워요. (디스코드는 3초 안에 첫 응답이 없으면 "응답하지 않았어요"를 띄워요)
 const DEFER_AFTER_MS = 2000;
 
+export const config = { maxDuration: 60 };
+
 export default { fetch: handler };
 
 // content: 문자열, 또는 { content?, embeds? } 같은 객체(그래프처럼 이미지 임베드를 보낼 때)

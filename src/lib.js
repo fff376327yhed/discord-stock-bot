@@ -2,6 +2,7 @@
 // (예전 src/*.js 12개를 한 파일로 합쳤어요. 파일 안 순서는 의존 순서예요.)
 // 외국자산(코인·해외주식) 시세/가격 계산은 별도 파일(foreign.js)에 있어요. (이 파일을 가져오지 않는 독립 모듈)
 import { isForeign, foreignIcon, fetchCoinQuotes, fetchUsQuotes, usSymbolOf, buildForeignUpdate, isSuspectQuote, getUsMarketStatus, closedMessage } from "./foreign.js";
+import { askGuide } from "./guidebot.js";
 
 // ============================================================
 // [env.js]
@@ -1958,7 +1959,7 @@ const collectionOf = (day) => `logs_${day}`;
 export const VIEW_ONLY = new Set([
   "도움말", "주식목록", "그래프", "상장폐지종류", "보유종목", "잔고", "내정보",
   "지수", "종목정보", "관심목록", "봇현황", "랭킹", "내역", "예약목록", "보유상품", "알림확인", "채굴정보", "주식상점",
-  "선물목록", "선물설명", "은행", "은행설명", "배당", "공시목록", "보험", "환율",
+  "선물목록", "선물설명", "은행", "은행설명", "배당", "공시목록", "보험", "환율", "주식질문",
 ]);
 
 // 명령어 이름 -> 분류 (관리자 콘솔의 분류 선택칸에 그대로 나와요)
@@ -6070,6 +6071,11 @@ export const commandDefinitions = [
     ],
   },
   { name: "공시목록", description: "최근 올라온 공시와 그 결과를 봅니다." },
+  {
+    name: "주식질문",
+    description: "해정 주식 게임에 대해 AI에게 물어봅니다. (가이드 내용 기반)",
+    options: [{ name: "질문", description: "궁금한 내용 (예: 선물 배율은 어떻게 정해져요?)", type: 3, required: true, max_length: 300 }],
+  },
 ];
 
 // ---- 1-2) 명령어 이름 ----
@@ -6994,6 +7000,9 @@ function bankHelpText(rate) {
   ].join("\n");
 }
 
+const askCooldown = new Map(); // 유저ID -> 마지막 질문 시각 (서버 인스턴스 기준의 간단한 제한)
+const ASK_COOLDOWN_MS = 10_000;
+
 export const handlers = {
   // 도움말은 글자가 2000자를 넘어서 일반 메시지로는 못 보내요. 임베드(4096자까지)로 보내요.
   도움말: async () => ({ embeds: [{ description: helpText().slice(0, 4096), color: 0x5865f2 }] }),
@@ -7621,6 +7630,22 @@ export const handlers = {
   },
 
   공시목록: async (_interaction, env) => newsListText(env),
+
+  주식질문: async (interaction) => {
+    const userId = interaction.member.user.id;
+    const now = Date.now();
+    const wait = (askCooldown.get(userId) || 0) + ASK_COOLDOWN_MS - now;
+    if (wait > 0) return `질문은 ${Math.ceil(wait / 1000)}초 뒤에 다시 할 수 있어요.`;
+    askCooldown.set(userId, now);
+    if (askCooldown.size > 2000) askCooldown.clear();
+    const question = String(opt(interaction, "질문") ?? "").trim();
+    if (!question) return "질문을 입력해 주세요.";
+    try {
+      return (await askGuide(question)).slice(0, 1900);
+    } catch (err) {
+      return err.message; // askGuide가 사용자에게 보여줄 문장으로 던져요
+    }
+  },
 
   은행설명: async (interaction, env) => ({ embeds: [{ description: bankHelpText(await getBankRate(env)).slice(0, 4096), color: 0x5865f2 }] }),
 
