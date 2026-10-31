@@ -777,6 +777,8 @@ calc();calcFx();
 <script>
 (function(){
 var $=function(i){return document.getElementById(i)},msgs=$('msgs'),inp=$('askIn'),btn=$('askBtn'),chips=$('chips'),cw=$('cw'),fab=$('chatFab'),hist=[],busy=false;
+// 봇 서버(Vercel) 주소
+var API_URL='https://discord-stock-bot-mauve.vercel.app/api/ask';
 var HI='안녕하세요! 해정 주식 가이드 봇이에요 📈\n수수료, 급등락, 상장폐지, 선물, 은행 등 궁금한 걸 편하게 물어보세요.';
 var QS=['급등락은 언제 와요?','수수료랑 거래세는 얼마예요?','상장폐지되면 어떻게 돼요?','선물 강제청산이 뭐예요?','대출은 얼마까지 받아요?','돈은 어떻게 벌어요?'];
 function inline(p,t){t.split(/(\*\*[^*]+\*\*|`[^`]+`)/).forEach(function(s){if(!s)return;var e;
@@ -798,7 +800,8 @@ async function send(q){
  hist.push({role:'user',content:q});add('u',q);
  var el=add('a','');el.classList.add('wait');var acc='';
  try{
-  var res=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:hist.slice(-11)})});
+  if(API_URL.indexOf('여기에')>=0)throw new Error('봇 서버 주소가 아직 설정되지 않았어요. (관리자: guide.html의 API_URL을 바꿔주세요)');
+  var res=await fetch(API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:hist.slice(-11)})});
   if(!res.ok){var j={};try{j=await res.json()}catch(e){}throw new Error(j.error||('서버 오류('+res.status+')'))}
   var rd=res.body.getReader(),dec=new TextDecoder();
   for(;;){var r=await rd.read();if(r.done)break;acc+=dec.decode(r.value,{stream:true});el.classList.remove('wait');fill(el,acc);msgs.scrollTop=msgs.scrollHeight}

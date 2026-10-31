@@ -3,7 +3,10 @@
 // - 답변은 글자가 만들어지는 대로 바로 흘려보내요(스트리밍). 응답은 순수 텍스트예요.
 // AI: Google Gemini API (무료 키: https://aistudio.google.com 에서 발급)
 // 필요한 환경변수(Vercel): GEMINI_API_KEY
-// 선택: GEMINI_MODEL (기본 gemini-2.5-flash), GUIDE_URL (가이드 주소를 직접 지정할 때)
+// 선택: GEMINI_MODEL (기본 gemini-2.5-flash)
+//       ALLOWED_ORIGIN (가이드가 올라간 사이트 주소, 기본 https://fff376327yhed.github.io)
+//       GUIDE_URL (가이드 파일 전체 주소, 기본 ALLOWED_ORIGIN + /guide.html)
+// 가이드(GitHub Pages)와 이 서버(Vercel)가 서로 다른 주소라서 CORS 허용이 필요해요.
 
 export const config = { maxDuration: 60 };
 
@@ -14,11 +17,19 @@ const MAX_CHARS = 600; // 질문 한 번의 최대 글자 수
 const RATE_LIMIT = { max: 10, windowMs: 60_000 }; // IP당 1분에 10번 (서버 한 대 기준의 간단한 제한)
 const GUIDE_TTL_MS = 10 * 60_000; // 가이드 본문 캐시 10분
 
+const ORIGIN = (process.env.ALLOWED_ORIGIN || "https://fff376327yhed.github.io").replace(/\/$/, "");
+const CORS = {
+  "Access-Control-Allow-Origin": ORIGIN,
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+  Vary: "Origin",
+};
+
 const hits = new Map();
 let guideCache = { text: "", at: 0 };
 
 function json(body, status = 200) {
-  return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
+  return Response.json(body, { status, headers: { "Cache-Control": "no-store", ...CORS } });
 }
 
 function rateLimited(ip) {
@@ -48,7 +59,7 @@ function htmlToText(html) {
 
 async function loadGuide(request) {
   if (guideCache.text && Date.now() - guideCache.at < GUIDE_TTL_MS) return guideCache.text;
-  const url = process.env.GUIDE_URL || new URL("/guide.html", request.url).toString();
+  const url = process.env.GUIDE_URL || `${ORIGIN}/guide.html`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`가이드를 읽지 못했어요(${res.status})`);
   guideCache = { text: htmlToText(await res.text()), at: Date.now() };
@@ -65,6 +76,7 @@ const RULES = `당신은 "해정 주식" 디스코드 주식 게임의 가이드
 
 export default {
   fetch: async function handler(request) {
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
     if (request.method !== "POST") return json({ error: "POST만 지원해요." }, 405);
 
     const key = process.env.GEMINI_API_KEY;
@@ -170,7 +182,7 @@ export default {
     });
 
     return new Response(stream, {
-      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Accel-Buffering": "no" },
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Accel-Buffering": "no", ...CORS },
     });
   },
 };
