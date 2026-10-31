@@ -437,7 +437,8 @@ export function maxBuyQty(balance, price) {
 export function previewBuy(user, stock, qty) {
   const fee = tradeFee(stock.price * qty);
   const cost = stock.price * qty + fee;
-  return { ok: user.balance >= cost, cost, fee, after: user.balance - cost };
+  const have = isForeign(stock) ? user.usd || 0 : user.balance; // 외국자산은 달러(센트)로 계산
+  return { ok: have >= cost, cost, fee, after: have - cost };
 }
 
 // 매도 미리보기 (저장 안 함): 얼마 들어오고, 이득/손해가 얼마인지
@@ -448,7 +449,8 @@ export function previewSell(user, stock, qty) {
   const basis = Math.round((prevCost * qty) / held);
   const fee = tradeFee(stock.price * qty);
   const earned = stock.price * qty - fee; // 수수료를 뺀 실수령액
-  return { ok: true, held, earned, fee, basis, profit: earned - basis, after: user.balance + earned };
+  const have = isForeign(stock) ? user.usd || 0 : user.balance;
+  return { ok: true, held, earned, fee, basis, profit: earned - basis, after: have + earned };
 }
 
 // ---------- 종목 ----------
@@ -661,12 +663,13 @@ export async function removeProduct(env, name) {
 export async function getUser(env, userId) {
   let user = await getDoc(env, `users/${userId}`);
   if (!user) {
-    user = { balance: STARTING_BALANCE, holdings: {}, items: {}, costs: {} };
+    user = { balance: STARTING_BALANCE, holdings: {}, items: {}, costs: {}, usd: 0 };
     await setDoc(env, `users/${userId}`, user);
   }
   if (!user.holdings) user.holdings = {};
   if (!user.items) user.items = {};
   if (!user.costs) user.costs = {};
+  if (!Number.isFinite(user.usd)) user.usd = 0;
   return user;
 }
 
@@ -752,36 +755,43 @@ export async function buyStock(env, userId, stockName, qty) {
   if (closed) return { ok: false, message: closed };
 
   const user = await getUser(env, userId);
+  const usd = isForeign(stock); // 외국자산은 달러(센트)로 결제
+  const have = usd ? user.usd || 0 : user.balance;
   const fee = tradeFee(stock.price * qty);
   const cost = stock.price * qty + fee; // 수수료 포함
-  if (user.balance < cost) {
-    return { ok: false, message: `잔고가 부족해요. (필요: ${cost.toLocaleString()}해정 = 주식 ${(cost - fee).toLocaleString()} + 수수료 ${fee.toLocaleString()}, 보유: ${user.balance.toLocaleString()}해정)` };
+  if (have < cost) {
+    return {
+      ok: false,
+      message: `${usd ? "달러가" : "잔고가"} 부족해요. (필요: ${moneyOf(stock, cost)} = 주식 ${moneyOf(stock, cost - fee)} + 수수료 ${moneyOf(stock, fee)}, 보유: ${moneyOf(stock, have)})${usd ? "\n💡 `/환전`으로 해정을 달러로 바꿀 수 있어요." : ""}`,
+    };
   }
 
   // 기존 보유분의 원가를 먼저 구한 뒤(수량 늘리기 전에) 이번 매수 금액을 더함
   const prevCost = costOf(user, stockName, stock.price);
-  const balanceBefore = user.balance;
+  const balanceBefore = have;
 
-  user.balance -= cost;
+  if (usd) user.usd = have - cost;
+  else user.balance -= cost;
   user.holdings[stockName] = (user.holdings[stockName] || 0) + qty;
   user.costs[stockName] = prevCost + cost;
 
   const totalQty = user.holdings[stockName];
   const avg = Math.round(user.costs[stockName] / totalQty);
+  const after = usd ? user.usd : user.balance;
 
-  const summary = `${stockName} ${qty}주 매수 완료 (-${cost.toLocaleString()}해정, 수수료 ${fee.toLocaleString()} 포함)`;
+  const summary = `${stockName} ${qty}주 매수 완료 (-${moneyOf(stock, cost)}, 수수료 ${moneyOf(stock, fee)} 포함)`;
   // 저장과 기록을 동시에 처리해서 응답 시간을 늘리지 않음
   await Promise.all([
     saveUser(env, userId, user),
-    addHistory(env, userId, `매수: ${summary} → 잔고 ${user.balance.toLocaleString()}해정`),
+    addHistory(env, userId, `매수: ${summary} → ${usd ? "달러" : "잔고"} ${moneyOf(stock, after)}`),
   ]);
 
   return {
     ok: true,
     message: [
       summary,
-      balanceLine(balanceBefore, user.balance),
-      `📊 평균 매수가: ${avg.toLocaleString()}해정 (보유 ${totalQty.toLocaleString()}주)`,
+      usd ? usdLine(balanceBefore, after) : balanceLine(balanceBefore, after),
+      `📊 평균 매수가: ${moneyOf(stock, avg)} (보유 ${totalQty.toLocaleString()}주)`,
     ].join("\n"),
     user,
   };
@@ -799,13 +809,14 @@ export async function sellStock(env, userId, stockName, qty) {
     return { ok: false, message: `보유 수량이 부족해요. (보유: ${held}주)` };
   }
 
+  const usd = isForeign(stock);
   // 팔 수량만큼의 매수 원가(평균 매수가 기준)를 계산해서 이득/손해를 구함
   const prevCost = costOf(user, stockName, stock.price);
   const basis = Math.round((prevCost * qty) / held);
   const fee = tradeFee(stock.price * qty);
   const earned = stock.price * qty - fee; // 수수료를 뺀 실수령액
   const profit = earned - basis;
-  const balanceBefore = user.balance;
+  const balanceBefore = usd ? user.usd || 0 : user.balance;
 
   user.holdings[stockName] = held - qty;
   if (user.holdings[stockName] === 0) {
@@ -814,25 +825,29 @@ export async function sellStock(env, userId, stockName, qty) {
   } else {
     user.costs[stockName] = prevCost - basis;
   }
-  user.balance += earned;
-  user.realizedProfit = (user.realizedProfit || 0) + profit;
+  if (usd) {
+    const fxRate = (await getFxRate(env)).rate;
+    user.usd = balanceBefore + earned;
+    user.realizedProfit = (user.realizedProfit || 0) + Math.round((profit * fxRate) / 100); // 실현손익은 해정으로 환산
+  } else {
+    user.balance += earned;
+    user.realizedProfit = (user.realizedProfit || 0) + profit;
+  }
+  const after = usd ? user.usd : user.balance;
+  const pl = usd ? profitUsdLabel(profit, basis) : profitLabel(profit, basis);
 
-  const summary = `${stockName} ${qty}주 매도 완료 (+${earned.toLocaleString()}해정, 수수료 ${fee.toLocaleString()} 차감)`;
+  const summary = `${stockName} ${qty}주 매도 완료 (+${moneyOf(stock, earned)}, 수수료 ${moneyOf(stock, fee)} 차감)`;
   await Promise.all([
     saveUser(env, userId, user),
-    addHistory(
-      env,
-      userId,
-      `매도: ${summary} · ${profitLabel(profit, basis)} → 잔고 ${user.balance.toLocaleString()}해정`
-    ),
+    addHistory(env, userId, `매도: ${summary} · ${pl} → ${usd ? "달러" : "잔고"} ${moneyOf(stock, after)}`),
   ]);
 
   return {
     ok: true,
     message: [
       summary,
-      balanceLine(balanceBefore, user.balance),
-      `📊 이번 매도 손익: ${profitLabel(profit, basis)}`,
+      usd ? usdLine(balanceBefore, after) : balanceLine(balanceBefore, after),
+      `📊 이번 매도 손익: ${pl}`,
     ].join("\n"),
     user,
   };
@@ -889,39 +904,59 @@ export async function buyStocks(env, userId, items) {
   }
 
   const rows = items.map((it, i) => {
-    const principal = stocks[i].price * it.qty;
+    const stock = stocks[i];
+    const principal = stock.price * it.qty;
     const fee = tradeFee(principal);
-    return { name: it.name, qty: it.qty, price: stocks[i].price, fee, cost: principal + fee }; // cost는 수수료 포함
+    return { name: it.name, qty: it.qty, stock, usd: isForeign(stock), price: stock.price, fee, cost: principal + fee }; // cost는 수수료 포함
   });
-  const total = rows.reduce((sum, r) => sum + r.cost, 0);
-  if (!Number.isSafeInteger(total)) return { ok: false, message: "금액이 너무 커서 처리할 수 없어요. 수량을 줄여 주세요." };
-  if (user.balance < total) {
+  const sumOf = (usd, key) => rows.filter((r) => r.usd === usd).reduce((sum, r) => sum + r[key], 0);
+  const totalKrw = sumOf(false, "cost");
+  const totalUsd = sumOf(true, "cost");
+  if (!Number.isSafeInteger(totalKrw) || !Number.isSafeInteger(totalUsd)) return { ok: false, message: "금액이 너무 커서 처리할 수 없어요. 수량을 줄여 주세요." };
+
+  const haveUsd = user.usd || 0;
+  if (user.balance < totalKrw || haveUsd < totalUsd) {
+    const short = [];
+    if (user.balance < totalKrw) short.push(`해정이 부족해요. (합계 필요: ${fmt(totalKrw)}해정, 보유: ${fmt(user.balance)}해정, 부족: ${fmt(totalKrw - user.balance)}해정)`);
+    if (haveUsd < totalUsd) short.push(`달러가 부족해요. (합계 필요: ${centsText(totalUsd)}, 보유: ${centsText(haveUsd)}, 부족: ${centsText(totalUsd - haveUsd)}) · \`/환전\`으로 바꿀 수 있어요.`);
     return {
       ok: false,
       message: [
-        `잔고가 부족해요. (합계 필요: ${fmt(total)}해정, 보유: ${fmt(user.balance)}해정, 부족: ${fmt(total - user.balance)}해정)`,
-        ...rows.map((r) => `- ${r.name} ${fmt(r.qty)}주 × ${fmt(r.price)} + 수수료 ${fmt(r.fee)} = ${fmt(r.cost)}해정`),
+        ...short,
+        ...rows.map((r) => `- ${r.name} ${fmt(r.qty)}주 × ${moneyOf(r.stock, r.price)} + 수수료 ${moneyOf(r.stock, r.fee)} = ${moneyOf(r.stock, r.cost)}`),
         "(아무것도 매수하지 않았어요.)",
       ].join("\n"),
     };
   }
 
-  const balanceBefore = user.balance;
+  const krwBefore = user.balance;
+  const usdBefore = haveUsd;
   const lines = rows.map((r) => {
     const prevCost = costOf(user, r.name, r.price); // 수량을 늘리기 전에 기존 원가를 먼저 구함
     user.holdings[r.name] = (user.holdings[r.name] || 0) + r.qty;
     user.costs[r.name] = prevCost + r.cost;
     const avg = Math.round(user.costs[r.name] / user.holdings[r.name]);
-    return `- ${r.name} ${fmt(r.qty)}주 (-${fmt(r.cost)}해정) · 평균 매수가 ${fmt(avg)}해정 (보유 ${fmt(user.holdings[r.name])}주)`;
+    return `- ${r.name} ${fmt(r.qty)}주 (-${moneyOf(r.stock, r.cost)}) · 평균 매수가 ${moneyOf(r.stock, avg)} (보유 ${fmt(user.holdings[r.name])}주)`;
   });
-  user.balance -= total;
+  user.balance -= totalKrw;
+  user.usd = haveUsd - totalUsd;
 
-  const summary = `${rows.length}종목 매수 완료 (-${fmt(total)}해정, 수수료 ${fmt(rows.reduce((a, r) => a + r.fee, 0))} 포함)`;
+  const feeText = moneyPair(sumOf(false, "fee"), sumOf(true, "fee"));
+  const summary = `${rows.length}종목 매수 완료 (-${moneyPair(totalKrw, totalUsd)}, 수수료 ${feeText} 포함)`;
   await Promise.all([
     saveUser(env, userId, user),
-    addHistory(env, userId, `매수: ${rows.map((r) => `${r.name} ${fmt(r.qty)}주`).join(", ")} (-${fmt(total)}해정) → 잔고 ${fmt(user.balance)}해정`),
+    addHistory(env, userId, `매수: ${rows.map((r) => `${r.name} ${fmt(r.qty)}주`).join(", ")} (-${moneyPair(totalKrw, totalUsd)}) → 잔고 ${fmt(user.balance)}해정 · 달러 ${centsText(user.usd)}`),
   ]);
-  return { ok: true, message: [summary, ...lines, balanceLine(balanceBefore, user.balance)].join("\n"), user };
+  return {
+    ok: true,
+    message: [
+      summary,
+      ...lines,
+      ...(totalKrw > 0 ? [balanceLine(krwBefore, user.balance)] : []),
+      ...(totalUsd > 0 ? [usdLine(usdBefore, user.usd)] : []),
+    ].join("\n"),
+    user,
+  };
 }
 
 export async function sellStocks(env, userId, items) {
@@ -941,12 +976,15 @@ export async function sellStocks(env, userId, items) {
     if (closed) return { ok: false, message: `${closed}\n(미국 주식: ${closedNames.join(", ")})\n(아무것도 매도하지 않았어요.)` };
   }
 
-  const balanceBefore = user.balance;
-  let totalEarned = 0;
-  let totalProfit = 0;
-  let totalBasis = 0;
+  const hasUsd = stocks.some((s) => isForeign(s));
+  const fxRate = hasUsd ? (await getFxRate(env)).rate : 0;
+  const krwBefore = user.balance;
+  const usdBefore = user.usd || 0;
+  let earnedKrw = 0, earnedUsd = 0, profitKrw = 0, profitUsd = 0, basisKrw = 0, basisUsd = 0;
   const lines = items.map((it, i) => {
-    const price = stocks[i].price;
+    const stock = stocks[i];
+    const usd = isForeign(stock);
+    const price = stock.price;
     const held = user.holdings[it.name];
     const prevCost = costOf(user, it.name, price);
     const basis = Math.round((prevCost * it.qty) / held);
@@ -960,26 +998,31 @@ export async function sellStocks(env, userId, items) {
     } else {
       user.costs[it.name] = prevCost - basis;
     }
-    totalEarned += earned;
-    totalProfit += profit;
-    totalBasis += basis;
-    return `- ${it.name} ${fmt(it.qty)}주 (+${fmt(earned)}해정) · ${profitLabel(profit, basis)}`;
+    if (usd) { earnedUsd += earned; profitUsd += profit; basisUsd += basis; }
+    else { earnedKrw += earned; profitKrw += profit; basisKrw += basis; }
+    return `- ${it.name} ${fmt(it.qty)}주 (+${moneyOf(stock, earned)}) · ${usd ? profitUsdLabel(profit, basis) : profitLabel(profit, basis)}`;
   });
-  user.balance += totalEarned;
-  user.realizedProfit = (user.realizedProfit || 0) + totalProfit;
+  user.balance += earnedKrw;
+  user.usd = usdBefore + earnedUsd;
+  user.realizedProfit = (user.realizedProfit || 0) + profitKrw + Math.round((profitUsd * fxRate) / 100);
 
-  const summary = `${items.length}종목 매도 완료 (+${fmt(totalEarned)}해정)`;
+  const summary = `${items.length}종목 매도 완료 (+${moneyPair(earnedKrw, earnedUsd)})`;
   await Promise.all([
     saveUser(env, userId, user),
     addHistory(
       env,
       userId,
-      `매도: ${items.map((it) => `${it.name} ${fmt(it.qty)}주`).join(", ")} (+${fmt(totalEarned)}해정) · ${profitLabel(totalProfit, totalBasis)} → 잔고 ${fmt(user.balance)}해정`
+      `매도: ${items.map((it) => `${it.name} ${fmt(it.qty)}주`).join(", ")} (+${moneyPair(earnedKrw, earnedUsd)}) → 잔고 ${fmt(user.balance)}해정 · 달러 ${centsText(user.usd)}`
     ),
   ]);
   return {
     ok: true,
-    message: [summary, ...lines, balanceLine(balanceBefore, user.balance), `📊 이번 매도 손익 합계: ${profitLabel(totalProfit, totalBasis)}`].join("\n"),
+    message: [
+      summary,
+      ...lines,
+      ...(earnedKrw > 0 ? [balanceLine(krwBefore, user.balance), `📊 이번 매도 손익 합계(해정): ${profitLabel(profitKrw, basisKrw)}`] : []),
+      ...(earnedUsd > 0 ? [usdLine(usdBefore, user.usd), `📊 이번 매도 손익 합계(달러): ${profitUsdLabel(profitUsd, basisUsd)}`] : []),
+    ].join("\n"),
     user,
   };
 }
@@ -1034,20 +1077,23 @@ export async function setUserItem(env, userId, productName, count) {
 // ---------- 랭킹 / 상세 ----------
 // 총 자산(해정 잔고 + 보유 종목 평가액) 기준 랭킹
 export async function getRanking(env) {
-  const [users, stocks] = await Promise.all([
+  const [users, stocks, fx] = await Promise.all([
     listCollection(env, "users"),
     listStocks(env),
+    getFxRate(env),
   ]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
-  const extras = await extraAssets(env, priceMap); // 예금 + 선물 평가금 - 대출
+  const krwMap = krwPriceMap(stocks, fx.rate); // 외국자산은 환율로 해정 환산
+  const extras = await extraAssets(env, priceMap, fx.rate); // 예금 + 선물 평가금 - 대출
 
   return users
     .map((u) => {
       const holdingsValue = Object.entries(u.holdings || {}).reduce(
-        (sum, [name, qty]) => sum + (priceMap[name] || 0) * qty,
+        (sum, [name, qty]) => sum + (krwMap[name] || 0) * qty,
         0
       );
-      return { id: u.id, total: (u.balance || 0) + holdingsValue + (extras[u.id] || 0) };
+      const usdValue = ((u.usd || 0) * fx.rate) / 100; // 달러 잔고도 해정으로 환산
+      return { id: u.id, total: Math.round((u.balance || 0) + holdingsValue + usdValue + (extras[u.id] || 0)) };
     })
     .sort((a, b) => b.total - a.total);
 }
@@ -1056,14 +1102,15 @@ export async function getRanking(env) {
 // 보유 종목은 이름순으로 정렬. 종목별 평가손익, 지난 조회 대비 총자산 증감도 함께 돌려줘요.
 // 조회할 때마다 현재 총자산을 저장해 두었다가 다음 조회 때 비교합니다.
 export async function getUserDetail(env, userId) {
-  const [user, stocks, ranking] = await Promise.all([
+  const [user, stocks, ranking, fx] = await Promise.all([
     getUser(env, userId),
     listStocks(env),
     getRanking(env),
+    getFxRate(env),
   ]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
   const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
-  const extraAsset = await userExtraAsset(env, userId, priceMap); // 예금 + 선물 평가금 - 대출
+  const extraAsset = Math.round(await userExtraAsset(env, userId, priceMap, fx.rate)); // 예금 + 선물 평가금 - 대출
 
   const holdings = Object.entries(user.holdings)
     .map(([name, qty]) => {
@@ -1073,16 +1120,20 @@ export async function getUserDetail(env, userId) {
       if (!Number.isFinite(user.costs[name])) user.costs[name] = cost;
       const value = price * qty;
       const stock = stockMap[name];
+      const foreign = stock ? isForeign(stock) : false;
+      const mul = foreign ? fx.rate / 100 : 1; // 외국자산은 센트 → 해정
       return {
         name, qty, price, value, cost, avg: Math.round(cost / qty), profit: value - cost,
-        foreign: stock ? isForeign(stock) : false,
+        valueKrw: Math.round(value * mul), costKrw: Math.round(cost * mul),
+        foreign,
         icon: stock ? foreignIcon(stock) : "",
       };
     })
     .sort((a, b) => compareKo(a.name, b.name));
-  const holdingsValue = holdings.reduce((sum, h) => sum + h.value, 0);
-  const holdingsCost = holdings.reduce((sum, h) => sum + h.cost, 0);
-  const totalAsset = user.balance + holdingsValue + extraAsset;
+  const holdingsValue = holdings.reduce((sum, h) => sum + h.valueKrw, 0);
+  const holdingsCost = holdings.reduce((sum, h) => sum + h.costKrw, 0);
+  const usdValue = Math.round(((user.usd || 0) * fx.rate) / 100);
+  const totalAsset = user.balance + holdingsValue + usdValue + extraAsset;
   const rank = ranking.findIndex((r) => r.id === userId) + 1;
 
   const prevAsset = Number.isFinite(user.lastAsset) ? user.lastAsset : null;
@@ -1094,6 +1145,9 @@ export async function getUserDetail(env, userId) {
 
   return {
     balance: user.balance,
+    usd: user.usd || 0,
+    usdValue,
+    rate: fx.rate,
     holdings,
     holdingsValue,
     extraAsset,
@@ -1525,7 +1579,7 @@ const collectionOf = (day) => `logs_${day}`;
 export const VIEW_ONLY = new Set([
   "도움말", "주식목록", "그래프", "상장폐지종류", "보유종목", "잔고", "내정보",
   "지수", "종목정보", "관심목록", "봇현황", "랭킹", "내역", "예약목록", "보유상품", "알림확인", "채굴정보", "주식상점",
-  "선물목록", "선물설명", "은행", "은행설명", "배당", "공시목록", "보험",
+  "선물목록", "선물설명", "은행", "은행설명", "배당", "공시목록", "보험", "환율",
 ]);
 
 // 명령어 이름 -> 분류 (관리자 콘솔의 분류 선택칸에 그대로 나와요)
@@ -1537,6 +1591,7 @@ const CATEGORY = {
   선물청산: "선물",
   보험가입: "보험",
   보험해지: "보험",
+  환전: "환전",
   예금: "은행",
   출금: "은행",
   송금: "은행",
@@ -3220,7 +3275,8 @@ const sideLabel = (side) => (side === "long" ? "롱" : "숏");
 
 // 예: **종목A** 📈 롱 x3 · 증거금 1,000해정 · 진입가 1,000해정
 export function futureText(f) {
-  return `**${f.stock}** ${f.side === "long" ? "📈" : "📉"} ${sideLabel(f.side)} x${f.lev} · 증거금 ${f.margin.toLocaleString()}해정 · 진입가 ${f.entry.toLocaleString()}해정`;
+  const m = (n) => (f.cur === "usd" ? centsText(n) : `${n.toLocaleString()}해정`); // 외국자산 선물은 달러
+  return `**${f.stock}** ${f.side === "long" ? "📈" : "📉"} ${sideLabel(f.side)} x${f.lev} · 증거금 ${m(f.margin)} · 진입가 ${m(f.entry)}`;
 }
 
 // 선물 시작
@@ -3229,8 +3285,8 @@ export async function openFuture(env, userId, { stock: stockName, side, margin, 
   if (!FUTURES_LEVERAGES.includes(lev)) {
     return { ok: false, message: `배율은 ${FUTURES_LEVERAGES.join(", ")}배 중에서 골라 주세요.` };
   }
-  if (!Number.isSafeInteger(margin) || margin < MIN_FUTURES_MARGIN) {
-    return { ok: false, message: `증거금은 ${MIN_FUTURES_MARGIN.toLocaleString()}해정 이상 정수로 입력해 주세요.` };
+  if (!Number.isSafeInteger(margin) || margin < 1) {
+    return { ok: false, message: "증거금은 1 이상의 정수로 입력해 주세요." };
   }
 
   const stock = await getStock(env, stockName);
@@ -3238,20 +3294,31 @@ export async function openFuture(env, userId, { stock: stockName, side, margin, 
   const closed = await usClosedNotice(env, [stock]);
   if (closed) return { ok: false, message: closed };
 
+  const usd = isForeign(stock); // 외국자산 선물은 달러 증거금 (입력은 달러 정수, 저장은 센트)
+  if (!usd && margin < MIN_FUTURES_MARGIN) {
+    return { ok: false, message: `증거금은 ${MIN_FUTURES_MARGIN.toLocaleString()}해정 이상 정수로 입력해 주세요.` };
+  }
+  const marginAmt = usd ? margin * 100 : margin;
+
   const items = await getFutureItems(env, userId);
   if (Object.keys(items).length >= MAX_FUTURES_PER_USER) {
     return { ok: false, message: `선물은 최대 ${MAX_FUTURES_PER_USER}개까지 열 수 있어요. \`/선물청산\`으로 먼저 정산해 주세요.` };
   }
 
   const user = await getUser(env, userId);
-  if (user.balance < margin) {
-    return { ok: false, message: `잔고가 부족해요. (필요: ${margin.toLocaleString()}해정, 보유: ${user.balance.toLocaleString()}해정)` };
+  const have = usd ? user.usd || 0 : user.balance;
+  if (have < marginAmt) {
+    return {
+      ok: false,
+      message: `${usd ? "달러가" : "잔고가"} 부족해요. (필요: ${moneyOf(stock, marginAmt)}, 보유: ${moneyOf(stock, have)})${usd ? "\n💡 `/환전`으로 해정을 달러로 바꿀 수 있어요." : ""}`,
+    };
   }
 
-  const balanceBefore = user.balance;
-  user.balance -= margin;
+  const balanceBefore = have;
+  if (usd) user.usd = have - marginAmt;
+  else user.balance -= marginAmt;
   const id = newFutureId(items);
-  const f = { stock: stockName, side, margin, lev, entry: stock.price, t: Date.now() };
+  const f = { stock: stockName, side, margin: marginAmt, lev, entry: stock.price, t: Date.now(), ...(usd ? { cur: "usd" } : {}) };
   items[id] = f;
 
   // 증거금 차감을 먼저 저장하고 포지션을 저장해요. 포지션 저장이 실패하면 증거금을 돌려줘요.
@@ -3260,26 +3327,28 @@ export async function openFuture(env, userId, { stock: stockName, side, margin, 
     await saveFutureItems(env, userId, items);
   } catch (err) {
     console.error(`선물 저장 실패 (${userId}):`, err.message);
-    user.balance += margin;
+    if (usd) user.usd += marginAmt;
+    else user.balance += marginAmt;
     await saveUser(env, userId, user).catch(() => {});
     return { ok: false, message: "선물을 여는 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
   }
 
-  await addHistory(env, userId, `선물 시작: ${stockName} ${sideLabel(side)} x${lev} · 증거금 ${margin.toLocaleString()}해정 (진입가 ${f.entry.toLocaleString()})`);
+  await addHistory(env, userId, `선물 시작: ${stockName} ${sideLabel(side)} x${lev} · 증거금 ${moneyOf(stock, marginAmt)} (진입가 ${moneyOf(stock, f.entry)})`);
 
   const liq = futureLiqPrice(f);
+  const after = usd ? user.usd : user.balance;
   return {
     ok: true,
     message: [
       `${side === "long" ? "📈" : "📉"} **선물 시작!** ${stockName} ${sideLabel(side)} x${lev}`,
-      `- 증거금 ${margin.toLocaleString()}해정 · 진입가 ${f.entry.toLocaleString()}해정`,
-      `- 💥 강제청산가: ${liq.toLocaleString()}해정 ${side === "long" ? "이하" : "이상"} (증거금 전부 잃어요)`,
-      balanceLine(balanceBefore, user.balance),
+      `- 증거금 ${moneyOf(stock, marginAmt)} · 진입가 ${moneyOf(stock, f.entry)}`,
+      `- 💥 강제청산가: ${moneyOf(stock, liq)} ${side === "long" ? "이하" : "이상"} (증거금 전부 잃어요)`,
+      usd ? usdLine(balanceBefore, after) : balanceLine(balanceBefore, after),
     ].join("\n"),
   };
 }
 
-// 정산(청산): targets = 포지션 번호들 또는 ["all"]. 평가금을 해정으로 돌려받아요.
+// 정산(청산): targets = 포지션 번호들 또는 ["all"]. 평가금을 (해정 선물은 해정, 외국자산 선물은 달러로) 돌려받아요.
 export async function closeFutures(env, userId, targets) {
   const [items, stocks] = await Promise.all([getFutureItems(env, userId), listStocks(env)]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
@@ -3302,32 +3371,36 @@ export async function closeFutures(env, userId, targets) {
     }
   }
 
-  const user = await getUser(env, userId);
-  const balanceBefore = user.balance;
+  const [user, fx] = await Promise.all([getUser(env, userId), getFxRate(env)]);
+  const krwBefore = user.balance;
+  const usdBefore = user.usd || 0;
   const lines = [];
   const closed = [];
-  let payout = 0;
-  let pnlSum = 0;
+  let payoutKrw = 0, payoutUsd = 0, pnlKrw = 0, pnlUsd = 0;
+  let hasKrw = false, hasUsd = false;
 
   for (const id of ids) {
     const f = items[id];
+    const isUsd = f.cur === "usd";
+    const m = (n) => (isUsd ? centsText(n) : `${n.toLocaleString()}해정`);
     const price = priceMap[f.stock] ?? f.entry; // 폐지돼서 남은 포지션이면 증거금 그대로 돌려줘요
     const equity = futureEquity(f, price);
     const pnl = equity - f.margin;
-    payout += equity;
-    pnlSum += pnl;
+    if (isUsd) { payoutUsd += equity; pnlUsd += pnl; hasUsd = true; }
+    else { payoutKrw += equity; pnlKrw += pnl; hasKrw = true; }
     delete items[id];
-    lines.push(`- ${futureText(f)}\n  진입 ${f.entry.toLocaleString()} → 정산 ${price.toLocaleString()}해정 · ${profitLabel(pnl, f.margin)}`);
-    closed.push(`${f.stock} ${sideLabel(f.side)} x${f.lev} ${fmtSigned(pnl)}해정`);
+    lines.push(`- ${futureText(f)}\n  진입 ${m(f.entry)} → 정산 ${m(price)} · ${isUsd ? profitUsdLabel(pnl, f.margin) : profitLabel(pnl, f.margin)}`);
+    closed.push(`${f.stock} ${sideLabel(f.side)} x${f.lev} ${isUsd ? `${pnl < 0 ? "-" : pnl > 0 ? "+" : ""}${centsText(Math.abs(pnl))}` : `${fmtSigned(pnl)}해정`}`);
   }
 
   // 포지션을 먼저 지워서 같은 포지션이 두 번 정산되지 않게 해요
   await saveFutureItems(env, userId, items);
-  user.balance += payout;
-  user.realizedProfit = (user.realizedProfit || 0) + pnlSum;
+  user.balance += payoutKrw;
+  user.usd = usdBefore + payoutUsd;
+  user.realizedProfit = (user.realizedProfit || 0) + pnlKrw + Math.round((pnlUsd * fx.rate) / 100);
   await Promise.all([
     saveUser(env, userId, user),
-    addHistory(env, userId, `선물 정산: ${closed.join(", ")} → 잔고 ${user.balance.toLocaleString()}해정`),
+    addHistory(env, userId, `선물 정산: ${closed.join(", ")} → 잔고 ${user.balance.toLocaleString()}해정 · 달러 ${centsText(user.usd)}`),
   ]);
 
   return {
@@ -3335,7 +3408,8 @@ export async function closeFutures(env, userId, targets) {
     message: [
       `**선물 ${ids.length}건 정산 완료**`,
       ...lines,
-      balanceLine(balanceBefore, user.balance),
+      ...(hasKrw ? [balanceLine(krwBefore, user.balance)] : []),
+      ...(hasUsd ? [usdLine(usdBefore, user.usd)] : []),
       ...(heldBack.length ? [`🌙 미국 장이 닫혀 있어서 ${heldBack.length}건(${[...new Set(heldBack.map((id) => items[id]?.stock))].join(", ")})은 정산하지 않고 그대로 두었어요. 장이 열리면 다시 정산해 주세요.`] : []),
     ].join("\n"),
   };
@@ -3376,18 +3450,22 @@ export async function processFutures(env, changes = []) {
 
       try {
         const user = await getUser(env, userId);
+        const fxRate = (await getFxRate(env)).rate;
         const lines = [];
         for (const h of live) {
           const pnl = h.equity - h.f.margin;
-          user.balance += h.equity;
-          user.realizedProfit = (user.realizedProfit || 0) + pnl;
+          const isUsd = h.f.cur === "usd";
+          const m = (n) => (isUsd ? centsText(n) : `${n.toLocaleString()}해정`);
+          if (isUsd) user.usd = (user.usd || 0) + h.equity;
+          else user.balance += h.equity;
+          user.realizedProfit = (user.realizedProfit || 0) + (isUsd ? Math.round((pnl * fxRate) / 100) : pnl);
           const label = `${h.f.stock} ${sideLabel(h.f.side)} x${h.f.lev}`;
           if (h.gone) {
             summary.settled++;
-            lines.push(`🏁 ${label} — 상장폐지로 ${h.price.toLocaleString()}해정에 정산 (${fmtSigned(pnl)}해정)`);
+            lines.push(`🏁 ${label} — 상장폐지로 ${m(h.price)}에 정산 (${pnl < 0 ? "-" : pnl > 0 ? "+" : ""}${m(Math.abs(pnl))})`);
           } else {
             summary.liquidated++;
-            lines.push(`💥 ${label} — 시세가 ${h.price.toLocaleString()}해정이 되어 강제청산 (-${h.f.margin.toLocaleString()}해정)`);
+            lines.push(`💥 ${label} — 시세가 ${m(h.price)}이 되어 강제청산 (-${m(h.f.margin)})`);
           }
         }
         await saveUser(env, userId, user);
@@ -3403,6 +3481,176 @@ export async function processFutures(env, changes = []) {
   );
 
   return summary;
+}
+
+// ============================================================
+// [fx.js] 환율 · 환전 (달러)
+// ============================================================
+// - 달러 잔고는 user.usd 에 "센트"(1달러 = 100센트) 정수로 저장해요.
+//   외국자산(코인·미국주식) 가격 숫자도 센트예요. (가격 1000 = $10.00)
+// - 환율 = 1달러가 몇 해정인지. FX_MIN ~ FX_MAX 사이에서 1시간마다 새로 뽑아 고정해요. (config/fxRate)
+// - 환전할 때 FX_FEE_RATE 수수료를 "받는 쪽" 금액에서 떼요.
+export const FX_BASE = 100;
+export const FX_MIN = 70;
+export const FX_MAX = 140;
+export const FX_FEE_RATE = 0.01; // 환전 수수료 1%
+export const FX_MIN_KRW = 10; // 해정 → 달러 최소 환전액
+
+const FX_PATH = "config/fxRate";
+const FX_MSG_PATH = "config/fxRateMsg"; // 마지막 환율 공지 메시지 ID
+const FX_ANNOUNCE = true; // false면 환율 변경 공지를 안 올려요
+const FX_REPLACE = true; // true면 새 공지를 올리기 전에 지난 환율 공지를 지워요
+const FX_CACHE_MS = 30 * 1000;
+const FX_HOUR_MS = 60 * 60 * 1000;
+
+let fxCache = { at: 0, doc: null };
+
+// 센트 -> "$12.34"
+export function centsText(cents) {
+  const n = Math.round(Number(cents) || 0);
+  const abs = Math.abs(n);
+  return `${n < 0 ? "-" : ""}$${Math.floor(abs / 100).toLocaleString()}.${String(abs % 100).padStart(2, "0")}`;
+}
+
+// 종목 종류에 맞는 금액 문구: 외국자산은 달러, 나머지는 해정
+export const moneyOf = (stock, n) => (isForeign(stock) ? centsText(n) : `${n.toLocaleString()}해정`);
+
+// 해정 + 달러를 한 문구로 (0인 쪽은 빼요)
+export function moneyPair(krw, cents) {
+  return [krw > 0 ? `${krw.toLocaleString()}해정` : "", cents > 0 ? centsText(cents) : ""].filter(Boolean).join(" + ") || "0해정";
+}
+
+export function usdLine(before, after) {
+  const diff = after - before;
+  return `💵 달러: ${centsText(before)} → **${centsText(after)}** (${diff > 0 ? "+" : diff < 0 ? "-" : ""}${centsText(Math.abs(diff))})`;
+}
+
+// profitLabel 의 달러(센트) 버전
+export function profitUsdLabel(profit, cost, plain = false) {
+  const UP = plain ? UP_PLAIN : UP_MARK;
+  const DOWN = plain ? DOWN_PLAIN : DOWN_MARK;
+  const pct = cost > 0 ? (profit / cost) * 100 : 0;
+  const mark = profit > 0 ? `${UP} 이득` : profit < 0 ? `${DOWN} 손해` : "➖ 본전";
+  return `${mark} ${profit > 0 ? "+" : profit < 0 ? "-" : ""}${centsText(Math.abs(profit))} (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%)`;
+}
+
+export const rateText = (rate) => `1달러 = ${Number(rate).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}해정`;
+
+// 선물 포지션의 평가금을 해정으로 바꿀 배율 (달러 포지션만 환율 적용)
+export const fxMul = (f, rate) => (f && f.cur === "usd" ? rate / 100 : 1);
+
+// 종목별 "주당 해정 가격" (외국자산은 센트 → 해정 환산). 랭킹/순자산 계산용이라 소수가 나올 수 있어요.
+export function krwPriceMap(stocks, rate) {
+  return Object.fromEntries(stocks.map((s) => [s.name, isForeign(s) ? (s.price * rate) / 100 : s.price]));
+}
+
+export async function getFxRate(env) {
+  const now = Date.now();
+  if (fxCache.doc && now - fxCache.at < FX_CACHE_MS) return fxCache.doc;
+  let doc = await getDoc(env, FX_PATH);
+  if (!doc || !(doc.rate > 0)) {
+    doc = { rate: FX_BASE, prev: FX_BASE, at: now };
+    await setDoc(env, FX_PATH, doc);
+  }
+  fxCache = { at: now, doc };
+  return doc;
+}
+
+// 매시 1번 호출(크론): 새 환율을 뽑아 저장하고 주식채널에 무음 공지
+export async function rollFxRate(env) {
+  const now = Date.now();
+  const prev = await getFxRate(env);
+  const rate = +(FX_MIN + Math.random() * (FX_MAX - FX_MIN)).toFixed(2);
+  const next = { rate, prev: prev.rate, at: now };
+  await setDoc(env, FX_PATH, next);
+  fxCache = { at: 0, doc: null };
+
+  if (FX_ANNOUNCE && env.ALLOWED_CHANNEL_ID && env.DISCORD_BOT_TOKEN) {
+    try {
+      const arrow = rate > prev.rate ? "📈" : rate < prev.rate ? "📉" : "➖";
+      if (FX_REPLACE) {
+        const old = await getDoc(env, FX_MSG_PATH).catch(() => null);
+        if (old?.messageId) {
+          await discordRequest(env, "DELETE", `/channels/${env.ALLOWED_CHANNEL_ID}/messages/${old.messageId}`).catch(() => {});
+        }
+      }
+      const nextUnix = Math.floor((Math.ceil((now + 1) / FX_HOUR_MS) * FX_HOUR_MS) / 1000);
+      const posted = await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, {
+        content: `💵 **환율 변경** ${arrow} ${prev.rate}해정 → **${rate}해정** (1달러 기준)\n다음 변경: <t:${nextUnix}:t> (<t:${nextUnix}:R>)`,
+        flags: 4096,
+        allowed_mentions: { parse: [] },
+      });
+      if (FX_REPLACE && posted?.id) await setDoc(env, FX_MSG_PATH, { messageId: posted.id });
+    } catch (err) {
+      console.error("환율 공지 실패:", err.message);
+    }
+  }
+  return next;
+}
+
+// /환율
+export async function fxInfoText(env, userId) {
+  const [fx, user] = await Promise.all([getFxRate(env), getUser(env, userId)]);
+  const diff = +(fx.rate - fx.prev).toFixed(2);
+  const arrow = diff > 0 ? UP_MARK : diff < 0 ? DOWN_MARK : "➖";
+  const nextUnix = Math.floor((Math.ceil((Date.now() + 1) / FX_HOUR_MS) * FX_HOUR_MS) / 1000);
+  return [
+    `💵 **현재 환율** ${rateText(fx.rate)} ${arrow} (지난 환율 ${fx.prev} 대비 ${diff > 0 ? "+" : ""}${diff})`,
+    `범위 ${FX_MIN}~${FX_MAX}해정 · 다음 변경 <t:${nextUnix}:t> (<t:${nextUnix}:R>)`,
+    `환전 수수료 ${+(FX_FEE_RATE * 100).toFixed(2)}% (받는 쪽 금액에서 떼요)`,
+    `내 달러: **${centsText(user.usd)}** (≈ ${Math.floor(((user.usd || 0) * fx.rate) / 100).toLocaleString()}해정)`,
+    "`/환전`으로 해정과 달러를 바꿀 수 있어요. 외국자산(🌐₿)은 달러로 사고팔아요.",
+  ].join("\n");
+}
+
+// /환전  dir: "toUsd"(해정→달러, amount=낼 해정) | "toKrw"(달러→해정, amount=낼 달러, 정수)
+export async function exchangeMoney(env, userId, dir, amount) {
+  if (dir !== "toUsd" && dir !== "toKrw") return { ok: false, message: "환전 방향을 골라 주세요." };
+  if (!Number.isSafeInteger(amount) || amount < 1) return { ok: false, message: "환전할 금액은 1 이상의 정수로 입력해 주세요." };
+  const [user, fx] = await Promise.all([getUser(env, userId), getFxRate(env)]);
+  const rate = fx.rate;
+  const krwBefore = user.balance;
+  const usdBefore = user.usd || 0;
+
+  if (dir === "toUsd") {
+    if (amount < FX_MIN_KRW) return { ok: false, message: `해정 → 달러는 ${FX_MIN_KRW}해정 이상부터 바꿀 수 있어요.` };
+    if (krwBefore < amount) return { ok: false, message: `잔고가 부족해요. (필요: ${amount.toLocaleString()}해정, 보유: ${krwBefore.toLocaleString()}해정)` };
+    const cents = Math.floor(((amount * 100) / rate) * (1 - FX_FEE_RATE));
+    if (cents < 1) return { ok: false, message: "금액이 너무 작아서 1센트도 받을 수 없어요. 더 많이 바꿔 주세요." };
+    user.balance = krwBefore - amount;
+    user.usd = usdBefore + cents;
+    await Promise.all([
+      saveUser(env, userId, user),
+      addHistory(env, userId, `환전: ${amount.toLocaleString()}해정 → ${centsText(cents)} (환율 ${rate})`),
+    ]);
+    return {
+      ok: true,
+      message: [
+        `💱 **환전 완료** ${amount.toLocaleString()}해정 → **${centsText(cents)}** (${rateText(rate)}, 수수료 ${+(FX_FEE_RATE * 100).toFixed(2)}%)`,
+        balanceLine(krwBefore, user.balance),
+        usdLine(usdBefore, user.usd),
+      ].join("\n"),
+    };
+  }
+
+  const cents = amount * 100;
+  if (usdBefore < cents) return { ok: false, message: `달러가 부족해요. (필요: ${centsText(cents)}, 보유: ${centsText(usdBefore)})` };
+  const krw = Math.floor(((cents * rate) / 100) * (1 - FX_FEE_RATE));
+  if (krw < 1) return { ok: false, message: "금액이 너무 작아요. 더 많이 바꿔 주세요." };
+  user.usd = usdBefore - cents;
+  user.balance = krwBefore + krw;
+  await Promise.all([
+    saveUser(env, userId, user),
+    addHistory(env, userId, `환전: ${centsText(cents)} → ${krw.toLocaleString()}해정 (환율 ${rate})`),
+  ]);
+  return {
+    ok: true,
+    message: [
+      `💱 **환전 완료** ${centsText(cents)} → **${krw.toLocaleString()}해정** (${rateText(rate)}, 수수료 ${+(FX_FEE_RATE * 100).toFixed(2)}%)`,
+      balanceLine(krwBefore, user.balance),
+      usdLine(usdBefore, user.usd),
+    ].join("\n"),
+  };
 }
 
 // ============================================================
@@ -3691,13 +3939,16 @@ const loansByDue = (bank) =>
 
 // 순자산 = 잔고 + 주식 + 예금 + 선물 평가금 - 대출(원금+이자)
 async function netWorthOf(env, userId, user, bank, stocks) {
+  const fx = await getFxRate(env);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
-  const holdingsValue = Object.entries(user.holdings).reduce((sum, [name, qty]) => sum + (priceMap[name] || 0) * qty, 0);
+  const krwMap = krwPriceMap(stocks, fx.rate); // 외국자산은 환율로 해정 환산
+  const holdingsValue = Object.entries(user.holdings).reduce((sum, [name, qty]) => sum + (krwMap[name] || 0) * qty, 0);
   const futs = futureList(await getFutureItems(env, userId));
-  const futuresValue = futs.reduce((sum, f) => sum + (priceMap[f.stock] === undefined ? f.margin : futureEquity(f, priceMap[f.stock])), 0);
+  const futuresValue = futs.reduce((sum, f) => sum + (priceMap[f.stock] === undefined ? f.margin : futureEquity(f, priceMap[f.stock])) * fxMul(f, fx.rate), 0);
   const debt = Object.values(bank.loans).reduce((sum, l) => sum + loanOwed(l), 0);
   const deposit = depositOf(bank);
-  return { net: user.balance + holdingsValue + deposit + futuresValue - debt, debt, deposit };
+  const usdValue = ((user.usd || 0) * fx.rate) / 100;
+  return { net: Math.floor(user.balance + holdingsValue + usdValue + deposit + futuresValue - debt), debt, deposit };
 }
 
 // 대출 한도: 순자산의 30% (최소 1,000해정). 이미 빌린 원금은 빼요.
@@ -3709,7 +3960,7 @@ function loanLimitOf(net, bank) {
 }
 
 // 랭킹/총자산용: 예금 + 선물 평가금 - 대출. { 유저ID: 해정 }
-export async function extraAssets(env, priceMap) {
+export async function extraAssets(env, priceMap, fxRate = FX_BASE) {
   const [banks, futs, rate] = await Promise.all([listCollection(env, "bank"), listCollection(env, "futures"), getBankRate(env)]);
   const now = Date.now();
   const extra = {};
@@ -3721,19 +3972,19 @@ export async function extraAssets(env, priceMap) {
   for (const f of futs) {
     for (const p of Object.values(f.items || {})) {
       const price = priceMap[p.stock];
-      extra[f.id] = (extra[f.id] || 0) + (price === undefined ? p.margin : futureEquity(p, price));
+      extra[f.id] = (extra[f.id] || 0) + (price === undefined ? p.margin : futureEquity(p, price)) * fxMul(p, fxRate);
     }
   }
   return extra;
 }
 
 // 한 명분 (/내정보용)
-export async function userExtraAsset(env, userId, priceMap) {
+export async function userExtraAsset(env, userId, priceMap, rate = FX_BASE) {
   const [bank0, futItems] = await Promise.all([getBank(env, userId), getFutureItems(env, userId)]);
   const bank = accrueBank(structuredClone(bank0), Date.now());
   const debt = Object.values(bank.loans).reduce((sum, l) => sum + loanOwed(l), 0);
   const futuresValue = futureList(futItems).reduce(
-    (sum, f) => sum + (priceMap[f.stock] === undefined ? f.margin : futureEquity(f, priceMap[f.stock])),
+    (sum, f) => sum + (priceMap[f.stock] === undefined ? f.margin : futureEquity(f, priceMap[f.stock])) * fxMul(f, rate),
     0
   );
   return depositOf(bank) + futuresValue - debt;
@@ -4010,7 +4261,7 @@ function forceSell(user, priceMap, need) {
 
 export async function processBank(env) {
   const [docs, stocks] = await Promise.all([listCollection(env, "bank"), listStocks(env)]);
-  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const priceMap = Object.fromEntries(stocks.filter((s) => !isForeign(s)).map((s) => [s.name, s.price])); // 외국자산(달러)은 강제매도에서 빼요
   const summary = { collected: 0, liquidated: 0, overdue: 0, reminded: 0 };
   const now = Date.now();
 
@@ -4258,6 +4509,7 @@ export async function buyInsurance(env, userId, stockName, qty, term) {
   const [user, stocks] = await Promise.all([getUser(env, userId), listStocks(env)]);
   const stock = stocks.find((s) => s.name === name);
   if (!stock) return { ok: false, message: `"${name}" 종목을 찾을 수 없어요.` };
+  if (isForeign(stock)) return { ok: false, message: "외국자산(코인·미국주식)은 보험에 들 수 없어요." };
 
   const held = user.holdings[name] || 0;
   if (held <= 0) return { ok: false, message: `${name} 주식을 가지고 있지 않아요. 보험은 보유한 종목에만 들 수 있어요.` };
@@ -4985,7 +5237,7 @@ export const commandDefinitions = [
           { name: "📉 숏 (내리면 이득)", value: "short" },
         ],
       },
-      { name: "증거금", description: "걸 해정 (최소 100, 잃어도 이만큼만 잃어요)", type: 4, required: true, autocomplete: true, min_value: 100 },
+      { name: "증거금", description: "걸 금액 (해정 종목은 최소 100해정, 외국자산은 달러 단위로 최소 1달러)", type: 4, required: true, autocomplete: true, min_value: 1 },
       {
         name: "배율",
         description: "배율 (클수록 많이 벌고, 많이 잃어요)",
@@ -5008,6 +5260,24 @@ export const commandDefinitions = [
   { name: "은행", description: "내 예금·대출·이자·대출 한도·신용등급을 지금 이 순간 기준으로 봅니다." },
   { name: "배당", description: "내 보유 종목의 배당금 예상액과 받은 내역을 봅니다." },
   { name: "은행설명", description: "은행 이용법을 쉽게 알려줍니다. (예금·대출·이자·연체)" },
+  { name: "환율", description: "지금 환율(1달러가 몇 해정인지)과 내 달러를 봅니다. 환율은 1시간마다 바뀌어요." },
+  {
+    name: "환전",
+    description: "해정과 달러를 서로 바꿉니다. 외국자산(코인·미국주식)은 달러로 거래해요. (수수료 1%)",
+    options: [
+      {
+        name: "방향",
+        description: "어느 쪽으로 바꿀지",
+        type: 3,
+        required: true,
+        choices: [
+          { name: "💵 해정 → 달러", value: "toUsd" },
+          { name: "💰 달러 → 해정", value: "toKrw" },
+        ],
+      },
+      { name: "금액", description: "해정→달러는 낼 해정, 달러→해정은 낼 달러(정수)", type: 4, required: true, autocomplete: true, min_value: 1 },
+    ],
+  },
   {
     name: "예금",
     description: "해정을 은행에 맡기고 이자를 받습니다. 이자는 시간이 흐르는 대로 쌓여요.",
@@ -5417,13 +5687,14 @@ async function quantityChoices(command, interaction, env, keyword, slot = "") {
   let values;
 
   if (command === "매수") {
-    const max = maxBuyQty(user.balance, stock.price);
+    const haveNow = isForeign(stock) ? user.usd || 0 : user.balance;
+    const max = maxBuyQty(haveNow, stock.price);
     labelFor = (q) => {
       if (q <= 0) return "1주 이상 입력해 주세요";
       const p = previewBuy(user, stock, q);
       return p.ok
-        ? `${q.toLocaleString()}주 매수 → -${p.cost.toLocaleString()}해정(수수료 ${p.fee.toLocaleString()}) · 잔고 ${p.after.toLocaleString()}해정`
-        : `${q.toLocaleString()}주 매수 불가 (필요 ${p.cost.toLocaleString()} / 잔고 ${user.balance.toLocaleString()}해정)`;
+        ? `${q.toLocaleString()}주 매수 → -${moneyOf(stock, p.cost)}(수수료 ${moneyOf(stock, p.fee)}) · ${isForeign(stock) ? "달러" : "잔고"} ${moneyOf(stock, p.after)}`
+        : `${q.toLocaleString()}주 매수 불가 (필요 ${moneyOf(stock, p.cost)} / ${isForeign(stock) ? "달러" : "잔고"} ${moneyOf(stock, haveNow)})`;
     };
     values = max > 0 ? [...defaults.filter((n) => n < max), max] : defaults;
     return numberChoices(
@@ -5439,7 +5710,7 @@ async function quantityChoices(command, interaction, env, keyword, slot = "") {
     if (q <= 0) return "1주 이상 입력해 주세요";
     const p = previewSell(user, stock, q);
     if (!p.ok) return `${q.toLocaleString()}주 매도 불가 (보유 ${held.toLocaleString()}주)`;
-    return `${q.toLocaleString()}주 매도 → +${p.earned.toLocaleString()} · 잔고 ${p.after.toLocaleString()} · ${profitLabel(p.profit, p.basis, true)}`;
+    return `${q.toLocaleString()}주 매도 → +${moneyOf(stock, p.earned)} · ${isForeign(stock) ? "달러" : "잔고"} ${moneyOf(stock, p.after)} · ${isForeign(stock) ? profitUsdLabel(p.profit, p.basis, true) : profitLabel(p.profit, p.basis, true)}`;
   };
   values = held > 0 ? [...defaults.filter((n) => n < held), held] : defaults;
   return numberChoices(
@@ -5535,7 +5806,7 @@ export async function autocomplete(interaction, env) {
             const qty = user.holdings[s.name];
             const cost = costOf(user, s.name, s.price);
             return {
-              label: `${iconName(s)}${dangerTag(s.price, true)} (보유 ${qty}주 · ${s.price.toLocaleString()}해정 · ${profitLabel(s.price * qty - cost, cost, true)})${mTag(s)}`,
+              label: `${iconName(s)}${dangerTag(s.price, true)} (보유 ${qty}주 · ${moneyOf(s, s.price)} · ${isForeign(s) ? profitUsdLabel(s.price * qty - cost, cost, true) : profitLabel(s.price * qty - cost, cost, true)})${mTag(s)}`,
               value: s.name,
             };
           }),
@@ -5576,7 +5847,7 @@ export async function autocomplete(interaction, env) {
       // 매수는 지금 잔고로 최대 몇 주까지 살 수 있는지 함께 표시
       return textChoices(
         stocks.map((s) => ({
-          label: `${iconName(s)}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정 · 최대 ${maxBuyQty(user.balance, s.price).toLocaleString()}주)${mTag(s)}`,
+          label: `${iconName(s)}${dangerTag(s.price, true)} (${moneyOf(s, s.price)} · 최대 ${maxBuyQty(isForeign(s) ? user.usd || 0 : user.balance, s.price).toLocaleString()}주)${mTag(s)}`,
           value: s.name,
         })),
         keyword
@@ -5599,6 +5870,28 @@ export async function autocomplete(interaction, env) {
       })),
       keyword
     );
+  }
+
+  // ----- 환전: 금액 예시 (받을 금액 미리보기) -----
+  if (command === "환전" && focused.name === "금액") {
+    const userId = interaction.member?.user?.id;
+    if (!userId) return [];
+    const [user, fx] = await Promise.all([getUser(env, userId), getFxRate(env)]);
+    if (opt(interaction, "방향") === "toKrw") {
+      const dollars = Math.floor((user.usd || 0) / 100);
+      const getKrw = (n) => Math.floor(n * fx.rate * (1 - FX_FEE_RATE));
+      const list = [1, 5, 10, 50, 100]
+        .filter((n) => n < dollars)
+        .map((n) => ({ label: `$${n} → 약 ${getKrw(n).toLocaleString()}해정`, value: n }));
+      if (dollars >= 1) list.push({ label: `전액 $${dollars} → 약 ${getKrw(dollars).toLocaleString()}해정`, value: dollars });
+      return numberChoices(list, keyword);
+    }
+    const getUsd = (n) => centsText(Math.floor(((n * 100) / fx.rate) * (1 - FX_FEE_RATE)));
+    const list = [100, 500, 1000, 5000, 10000]
+      .filter((n) => n >= FX_MIN_KRW && n < user.balance)
+      .map((n) => ({ label: `${n.toLocaleString()}해정 → 약 ${getUsd(n)}`, value: n }));
+    if (user.balance >= FX_MIN_KRW) list.push({ label: `전액 ${user.balance.toLocaleString()}해정 → 약 ${getUsd(user.balance)}`, value: user.balance });
+    return numberChoices(list, keyword);
   }
 
   // ----- 송금: 잔고 기준 금액 예시 (수수료까지 낼 수 있는 만큼만) -----
@@ -5693,7 +5986,7 @@ export async function autocomplete(interaction, env) {
     const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
     const list = futureList(items).map((f) => {
       const price = priceMap[f.stock];
-      const pnlText = price === undefined ? "상장폐지" : profitLabel(futureEquity(f, price) - f.margin, f.margin, true);
+      const pnlText = price === undefined ? "상장폐지" : f.cur === "usd" ? profitUsdLabel(futureEquity(f, price) - f.margin, f.margin, true) : profitLabel(futureEquity(f, price) - f.margin, f.margin, true);
       return { label: `[${f.id}] ${f.stock} ${sideLabel(f.side)} x${f.lev} · ${pnlText}`, value: f.id };
     });
     const left = pickable(list);
@@ -5704,7 +5997,15 @@ export async function autocomplete(interaction, env) {
   // ----- 선물 증거금 예시 -----
   if (base === "증거금") {
     const userId = interaction.member?.user?.id;
-    const user = userId ? await getUser(env, userId) : { balance: 0 };
+    const user = userId ? await getUser(env, userId) : { balance: 0, usd: 0 };
+    const pickedStock = (await listStocksForAutocomplete(env)).find((s) => s.name === String(opt(interaction, "종목") ?? "").trim());
+    if (pickedStock && isForeign(pickedStock)) {
+      // 외국자산 선물: 달러 단위 정수
+      const dollars = Math.floor((user.usd || 0) / 100);
+      const dl = [1, 5, 10, 50, 100].filter((n) => n < dollars).map((n) => ({ label: `$${n}`, value: n }));
+      if (dollars >= 1) dl.push({ label: `전액 $${dollars}`, value: dollars });
+      return numberChoices(dl, keyword);
+    }
     const list = [100, 500, 1000, 5000, 10000]
       .filter((n) => n <= user.balance)
       .map((n) => ({ label: `${n.toLocaleString()}해정`, value: n }));
@@ -5824,8 +6125,8 @@ async function reserveOrder(side, interaction, env) {
     if (side === "buy") {
       if (stock.price <= s.price) {
         errors.push(`${tag(s)}현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이하예요. 바로 \`/매수\`를 쓰거나, 더 낮은 가격으로 예약해 주세요.`);
-      } else if (user.balance < s.price * s.qty + tradeFee(s.price * s.qty)) {
-        errors.push(`${tag(s)}잔고가 부족해요. (예약가 기준 필요: ${(s.price * s.qty + tradeFee(s.price * s.qty)).toLocaleString()}해정(수수료 포함), 보유: ${user.balance.toLocaleString()}해정)`);
+      } else if ((isForeign(stock) ? user.usd || 0 : user.balance) < s.price * s.qty + tradeFee(s.price * s.qty)) {
+        errors.push(`${tag(s)}${isForeign(stock) ? "달러가" : "잔고가"} 부족해요. (예약가 기준 필요: ${moneyOf(stock, s.price * s.qty + tradeFee(s.price * s.qty))}(수수료 포함), 보유: ${moneyOf(stock, isForeign(stock) ? user.usd || 0 : user.balance)})`);
       }
     } else {
       if (stock.price >= s.price) {
@@ -6234,7 +6535,7 @@ export const handlers = {
         domestic.length ? domestic.map(line).join("\n") : "",
         foreign.length ? `**🌐 외국자산**\n${foreign.map(line).join("\n")}` : "",
       ].filter(Boolean).join("\n") || "(보유 종목 없음)";
-    return `잔고: **${user.balance.toLocaleString()}해정**\n${holdingsText}`;
+    return `잔고: **${user.balance.toLocaleString()}해정** · 달러: **${centsText(user.usd)}**\n${holdingsText}`;
   },
 
   // 보유 종목은 getUserDetail에서 이름순으로 정렬됨
@@ -6243,7 +6544,9 @@ export const handlers = {
     const detail = await getUserDetail(env, userId);
 
     const holdingLine = (h) =>
-      `- ${h.icon ? `${h.icon} ` : ""}${h.name}${dangerTag(h.price)}: ${h.qty}주 (현재가 ${h.price.toLocaleString()} · 평균 매수가 ${h.avg.toLocaleString()} · 평가금 ${h.value.toLocaleString()}해정)\n  ${profitLabel(h.profit, h.cost)}`;
+      h.foreign
+        ? `- ${h.icon ? `${h.icon} ` : ""}${h.name}${dangerTag(h.price)}: ${h.qty}주 (현재가 ${centsText(h.price)} · 평균 매수가 ${centsText(h.avg)} · 평가금 ${centsText(h.value)} ≈ ${h.valueKrw.toLocaleString()}해정)\n  ${profitUsdLabel(h.profit, h.cost)}`
+        : `- ${h.icon ? `${h.icon} ` : ""}${h.name}${dangerTag(h.price)}: ${h.qty}주 (현재가 ${h.price.toLocaleString()} · 평균 매수가 ${h.avg.toLocaleString()} · 평가금 ${h.value.toLocaleString()}해정)\n  ${profitLabel(h.profit, h.cost)}`;
     const domesticHoldings = detail.holdings.filter((h) => !h.foreign);
     const foreignHoldings = detail.holdings.filter((h) => h.foreign);
     const holdingsText =
@@ -6266,7 +6569,8 @@ export const handlers = {
     return [
       "**내 상세정보**",
       `현금 잔고: ${detail.balance.toLocaleString()}해정`,
-      `보유 종목 평가액: ${detail.holdingsValue.toLocaleString()}해정`,
+      `💵 달러 잔고: ${centsText(detail.usd)} (≈ ${detail.usdValue.toLocaleString()}해정 · ${rateText(detail.rate)})`,
+      `보유 종목 평가액: ${detail.holdingsValue.toLocaleString()}해정 (외국자산은 현재 환율로 환산)`,
       ...(detail.extraAsset ? [`🏦 예금·선물 평가금 - 대출: ${detail.extraAsset.toLocaleString()}해정`] : []),
       `총 자산: ${detail.totalAsset.toLocaleString()}해정`,
       changeText,
@@ -6593,10 +6897,12 @@ export const handlers = {
       const price = priceMap[f.stock];
       if (price === undefined) return `\`${f.id}\` ${futureText(f)}\n  상장폐지`;
       const equity = futureEquity(f, price);
+      const isUsd = f.cur === "usd";
+      const m = (n) => (isUsd ? centsText(n) : `${n.toLocaleString()}해정`);
       return [
         `\`${f.id}\` ${futureText(f)}`,
-        `  현재가 ${price.toLocaleString()}해정 · 평가금 ${equity.toLocaleString()}해정 · ${profitLabel(equity - f.margin, f.margin)}`,
-        `  💥 강제청산가 ${futureLiqPrice(f).toLocaleString()}해정 ${f.side === "long" ? "이하" : "이상"}`,
+        `  현재가 ${m(price)} · 평가금 ${m(equity)} · ${isUsd ? profitUsdLabel(equity - f.margin, f.margin) : profitLabel(equity - f.margin, f.margin)}`,
+        `  💥 강제청산가 ${m(futureLiqPrice(f))} ${f.side === "long" ? "이하" : "이상"}`,
       ].join("\n");
     };
     const domesticFutures = list.filter((f) => !isForeign(stockMap[f.stock]));
@@ -6618,6 +6924,14 @@ export const handlers = {
   },
 
   선물설명: async () => futuresHelpText(),
+
+  환율: async (interaction, env) => fxInfoText(env, interaction.member.user.id),
+
+  환전: async (interaction, env) => {
+    const userId = interaction.member.user.id;
+    const result = await exchangeMoney(env, userId, opt(interaction, "방향"), opt(interaction, "금액"));
+    return result.message;
+  },
 
   은행: async (interaction, env) => bankStatus(env, interaction.member.user.id),
 
