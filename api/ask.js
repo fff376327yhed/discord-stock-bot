@@ -113,8 +113,7 @@ export default {
     }
 
     // ---- Gemini 호출 (스트리밍, 키는 헤더로 보내요) ----
-    const model = process.env.GEMINI_MODEL || MODEL_DEFAULT;
-    const upstream = await fetch(
+    const call = (model) => fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`,
       {
         method: "POST",
@@ -126,9 +125,23 @@ export default {
         }),
       }
     );
-    if (!upstream.ok || !upstream.body) {
-      console.error(`Gemini 오류(${upstream.status}):`, await upstream.text().catch(() => ""));
-      if (upstream.status === 429) return json({ error: "오늘 AI 무료 사용량을 다 썼거나 질문이 몰렸어요. 잠시 뒤 다시 물어봐 주세요." }, 429);
+    // 일시적 오류(500/502/503/504, 네트워크 끊김)는 잠깐 쉬고 다시 시도해요. 계속 안 되면 예비 모델(GEMINI_FALLBACK_MODEL)로 넘어가요.
+    const retryable = (r) => !r || [500, 502, 503, 504].includes(r.status);
+    const models = [process.env.GEMINI_MODEL || MODEL_DEFAULT];
+    if (process.env.GEMINI_FALLBACK_MODEL) models.push(process.env.GEMINI_FALLBACK_MODEL);
+    let upstream = null;
+    for (const model of models) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt) await new Promise((r) => setTimeout(r, 700 * attempt));
+        upstream = await call(model).catch(() => null);
+        if (!retryable(upstream)) break;
+      }
+      if (!retryable(upstream)) break;
+    }
+    if (!upstream?.ok || !upstream.body) {
+      console.error(`Gemini 오류(${upstream?.status}):`, await upstream?.text().catch(() => ""));
+      if (upstream?.status === 503) return json({ error: "지금 AI 서버에 사용자가 몰려 있어요. 잠시 뒤 다시 물어봐 주세요." }, 503);
+      if (upstream?.status === 429) return json({ error: "오늘 AI 무료 사용량을 다 썼거나 질문이 몰렸어요. 잠시 뒤 다시 물어봐 주세요." }, 429);
       return json({ error: "AI 서버가 지금 답하지 못해요. 잠시 뒤 다시 시도해 주세요." }, 502);
     }
 
