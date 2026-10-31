@@ -685,6 +685,10 @@ export async function upsertStock(env, name, price, known, extra = {}) {
   const newSector = isNew && extra.sector === undefined && !isForeign({ kind: extra.kind ?? base.kind }) ? { sector: randomSector() } : {};
   // 변동성 등급도 같아요: 새 일반 종목이 등급을 안 정했으면 배정해요.
   const newTier = isNew && extra.volTier === undefined && !isForeign({ kind: extra.kind ?? base.kind }) ? { volTier: newStockTier(price) } : {};
+  // 새 일반 종목만 유통주식수 배정 (이미 있는 종목의 shares/outHeld/holderCount는 건드리지 않아요)
+  const newShares = isNew && extra.shares === undefined && !isForeign({ kind: extra.kind ?? base.kind })
+    ? { shares: VOL_TIER_SHARES[newTier.volTier || base.volTier || tierByPrice(price)], outHeld: 0, holderCount: 0 }
+    : {};
 
   await setDoc(env, `stocks/${encodeURIComponent(name)}`, {
     name,
@@ -700,6 +704,7 @@ export async function upsertStock(env, name, price, known, extra = {}) {
     ...(!known && Number.isFinite(base.flow) && base.flow !== 0 && extra.flow === undefined ? { flow: 0 } : {}),
     ...newSector,
     ...newTier,
+    ...newShares,
     ...extra,
   });
   invalidateStocksCache();
@@ -833,6 +838,12 @@ export async function buyStock(env, userId, stockName, qty) {
 
   const user = await getUser(env, userId);
   const usd = isForeign(stock); // 외국자산은 달러(센트)로 결제
+  if (!usd) {
+    const avail = floatAvailable(stock);
+    if (qty > avail) {
+      return { ok: false, message: `유통 가능한 수량을 넘었어요. (매수 가능: ${avail.toLocaleString()}주 / 총발행 ${sharesOf(stock).toLocaleString()}주)` };
+    }
+  }
   const have = usd ? user.usd || 0 : user.balance;
   const fee = tradeFee(stock.price * qty);
   const cost = stock.price * qty + fee; // 수수료 포함
@@ -846,10 +857,11 @@ export async function buyStock(env, userId, stockName, qty) {
   // 기존 보유분의 원가를 먼저 구한 뒤(수량 늘리기 전에) 이번 매수 금액을 더함
   const prevCost = costOf(user, stockName, stock.price);
   const balanceBefore = have;
+  const heldBefore = user.holdings[stockName] || 0; // 유통주식수/주주수 갱신용
 
   if (usd) user.usd = have - cost;
   else user.balance -= cost;
-  user.holdings[stockName] = (user.holdings[stockName] || 0) + qty;
+  user.holdings[stockName] = heldBefore + qty;
   user.costs[stockName] = prevCost + cost;
 
   const totalQty = user.holdings[stockName];
@@ -862,6 +874,7 @@ export async function buyStock(env, userId, stockName, qty) {
     saveUser(env, userId, user),
     addHistory(env, userId, `매수: ${summary} → ${usd ? "달러" : "잔고"} ${moneyOf(stock, after)}`),
     recordTradeFlow(env, [{ stock, amount: stock.price * qty }]), // 6단계: 다음 변동에 반영될 순매수 압력
+    ...(usd ? [] : [recordShareChange(env, [{ name: stockName, qty, newHolder: heldBefore === 0 }])]),
   ]);
 
   return {
@@ -923,6 +936,7 @@ export async function sellStock(env, userId, stockName, qty) {
     saveUser(env, userId, user),
     addHistory(env, userId, `매도: ${summary} · ${pl} → ${usd ? "달러" : "잔고"} ${moneyOf(stock, after)}`),
     recordTradeFlow(env, [{ stock, amount: -(stock.price * qty) }]),
+    ...(usd ? [] : [recordShareChange(env, [{ name: stockName, qty: -qty, closedHolder: held - qty === 0 }])]),
   ]);
 
   return {
@@ -997,6 +1011,19 @@ export async function buyStocks(env, userId, items) {
     const fee = tradeFee(principal);
     return { name: it.name, qty: it.qty, stock, usd: isForeign(stock), price: stock.price, fee, cost: principal + fee }; // cost는 수수료 포함
   });
+  {
+    const overFloat = rows.filter((r) => !r.usd && r.qty > floatAvailable(r.stock));
+    if (overFloat.length) {
+      return {
+        ok: false,
+        message: [
+          "유통 가능한 수량을 넘은 종목이 있어요:",
+          ...overFloat.map((r) => `- ${r.name}: 매수 가능 ${floatAvailable(r.stock).toLocaleString()}주 (요청 ${fmt(r.qty)}주)`),
+          "(아무것도 매수하지 않았어요.)",
+        ].join("\n"),
+      };
+    }
+  }
   const sumOf = (usd, key) => rows.filter((r) => r.usd === usd).reduce((sum, r) => sum + r[key], 0);
   const totalKrw = sumOf(false, "cost");
   const totalUsd = sumOf(true, "cost");
@@ -1021,8 +1048,10 @@ export async function buyStocks(env, userId, items) {
   const usdBefore = haveUsd;
   const lines = rows.map((r) => {
     const prevCost = costOf(user, r.name, r.price); // 수량을 늘리기 전에 기존 원가를 먼저 구함
-    user.holdings[r.name] = (user.holdings[r.name] || 0) + r.qty;
+    const heldBefore = user.holdings[r.name] || 0;
+    user.holdings[r.name] = heldBefore + r.qty;
     user.costs[r.name] = prevCost + r.cost;
+    r.newHolder = heldBefore === 0; // 유통주식수/주주수 갱신용
     const avg = Math.round(user.costs[r.name] / user.holdings[r.name]);
     return `- ${r.name} ${fmt(r.qty)}주 (-${moneyOf(r.stock, r.cost)}) · 평균 매수가 ${moneyOf(r.stock, avg)} (보유 ${fmt(user.holdings[r.name])}주)`;
   });
@@ -1035,6 +1064,7 @@ export async function buyStocks(env, userId, items) {
     saveUser(env, userId, user),
     addHistory(env, userId, `매수: ${rows.map((r) => `${r.name} ${fmt(r.qty)}주`).join(", ")} (-${moneyPair(totalKrw, totalUsd)}) → 잔고 ${fmt(user.balance)}해정 · 달러 ${centsText(user.usd)}`),
     recordTradeFlow(env, rows.map((r) => ({ stock: r.stock, amount: r.price * r.qty }))),
+    recordShareChange(env, rows.filter((r) => !r.usd).map((r) => ({ name: r.name, qty: r.qty, newHolder: r.newHolder }))),
   ]);
   return {
     ok: true,
@@ -1075,6 +1105,7 @@ export async function sellStocks(env, userId, items) {
   const krwBefore = user.balance;
   const usdBefore = user.usd || 0;
   let earnedKrw = 0, earnedUsd = 0, profitKrw = 0, profitUsd = 0, basisKrw = 0, basisUsd = 0;
+  const shareChanges = [];
   const lines = items.map((it, i) => {
     const stock = stocks[i];
     const usd = isForeign(stock);
@@ -1092,6 +1123,7 @@ export async function sellStocks(env, userId, items) {
     } else {
       user.costs[it.name] = prevCost - basis;
     }
+    if (!usd) shareChanges.push({ name: it.name, qty: -it.qty, closedHolder: held - it.qty === 0 });
     if (usd) { earnedUsd += earned; profitUsd += profit; basisUsd += basis; }
     else { earnedKrw += earned; profitKrw += profit; basisKrw += basis; }
     return `- ${it.name} ${fmt(it.qty)}주 (+${moneyOf(stock, earned)}) · ${usd ? profitUsdLabel(profit, basis) : profitLabel(profit, basis)}`;
@@ -1109,6 +1141,7 @@ export async function sellStocks(env, userId, items) {
       `매도: ${items.map((it) => `${it.name} ${fmt(it.qty)}주`).join(", ")} (+${moneyPair(earnedKrw, earnedUsd)}) → 잔고 ${fmt(user.balance)}해정 · 달러 ${centsText(user.usd)}`
     ),
     recordTradeFlow(env, items.map((it, i) => ({ stock: stocks[i], amount: -(stocks[i].price * it.qty) }))),
+    recordShareChange(env, shareChanges),
   ]);
   return {
     ok: true,
@@ -1767,6 +1800,16 @@ export const VOL_TIER_SIGMA = {
   중형: { normal: 0.05, surge: 0.22 },
   소형: { normal: 0.1, surge: 0.35 },
 };
+// ---------- 유통주식수 (등급별 고정 총발행주식수) ----------
+export const VOL_TIER_SHARES = { 대형: 5_000_000, 중형: 1_500_000, 소형: 400_000 };
+// 종목의 총발행주식수 (shares 필드가 없는 기존 종목은 등급 기본값으로)
+export function sharesOf(stock) {
+  return Number.isFinite(stock?.shares) ? stock.shares : VOL_TIER_SHARES[tierOf(stock)];
+}
+// 지금 매수 가능한 수량 (총발행주식수 - 유저 보유분 합계)
+export function floatAvailable(stock) {
+  return Math.max(0, sharesOf(stock) - (stock.outHeld || 0));
+}
 const TIER_LARGE_PRICE = 10000;
 const TIER_MID_PRICE = 2000;
 const TIER_LISTING_WEIGHTS = { 대형: 0.1, 중형: 0.3, 소형: 0.6 };
@@ -1829,6 +1872,24 @@ async function recordTradeFlow(env, trades) {
     await incrementFields(env, items);
   } catch (err) {
     console.error("거래 압력 기록 실패:", err.message);
+  }
+}
+
+// 유저 매수/매도를 종목 문서의 outHeld(유통 중 수량)·holderCount(주주수, 봇 제외)에 원자적으로 반영해요.
+// items: [{ name, qty(+매수/−매도), newHolder?: true(0→보유 시작), closedHolder?: true(보유→0) }]
+async function recordShareChange(env, items) {
+  if (!items.length) return;
+  const parts = [];
+  for (const it of items) {
+    const path = `stocks/${encodeURIComponent(it.name)}`;
+    parts.push({ path, field: "outHeld", by: it.qty });
+    if (it.newHolder) parts.push({ path, field: "holderCount", by: 1 });
+    if (it.closedHolder) parts.push({ path, field: "holderCount", by: -1 });
+  }
+  try {
+    await incrementFields(env, parts);
+  } catch (err) {
+    console.error("유통주식수 갱신 실패:", err.message);
   }
 }
 
@@ -5967,6 +6028,8 @@ export async function splitStock(env, name, ratio) {
     halt: null,
     splitAt: Date.now(),
     splitRatio: r,
+    shares: sharesOf(stock) * r, // 1주 → r주, 총발행주식수도 같이 늘어요 (지분율은 그대로)
+    outHeld: (stock.outHeld || 0) * r,
   });
   invalidateStocksCache();
   return { ok: true, ratio: r, before: oldPrice, after: newPrice, ...stats };
@@ -6016,7 +6079,13 @@ export async function finishNews(env, news, changes) {
       line += " → ⛔ 거래정지 중이라 반영되지 않았어요";
     } else {
       pct = ((c.after - c.before) / c.before) * 100;
-      line += ` → ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
+      if (it.kind === "유상증자") {
+        const addShares = Math.round(sharesOf(c) * 0.15); // 유상증자 1건당 유통주식수 +15%
+        await incrementFields(env, [{ path: `stocks/${encodeURIComponent(it.stock)}`, field: "shares", by: addShares }]).catch((err) =>
+          console.error("유상증자 유통주식수 처리 실패:", err.message)
+        );
+      }
+      line += ` → ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%${it.kind === "유상증자" ? " (유통주식수 +15%)" : ""}`;
       if (it.rumor) line += it.rumorTrue ? " · 소문이 사실이었어요" : " · 헛소문이었어요";
       else if (it.tone === "good") line += pct > 0 ? " · 공시대로 올랐어요" : " · 호재인데 안 올랐어요";
       else if (it.tone === "bad") line += pct < 0 ? " · 공시대로 내렸어요" : " · 악재인데 안 내렸어요";
@@ -7377,6 +7446,23 @@ function stockInfoText(stock, held = 0, divMod = 1, now = Date.now(), market = n
   ].join("\n");
 }
 
+// 봇(crowd) 중 누구라도 이 종목을 들고 있으면 true. 주주수 집계에서 봇 전체를 1명으로 묶을 때 써요.
+async function anyBotHolds(env, name) {
+  const { total } = crowdConfig();
+  if (total <= 0) return false;
+  const docs = await loadBots(env, total);
+  return docs.some((bots) => bots.some((b) => (b.h?.[name] || 0) > 0));
+}
+
+// /종목정보에 붙이는 유통주식수·주주수 줄 (봇은 들고 있으면 전체를 1명으로 세요)
+async function floatLine(env, stock) {
+  const total = sharesOf(stock);
+  const avail = floatAvailable(stock);
+  const botHolds = await anyBotHolds(env, stock.name).catch(() => false);
+  const holders = (stock.holderCount || 0) + (botHolds ? 1 : 0);
+  return `📦 유통주식수: **${total.toLocaleString()}주** 중 매수 가능 ${avail.toLocaleString()}주 (${((avail / total) * 100).toFixed(1)}%) · 👥 주주수: ${holders.toLocaleString()}명${botHolds ? " (AI 봇 포함)" : ""}`;
+}
+
 // 종목 1개의 시세 그래프: 문자열(안내/오류) 또는 { embeds: [...] }
 async function stockChart(env, name) {
     const stock = await getStock(env, name);
@@ -7976,7 +8062,8 @@ export const handlers = {
     const [stock, user, newsDoc] = await Promise.all([getStock(env, name), getUser(env, userId), getDoc(env, NEWS_PATH).catch(() => null)]);
     if (!stock) return `"${name}" 종목을 찾을 수 없어요. (상장폐지된 종목은 \`/상장폐지종류\`에서 볼 수 있어요)`;
     const market = stock.kind === "us" ? await getUsMarketStatus(env) : null;
-    return stockInfoText(stock, user.holdings[name] || 0, (newsDoc?.divMods || {})[name] ?? 1, Date.now(), market);
+    const base = stockInfoText(stock, user.holdings[name] || 0, (newsDoc?.divMods || {})[name] ?? 1, Date.now(), market);
+    return isForeign(stock) ? base : `${base}\n${await floatLine(env, stock)}`;
   },
   봇현황: async (_interaction, env) => getCrowdStats(env),
 
