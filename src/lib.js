@@ -1,5 +1,7 @@
 // 통합 라이브러리: env / firebase / listing / economy / actionlog / attendance / mining / chart / crowd / notify / orders / commands
 // (예전 src/*.js 12개를 한 파일로 합쳤어요. 파일 안 순서는 의존 순서예요.)
+// 외국자산(코인·해외주식) 시세/가격 계산은 별도 파일(foreign.js)에 있어요. (이 파일을 가져오지 않는 독립 모듈)
+import { isForeign, fetchCoinQuotes, buildForeignUpdate, isSuspectQuote } from "./foreign.js";
 
 // ============================================================
 // [env.js]
@@ -16,6 +18,7 @@ export function loadEnv() {
     CRON_SECRET: process.env.CRON_SECRET,
     ADMIN_PANEL_PASSWORD: process.env.ADMIN_PANEL_PASSWORD,
     ALLOWED_CHANNEL_ID: process.env.ALLOWED_CHANNEL_ID,
+    COINGECKO_API_KEY: process.env.COINGECKO_API_KEY, // 선택: 코인 시세(CoinGecko) 무료 데모 키
   };
 }
 
@@ -314,7 +317,8 @@ async function createStock(env, name, price) {
 export async function ensureMinimumStocks(env) {
   const cfg = await getListingConfig(env);
   const stocks = await listStocks(env);
-  if (stocks.length > cfg.triggerCount) return { added: [] };
+  // 외국자산(코인·해외주식)은 종목 수에 세지 않아요. (상장폐지돼도 자동 상장 기준에 영향 없음)
+  if (stocks.filter((s) => !isForeign(s)).length > cfg.triggerCount) return { added: [] };
 
   // 지금 상장 중인 이름은 제외하고, 목록 앞쪽부터 addCount개를 고름
   const existing = new Set(stocks.map((s) => s.name));
@@ -521,7 +525,8 @@ function priceAtTime(points, t) {
 
 // stocks: listStocks() 결과. 종목이 없으면 null
 export function marketIndex(stocks, now = Date.now()) {
-  const rows = stocks.map((s) => {
+  // 외국자산(코인·해외주식)은 해정지수(평균 주가)에서 빼요. 배율 때문에 지수가 한쪽으로 쏠리지 않게 하려는 거예요.
+  const rows = stocks.filter((s) => !isForeign(s)).map((s) => {
     const pts = getPriceHistory(s);
     return { name: s.name, price: s.price, pts: pts.length ? pts : [{ t: now, p: s.price }] };
   });
@@ -588,7 +593,8 @@ export function marketIndexText(stocks, now = Date.now()) {
 // 종목 등록/가격 변경. 역대 최고가(maxPrice)와 그래프용 시세 기록(history)도 함께 저장해요.
 // known: 이미 읽어둔 종목 문서 (시세 변동처럼 방금 읽어온 경우 넘기면 읽기를 아낄 수 있어요)
 // 안 넘기면 기존 문서를 읽어서 확인합니다. (관리자 /시세설정, /종목추가 등)
-export async function upsertStock(env, name, price, known) {
+// extra: 같이 저장할 추가 필드 (외국자산의 baseReal/lastReal/quoteAt/stale 등. 쓰기 한 번으로 같이 저장돼요)
+export async function upsertStock(env, name, price, known, extra = {}) {
   const base = known || (await getStock(env, name)) || {};
 
   const prevMax = Number.isFinite(base.maxPrice) ? base.maxPrice : Number.isFinite(base.price) ? base.price : 0;
@@ -616,6 +622,7 @@ export async function upsertStock(env, name, price, known) {
     history,
     updatedAt: new Date(),
     ...(isNew ? { listedAt: Date.now() } : {}),
+    ...extra,
   });
   invalidateStocksCache();
 }
@@ -1206,8 +1213,67 @@ export function getDelistedHistory(d) {
   ];
 }
 
+// ---------- 외국자산(코인·해외주식) 시세 반영 ----------
+// 외국자산 종목들의 실제 시세를 한 번에 가져와요. 반환: { 심볼: { price, at, stale } }
+// 조회에 실패해도 예외를 던지지 않고 빈 값을 돌려줘요. (시세 변동 전체가 멈추지 않게)
+async function loadForeignQuotes(env, stocks) {
+  const coins = [...new Set(stocks.filter((s) => s.kind === "crypto" && s.symbol).map((s) => String(s.symbol).trim()))];
+  if (coins.length === 0) return {};
+  try {
+    const { quotes, errors } = await fetchCoinQuotes(coins, env);
+    if (errors.length) console.error("외국자산 시세 조회 문제:", errors.join(" / "));
+    return quotes;
+  } catch (err) {
+    console.error("외국자산 시세 조회 실패:", err.message);
+    return {};
+  }
+}
+
+// 외국자산 한 종목을 실제 시세로 갱신해요. 반환: 일반 종목과 같은 모양의 변동 내역, 또는 null(이번엔 변동 없음/시세 못 받음)
+//  - 시세를 못 받았거나 이상한 시세(갑자기 반토막 등)면 가격은 그대로 두고 "시세 지연(stale)"만 표시해요. 공지에는 올리지 않아요.
+//  - 새 가격이 DELIST_PRICE 이하면 일반 종목처럼 상장폐지돼요.
+async function updateForeignStock(env, stock, quotes) {
+  const path = `stocks/${encodeURIComponent(stock.name)}`;
+  let quote = quotes[String(stock.symbol || "").trim()];
+
+  if (quote && isSuspectQuote(stock, quote)) {
+    console.error(`외국자산 이상 시세 무시 (${stock.name}): 실제가 ${stock.lastReal} → ${quote.price}`);
+    quote = null;
+  }
+
+  if (!quote) {
+    // 이미 시세 지연으로 표시돼 있으면 쓰기를 아껴요
+    if (stock.stale !== true) {
+      await setDoc(env, path, { stale: true });
+      invalidateStocksCache();
+    }
+    return null;
+  }
+
+  const upd = buildForeignUpdate(stock, quote);
+  const before = stock.price;
+  const after = upd.price;
+  const pct = before > 0 ? ((after - before) / before) * 100 : 0;
+  const maxPrice = Math.max(Number.isFinite(stock.maxPrice) ? stock.maxPrice : stock.price, stock.price);
+
+  if (after <= DELIST_PRICE) {
+    const holders = await delistStock(env, stock.name, {
+      lastPrice: before,
+      finalPrice: after,
+      maxPrice,
+      history: stock.history,
+      listedAt: stock.listedAt,
+    });
+    return { name: stock.name, before, after, pct, delisted: true, holders };
+  }
+
+  // 가격·시세 기록과 실제 시세 필드(baseReal 등)를 쓰기 한 번으로 저장
+  await upsertStock(env, stock.name, after, stock, upd.fields);
+  return { name: stock.name, before, after, pct, delisted: false, holders: [] };
+}
+
 // ---------- 시세 변동 ----------
-// 모든 종목 가격을 minPct~maxPct(%) 범위에서 무작위로 변동시킴 (최저가 1해정 보장)
+// 모든 종목 가격을 minPct~maxPct(%) 범위에서 무작위로 변동시킴 (외국자산은 실제 시세로 변동) (최저가 1해정 보장)
 // 변동 후 가격이 DELIST_PRICE 이하이면 상장폐지 처리합니다.
 // 반환: [{ name, before, after, pct, delisted, holders }]
 //   - delisted: 상장폐지 여부
@@ -1218,7 +1284,21 @@ export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, cr
   const stocks = await listStocks(env);
   const changes = [];
 
+  // 외국자산(코인·해외주식)은 랜덤 대신 실제 시세로 움직여요. 시세는 한 번에 모아서 가져와요.
+  const quotes = await loadForeignQuotes(env, stocks);
+
   for (const stock of stocks) {
+    if (isForeign(stock)) {
+      // 랜덤 변동·급등락(-100% 폭락 포함)·봇 영향·공시는 모두 적용하지 않아요.
+      try {
+        const change = await updateForeignStock(env, stock, quotes);
+        if (change) changes.push(change); // 일반 종목과 같은 모양이라 공지·알림·선물 정산이 그대로 이어져요
+      } catch (err) {
+        console.error(`외국자산 갱신 실패 (${stock.name}):`, err.message); // 한 종목이 실패해도 나머지는 계속해요
+      }
+      continue;
+    }
+
     const pct = Math.random() < crashChance
       ? crashPct
       : minPct + Math.random() * (maxPct - minPct) + (impact[stock.name] || 0) + (news[stock.name] || 0); // news = 공시 기울기
@@ -2206,7 +2286,9 @@ export async function prepareCrowd(env) {
   const { total, influence } = crowdConfig();
   if (total <= 0) return null;
 
-  const [docs, stocks] = await Promise.all([loadBots(env, total), listStocks(env)]);
+  const [docs, allStocks] = await Promise.all([loadBots(env, total), listStocks(env)]);
+  // 외국자산(코인·해외주식)은 봇이 거래하지 않아요. (실제 시세를 따라가는 종목이라 봇 쏠림이 가격에 영향을 주면 안 돼요)
+  const stocks = allStocks.filter((s) => !isForeign(s));
   if (stocks.length === 0) return null;
 
   const rows = stocks.map((s) => ({
@@ -4146,7 +4228,8 @@ export async function processDividends(env) {
   await setDoc(env, DIVIDEND_PATH, { lastDay: day });
 
   const [users, stocks] = await Promise.all([listCollection(env, "users"), listStocks(env)]);
-  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  // 외국자산(코인·해외주식)은 배당이 없어요. (priceMap에서 빼면 아래 반복문에서 자동으로 건너뛰어요)
+  const priceMap = Object.fromEntries(stocks.filter((s) => !isForeign(s)).map((s) => [s.name, s.price]));
   // 배당 확대(×2)/무배당(×0) 공시가 있으면 이번 지급에 반영해요
   const newsDoc = (await getDoc(env, NEWS_PATH).catch(() => null)) || {};
   const divMods = newsDoc.divMods || {};
@@ -4209,7 +4292,7 @@ export async function processDividends(env) {
 export async function dividendInfo(env, userId) {
   const [user, stocks, state, newsDoc] = await Promise.all([getUser(env, userId), listStocks(env), getDoc(env, DIVIDEND_PATH), getDoc(env, NEWS_PATH).catch(() => null)]);
   const mods = newsDoc?.divMods || {};
-  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const priceMap = Object.fromEntries(stocks.filter((s) => !isForeign(s)).map((s) => [s.name, s.price])); // 외국자산은 배당 없음
   const rows = [];
   let sum = 0;
   for (const [name, qty] of Object.entries(user.holdings)) {
@@ -4450,7 +4533,7 @@ export async function publishNews(env) {
   const queued = new Set(Object.values(doc.queue || {}).map((i) => i.stock));
   const cool = doc.cool || {};
   const eligible = stocks.filter(
-    (s) => s.price > DELIST_PRICE && !queued.has(s.name) && !(cool[s.name] && now - cool[s.name] < NEWS_COOLDOWN_HOURS * NEWS_HOUR_MS)
+    (s) => !isForeign(s) && s.price > DELIST_PRICE && !queued.has(s.name) && !(cool[s.name] && now - cool[s.name] < NEWS_COOLDOWN_HOURS * NEWS_HOUR_MS)
   );
   if (eligible.length === 0) return { published: 0, reason: "공시할 수 있는 종목이 없어요 (쿨다운 중)" };
 
@@ -4474,6 +4557,7 @@ export async function postManualNews(env, stockName, text, toneKey) {
   if (content.length < 1 || content.length > 150) return { ok: false, message: "공시 내용은 1~150자로 적어 주세요." };
   const stock = await getStock(env, stockName);
   if (!stock) return { ok: false, message: `"${stockName}" 종목을 찾지 못했어요.` };
+  if (isForeign(stock)) return { ok: false, message: "외국자산(코인·해외주식)은 실제 시세를 따라가서 공시를 올릴 수 없어요." };
 
   const now = Date.now();
   const item = {

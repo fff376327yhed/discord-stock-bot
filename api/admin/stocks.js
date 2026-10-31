@@ -9,6 +9,10 @@ import {
   getAnnounceConfig, setAnnounceConfig,
   getListingConfig, setListingConfig, parseNames, ensureMinimumStocks, LISTING_PRICE,
 } from "../../src/lib.js";
+import { isForeign } from "../../src/Foreign.js";
+
+// 외국자산(코인·해외주식) 종목 문서에만 있는 필드들 (이름을 바꿀 때 새 문서로 그대로 옮겨요)
+const FOREIGN_FIELDS = ["kind", "symbol", "source", "mult", "startPrice", "baseReal", "lastReal", "quoteAt", "stale"];
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -195,7 +199,11 @@ async function handle(request) {
         const exists = await getStock(env, to);
         if (exists) return json({ error: `"${to}" 종목이 이미 있습니다.` }, 400);
         const old = await getStock(env, from); // 이름만 바꾸는 거라 상장일은 원래 종목 것을 이어받음
-        await upsertStock(env, to, price);
+        // 외국자산(코인·해외주식)이면 종류·심볼·배율·기준 실제가 등도 새 문서로 옮겨요. (안 옮기면 일반 종목으로 변해요)
+        const foreignExtra = isForeign(old)
+          ? Object.fromEntries(FOREIGN_FIELDS.filter((k) => old[k] !== undefined && old[k] !== null).map((k) => [k, old[k]]))
+          : {};
+        await upsertStock(env, to, price, undefined, foreignExtra);
         if (old && Number.isFinite(old.listedAt)) {
           await setDoc(env, `stocks/${encodeURIComponent(to)}`, { listedAt: old.listedAt });
         }
@@ -206,6 +214,8 @@ async function handle(request) {
 
       // 모든 종목을 정한 가격(해정)으로 초기화 (최고가·시세 기록도 그 가격에서 새로 시작)
       // price를 안 보내면 예전처럼 LISTING_PRICE(1000해정)로 해요.
+      // 외국자산(코인·해외주식)은 그 가격을 새 상장가(startPrice)로 삼고, 지금 실제 시세를 새 기준(baseReal)으로 다시 잡아요.
+      // (안 그러면 다음 변동 때 옛 기준 실제가로 계산돼서 가격이 원래대로 튀어요)
       case "resetStocks": {
         const price = body.price === undefined ? LISTING_PRICE : Number(body.price);
         if (!Number.isInteger(price) || price <= DELIST_PRICE) {
@@ -220,10 +230,13 @@ async function handle(request) {
             maxPrice: price,
             history: { [at]: price },
             updatedAt: new Date(),
+            ...(isForeign(s)
+              ? { startPrice: price, baseReal: Number.isFinite(s.lastReal) && s.lastReal > 0 ? s.lastReal : null }
+              : {}),
           })
         );
         invalidateStocksCache();
-        return json({ ok: true, count: stocks.length, price });
+        return json({ ok: true, count: stocks.length, price, foreign: stocks.filter(isForeign).length });
       }
 
       // 모든 유저의 잔고를 정한 금액(해정)으로 초기화
