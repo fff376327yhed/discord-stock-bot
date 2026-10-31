@@ -1,7 +1,7 @@
 // 통합 라이브러리: env / firebase / listing / economy / actionlog / attendance / mining / chart / crowd / notify / orders / commands
 // (예전 src/*.js 12개를 한 파일로 합쳤어요. 파일 안 순서는 의존 순서예요.)
 // 외국자산(코인·해외주식) 시세/가격 계산은 별도 파일(foreign.js)에 있어요. (이 파일을 가져오지 않는 독립 모듈)
-import { isForeign, foreignIcon, fetchCoinQuotes, fetchUsQuotes, usSymbolOf, buildForeignUpdate, isSuspectQuote } from "./foreign.js";
+import { isForeign, foreignIcon, fetchCoinQuotes, fetchUsQuotes, usSymbolOf, buildForeignUpdate, isSuspectQuote, getUsMarketStatus, closedMessage } from "./foreign.js";
 
 // ============================================================
 // [env.js]
@@ -735,10 +735,21 @@ function balanceLine(before, after) {
   return `💰 잔고: ${before.toLocaleString()} → **${after.toLocaleString()}해정** (${fmtSigned(diff)})`;
 }
 
+// ---------- 미국 장 마감 막기 ----------
+// 미국 주식은 장이 닫혀 있으면 사고팔 수 없어요. (코인·일반 종목은 항상 가능)
+// 닫혀 있으면 안내 문장을, 열려 있거나 해당 없으면 null 을 돌려줘요.
+async function usClosedNotice(env, stocks) {
+  if (!stocks.some((s) => s && s.kind === "us")) return null;
+  const status = await getUsMarketStatus(env);
+  return status.open ? null : closedMessage(status);
+}
+
 // ---------- 주식 매수/매도 ----------
 export async function buyStock(env, userId, stockName, qty) {
   const stock = await getStock(env, stockName);
   if (!stock) return { ok: false, message: `"${stockName}" 종목을 찾을 수 없어요.` };
+  const closed = await usClosedNotice(env, [stock]);
+  if (closed) return { ok: false, message: closed };
 
   const user = await getUser(env, userId);
   const fee = tradeFee(stock.price * qty);
@@ -779,6 +790,8 @@ export async function buyStock(env, userId, stockName, qty) {
 export async function sellStock(env, userId, stockName, qty) {
   const stock = await getStock(env, stockName);
   if (!stock) return { ok: false, message: `"${stockName}" 종목을 찾을 수 없어요.` };
+  const closed = await usClosedNotice(env, [stock]);
+  if (closed) return { ok: false, message: closed };
 
   const user = await getUser(env, userId);
   const held = user.holdings[stockName] || 0;
@@ -869,6 +882,11 @@ export async function buyStocks(env, userId, items) {
   if (missing.length) {
     return { ok: false, message: `찾을 수 없는 종목이 있어요: ${missing.map((i) => `"${i.name}"`).join(", ")}\n(아무것도 매수하지 않았어요.)` };
   }
+  {
+    const closedNames = items.filter((_, i) => stocks[i].kind === "us").map((i) => i.name);
+    const closed = await usClosedNotice(env, stocks);
+    if (closed) return { ok: false, message: `${closed}\n(미국 주식: ${closedNames.join(", ")})\n(아무것도 매수하지 않았어요.)` };
+  }
 
   const rows = items.map((it, i) => {
     const principal = stocks[i].price * it.qty;
@@ -917,6 +935,11 @@ export async function sellStocks(env, userId, items) {
     }
   });
   if (problems.length) return { ok: false, message: [...problems, "(아무것도 매도하지 않았어요.)"].join("\n") };
+  {
+    const closedNames = items.filter((_, i) => stocks[i].kind === "us").map((i) => i.name);
+    const closed = await usClosedNotice(env, stocks);
+    if (closed) return { ok: false, message: `${closed}\n(미국 주식: ${closedNames.join(", ")})\n(아무것도 매도하지 않았어요.)` };
+  }
 
   const balanceBefore = user.balance;
   let totalEarned = 0;
@@ -1249,7 +1272,7 @@ function agoText(ms) {
 }
 
 // /종목정보에 들어갈 외국자산 전용 줄들 (배당 줄 자리를 대신해요. 외국자산은 배당이 없어요)
-function foreignInfoLines(stock, now = Date.now()) {
+function foreignInfoLines(stock, now = Date.now(), market = null) {
   const mult = Number.isFinite(stock.mult) && stock.mult > 0 ? stock.mult : 3;
   const start = Number.isFinite(stock.startPrice) && stock.startPrice > 0 ? stock.startPrice : 1000;
   const source = SOURCE_LABEL[stock.source] || stock.source || "실제 시세";
@@ -1269,7 +1292,16 @@ function foreignInfoLines(stock, now = Date.now()) {
     const age = Number.isFinite(stock.quoteAt) ? ` (마지막 시세 ${agoText(now - stock.quoteAt)})` : "";
     lines.push(`⚠️ 시세 지연: 최근 실제 시세를 못 받아서 가격이 그대로예요.${age}`);
   }
-  lines.push(`💵 배당: 외국자산(코인·해외주식)은 배당이 없어요. · 🕒 실제 시세를 따라 15분마다 움직여요.${stock.kind === "us" ? " (미국 장이 닫혀 있는 동안은 마지막 가격 그대로예요)" : ""}`);
+  lines.push(`💵 배당: 외국자산(코인·해외주식)은 배당이 없어요. · 🕒 실제 시세를 따라 15분마다 움직여요.`);
+  if (stock.kind === "us") {
+    if (market && !market.open) {
+      lines.push(`${closedMessage(market)}\n   장이 닫혀 있는 동안은 가격이 그대로이고, 매수·매도·선물이 막혀요. (예약·손절·익절은 장이 열리면 체결돼요)`);
+    } else if (market && market.open) {
+      lines.push("🟢 미국 장이 열려 있어요.");
+    } else {
+      lines.push("🌙 미국 장이 닫혀 있는 동안은 가격이 그대로이고, 매수·매도·선물이 막혀요.");
+    }
+  }
   return lines;
 }
 
@@ -2908,6 +2940,9 @@ async function safeDM(env, userId, content) {
 export async function processOrders(env) {
   const [docs, stocks] = await Promise.all([listCollection(env, "orders"), listStocks(env)]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const usNames = new Set(stocks.filter((s) => s.kind === "us").map((s) => s.name));
+  // 미국 장이 닫혀 있으면 미국 주식 예약은 취소하지 않고 그대로 두었다가, 장이 열리면 체결해요.
+  const usOpen = usNames.size === 0 ? true : (await getUsMarketStatus(env)).open;
   const summary = { filled: 0, cancelled: 0 };
 
   await Promise.all(
@@ -2921,6 +2956,8 @@ export async function processOrders(env) {
         const price = priceMap[o.stock];
         if (price === undefined) {
           hits.push({ id, o, gone: true });
+        } else if (!usOpen && usNames.has(o.stock)) {
+          continue; // 장 마감: 보류 (취소 아님)
         } else if (o.side === "buy" || o.dir === "down" ? price <= o.price : price >= o.price) {
           hits.push({ id, o, price });
         }
@@ -3169,6 +3206,8 @@ export async function openFuture(env, userId, { stock: stockName, side, margin, 
 
   const stock = await getStock(env, stockName);
   if (!stock) return { ok: false, message: `"${stockName}" 종목을 찾을 수 없어요.` };
+  const closed = await usClosedNotice(env, [stock]);
+  if (closed) return { ok: false, message: closed };
 
   const items = await getFutureItems(env, userId);
   if (Object.keys(items).length >= MAX_FUTURES_PER_USER) {
@@ -3215,9 +3254,23 @@ export async function openFuture(env, userId, { stock: stockName, side, margin, 
 export async function closeFutures(env, userId, targets) {
   const [items, stocks] = await Promise.all([getFutureItems(env, userId), listStocks(env)]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
-  const ids = targets.includes("all") ? Object.keys(items) : [...new Set(targets)].filter((t) => items[t]);
+  let ids = targets.includes("all") ? Object.keys(items) : [...new Set(targets)].filter((t) => items[t]);
   if (ids.length === 0) {
     return { ok: false, message: "정산할 선물 포지션을 찾지 못했어요. 칸을 눌러 목록에서 골라 주세요." };
+  }
+  // 미국 주식 선물은 장이 닫혀 있으면 정산할 수 없어요. ("전체 정산"이면 나머지만 정산하고 안내해요)
+  let heldBack = [];
+  if (stocks.some((s) => s.kind === "us")) {
+    const usNames = new Set(stocks.filter((s) => s.kind === "us").map((s) => s.name));
+    const blocked = ids.filter((id) => usNames.has(items[id].stock));
+    if (blocked.length) {
+      const closed = await usClosedNotice(env, stocks.filter((s) => s.kind === "us"));
+      if (closed) {
+        if (blocked.length === ids.length) return { ok: false, message: `${closed}\n(미국 주식 선물은 장이 열려야 정산할 수 있어요.)` };
+        heldBack = blocked;
+        ids = ids.filter((id) => !blocked.includes(id));
+      }
+    }
   }
 
   const user = await getUser(env, userId);
@@ -3250,7 +3303,12 @@ export async function closeFutures(env, userId, targets) {
 
   return {
     ok: true,
-    message: [`**선물 ${ids.length}건 정산 완료**`, ...lines, balanceLine(balanceBefore, user.balance)].join("\n"),
+    message: [
+      `**선물 ${ids.length}건 정산 완료**`,
+      ...lines,
+      balanceLine(balanceBefore, user.balance),
+      ...(heldBack.length ? [`🌙 미국 장이 닫혀 있어서 ${heldBack.length}건(${[...new Set(heldBack.map((id) => items[id]?.stock))].join(", ")})은 정산하지 않고 그대로 두었어요. 장이 열리면 다시 정산해 주세요.`] : []),
+    ].join("\n"),
   };
 }
 
@@ -5419,6 +5477,11 @@ export async function autocomplete(interaction, env) {
   // ----- 종목 이름 (종목추가는 새 이름을 입력하는 거라 제외) -----
   if (base === "종목" && command !== "종목추가") {
     const stocks = await listStocksForAutocomplete(env); // 이름순 (60초 캐시)
+    // 미국 장이 닫혀 있으면 미국 주식 옆에 🌙장마감 표시 (자동완성은 3초 제한이라 확인은 1초까지만 기다려요)
+    const usClosed = stocks.some((s) => s.kind === "us" && ["매수", "예약매수", "매도", "예약매도", "자동매도", "선물"].includes(command))
+      ? !(await getUsMarketStatus(env, Date.now(), 1000)).open
+      : false;
+    const mTag = (s) => staleTag(s) + (usClosed && s.kind === "us" ? " 🌙장마감" : "");
 
     const userId = interaction.member?.user?.id;
     const rawUser = userId ? await getUser(env, userId) : { balance: 0, holdings: {}, costs: {} };
@@ -5429,7 +5492,7 @@ export async function autocomplete(interaction, env) {
       const w = userId ? await getWatch(env, userId) : { stocks: {}, alerts: {} };
       const items = stocks
         .filter((s) => w.stocks[s.name])
-        .map((s) => ({ label: `${iconName(s)} (${s.price.toLocaleString()}해정)${staleTag(s)}`, value: s.name }));
+        .map((s) => ({ label: `${iconName(s)} (${s.price.toLocaleString()}해정)${mTag(s)}`, value: s.name }));
       if (items.length > 1) items.push({ label: "전체 삭제", value: "all" });
       return textChoices(items, keyword);
     }
@@ -5443,7 +5506,7 @@ export async function autocomplete(interaction, env) {
             const qty = user.holdings[s.name];
             const cost = costOf(user, s.name, s.price);
             return {
-              label: `${iconName(s)}${dangerTag(s.price, true)} (보유 ${qty}주 · ${s.price.toLocaleString()}해정 · ${profitLabel(s.price * qty - cost, cost, true)})${staleTag(s)}`,
+              label: `${iconName(s)}${dangerTag(s.price, true)} (보유 ${qty}주 · ${s.price.toLocaleString()}해정 · ${profitLabel(s.price * qty - cost, cost, true)})${mTag(s)}`,
               value: s.name,
             };
           }),
@@ -5484,7 +5547,7 @@ export async function autocomplete(interaction, env) {
       // 매수는 지금 잔고로 최대 몇 주까지 살 수 있는지 함께 표시
       return textChoices(
         stocks.map((s) => ({
-          label: `${iconName(s)}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정 · 최대 ${maxBuyQty(user.balance, s.price).toLocaleString()}주)${staleTag(s)}`,
+          label: `${iconName(s)}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정 · 최대 ${maxBuyQty(user.balance, s.price).toLocaleString()}주)${mTag(s)}`,
           value: s.name,
         })),
         keyword
@@ -5492,7 +5555,7 @@ export async function autocomplete(interaction, env) {
     }
 
     return textChoices(
-      pickable(stocks.map((s) => ({ label: `${iconName(s)}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정)${staleTag(s)}`, value: s.name }))),
+      pickable(stocks.map((s) => ({ label: `${iconName(s)}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정)${mTag(s)}`, value: s.name }))),
       keyword
     );
   }
@@ -5775,7 +5838,7 @@ async function reserveOrder(side, interaction, env) {
 
 // 종목 1개의 정보 카드: 상장일 · 최고가 · 오늘 변동폭 · 배당 예상을 한 화면에
 // held: 내가 가진 수량, divMod: 공시로 정해진 배당 배수 (1 = 평소, 2 = 확대, 0 = 무배당)
-function stockInfoText(stock, held = 0, divMod = 1, now = Date.now()) {
+function stockInfoText(stock, held = 0, divMod = 1, now = Date.now(), market = null) {
   const sgn = (n, d = 1) => `${n > 0 ? "+" : n < 0 ? "-" : ""}${Math.abs(n).toFixed(d)}`;
   const mark = (n) => (n > 0 ? UP_MARK : n < 0 ? DOWN_MARK : "➖");
 
@@ -5813,7 +5876,7 @@ function stockInfoText(stock, held = 0, divMod = 1, now = Date.now()) {
     `🗓️ 상장일: ${listedText(stock.listedAt)} (한국시간)${days ? ` · 상장 ${days.toLocaleString()}일째` : ""}`,
     `🏆 역대 최고가: **${maxPrice.toLocaleString()}해정** (지금은 최고가의 ${ofMax.toFixed(1)}%)`,
     `📏 오늘 변동폭: 최고 ${hi.toLocaleString()} ~ 최저 ${lo.toLocaleString()}해정 (**${rangePct.toFixed(1)}%**)`,
-    ...(isForeign(stock) ? foreignInfoLines(stock, now) : [divLine]),
+    ...(isForeign(stock) ? foreignInfoLines(stock, now, market) : [divLine]),
   ].join("\n");
 }
 
@@ -6294,7 +6357,8 @@ export const handlers = {
     const name = String(opt(interaction, "종목") ?? "").trim();
     const [stock, user, newsDoc] = await Promise.all([getStock(env, name), getUser(env, userId), getDoc(env, NEWS_PATH).catch(() => null)]);
     if (!stock) return `"${name}" 종목을 찾을 수 없어요. (상장폐지된 종목은 \`/상장폐지종류\`에서 볼 수 있어요)`;
-    return stockInfoText(stock, user.holdings[name] || 0, (newsDoc?.divMods || {})[name] ?? 1);
+    const market = stock.kind === "us" ? await getUsMarketStatus(env) : null;
+    return stockInfoText(stock, user.holdings[name] || 0, (newsDoc?.divMods || {})[name] ?? 1, Date.now(), market);
   },
   봇현황: async (_interaction, env) => getCrowdStats(env),
 
