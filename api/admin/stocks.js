@@ -24,8 +24,8 @@ const CORS = {
 const ADMIN_LABELS = {
   upsertStock: "종목 저장", upsertForeign: "외국자산 저장", removeStock: "종목 삭제", renameStock: "종목 이름 변경", resetStocks: "종목 가격 초기화",
   upsertProduct: "상품 저장", removeProduct: "상품 삭제", renameProduct: "상품 이름 변경",
-  setBalance: "유저 잔고 수정", setUserItem: "유저 보유 상품 수정",
-  resetBalances: "잔고 초기화", resetBots: "봇 초기화", resetItems: "보유 상품 초기화",
+  setBalance: "유저 잔고 수정", setUserItem: "유저 보유 상품 수정", setUsd: "유저 달러 수정",
+  resetBalances: "잔고 초기화", resetUsd: "달러 초기화", resetBots: "봇 초기화", resetItems: "보유 상품 초기화",
   setAttendance: "출석 설정", setAnnounce: "가격 변동 알림 설정", setListing: "자동 상장 설정",
   setPassword: "관리자 비밀번호 변경", clearPassword: "관리자 비밀번호 되돌리기", purgeLogs: "오래된 로그 삭제",
 };
@@ -304,6 +304,18 @@ async function handle(request) {
         return json({ ok: true, count: users.length, balance });
       }
 
+      // 모든 유저의 달러 잔고를 정한 금액(달러 단위, 소수 가능)으로 초기화. 저장은 센트 정수예요.
+      case "resetUsd": {
+        const dollars = body.dollars === undefined ? 0 : Number(body.dollars);
+        if (!Number.isFinite(dollars) || dollars < 0) {
+          return json({ error: "달러는 0 이상의 숫자여야 합니다." }, 400);
+        }
+        const usd = Math.round(dollars * 100);
+        const users = await listCollection(env, "users");
+        await inChunks(users, (u) => setDoc(env, `users/${u.id}`, { usd }));
+        return json({ ok: true, count: users.length, dollars, usd });
+      }
+
       // AI 봇 초기화: 현금을 정한 금액으로, 보유 종목은 비움 (newPersonality=true면 성격도 새로 뽑기)
       // 봇은 users 컬렉션에 없어서 잔고 초기화와는 따로 해야 해요.
       case "resetBots": {
@@ -404,6 +416,20 @@ async function handle(request) {
         user.balance = Math.round(balance);
         await saveUser(env, userId, user);
         return json({ ok: true });
+      }
+
+      // 유저 1명의 달러 잔고 수정 (dollars: 달러 단위, 소수 가능 / 저장은 센트 정수)
+      case "setUsd": {
+        const userId = String(body.userId || "");
+        const dollars = Number(body.dollars);
+        if (!userId) return json({ error: "userId가 없습니다." }, 400);
+        if (!Number.isFinite(dollars) || dollars < 0) {
+          return json({ error: "달러는 0 이상의 숫자여야 합니다." }, 400);
+        }
+        const user = await getUser(env, userId);
+        user.usd = Math.round(dollars * 100);
+        await saveUser(env, userId, user);
+        return json({ ok: true, usd: user.usd });
       }
 
       case "setUserItem": {

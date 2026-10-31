@@ -1170,9 +1170,11 @@ export async function getUserDetail(env, userId) {
 // info: { lastPrice: 폐지 직전 가격, finalPrice: 폐지를 일으킨 변동 후 가격, maxPrice: 역대 최고가, history: 시세 기록 맵 }
 // 반환값: 영향받은 유저 ID 목록 (알림 DM용)
 export async function delistStock(env, stockName, info) {
-  const { lastPrice, finalPrice, maxPrice, history, listedAt } = info;
+  const { lastPrice, finalPrice, maxPrice, history, listedAt, kind } = info;
   await removeStock(env, stockName);
 
+  const usd = isForeign({ kind }); // 외국자산은 원가가 센트라서 해정으로 환산해 실현손익에 반영해요
+  const fxRate = usd ? (await getFxRate(env)).rate : 0;
   const users = await listCollection(env, "users");
   const holders = [];
 
@@ -1190,7 +1192,8 @@ export async function delistStock(env, stockName, info) {
     // 보험: 기간 안의 보험이 있으면 폐지 순간 들고 있던 수량(최대 가입 수량)만큼 보험금을 줘요
     const policy = u.insurance && u.insurance[stockName];
     const insured = policy && policy.expiresAt > Date.now() ? Math.min(policy.qty, held) * policy.payout : 0;
-    const realizedProfit = (u.realizedProfit || 0) - cost + insured;
+    const lossKrw = usd ? Math.round((cost * fxRate) / 100) : cost;
+    const realizedProfit = (u.realizedProfit || 0) - lossKrw + insured;
 
     try {
       const saved = { holdings, costs, realizedProfit };
@@ -1208,7 +1211,7 @@ export async function delistStock(env, stockName, info) {
         addHistory(
           env,
           u.id,
-          `상장폐지: ${stockName} ${held.toLocaleString()}주 소멸 (손실 -${cost.toLocaleString()}해정)`
+          `상장폐지: ${stockName} ${held.toLocaleString()}주 소멸 (손실 -${usd ? `${centsText(cost)} ≈ ${lossKrw.toLocaleString()}해정` : `${cost.toLocaleString()}해정`})`
         ),
       ]);
       // 같은 기록 문서에 동시에 쓰면 한쪽이 덮어써져서, 보험금 기록은 뒤에 따로 남겨요
@@ -1235,6 +1238,7 @@ export async function delistStock(env, stockName, info) {
 
     await setDoc(env, `delisted/${key}`, {
       name: stockName,
+      ...(kind ? { kind } : {}), // 외국자산이면 종류 저장 (표시할 때 $로 보여줘요)
       delistedAt,
       ...(Number.isFinite(listedAt) ? { listedAt } : {}), // 상장일 (기록이 있는 종목만)
       lastPrice,
@@ -1427,6 +1431,7 @@ async function updateForeignStock(env, stock, quotes) {
 
   if (after <= DELIST_PRICE) {
     const holders = await delistStock(env, stock.name, {
+      kind: stock.kind,
       lastPrice: before,
       finalPrice: after,
       maxPrice,
@@ -2635,7 +2640,7 @@ export async function sendDM(env, userId, content) {
 function dropText(c) {
   const lost = c.before - c.after;
   const pct = c.before > 0 ? (lost / c.before) * 100 : 0;
-  return `-${lost.toLocaleString()}해정, -${pct.toFixed(1)}%`;
+  return `-${moneyOf(c, lost)}, -${pct.toFixed(1)}%`;
 }
 
 // DM용 한 줄 (상장폐지는 별도 문구)
@@ -2643,12 +2648,12 @@ function formatLines(list) {
   return list
     .map((c) => {
       if (c.delisted) {
-        return `• 🚫 **${iconName(c)}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 · ${dropText(c)} 하락, 보유 주식 소멸)`;
+        return `• 🚫 **${iconName(c)}**: 상장폐지 (${moneyOf(c, c.before)} → ${moneyOf(c, c.after)} · ${dropText(c)} 하락, 보유 주식 소멸)`;
       }
       const pct = ((c.after - c.before) / c.before) * 100;
       const sign = pct > 0 ? "+" : "";
       const mark = c.after > c.before ? UP_MARK : c.after < c.before ? DOWN_MARK : "➖";
-      return `• ${mark} **${iconName(c)}**${dangerTag(c.after)}: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${sign}${pct.toFixed(1)}%)`;
+      return `• ${mark} **${iconName(c)}**${dangerTag(c.after)}: ${moneyOf(c, c.before)} → ${moneyOf(c, c.after)} (${sign}${pct.toFixed(1)}%)`;
     })
     .join("\n");
 }
@@ -2682,14 +2687,14 @@ export function isWithinNotifyWindow(setting, hour = currentHourKST()) {
 // 폐지 위기 종목은 "(±%)" 뒤에 ⚠️ 표시
 function announceLine(c) {
   if (c.delisted) {
-    return `🚫 **${iconName(c)}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 · ${dropText(c)} 하락)`;
+    return `🚫 **${iconName(c)}**: 상장폐지 (${moneyOf(c, c.before)} → ${moneyOf(c, c.after)} · ${dropText(c)} 하락)`;
   }
   if (c.after === c.before) {
-    return `➖ **${iconName(c)}**: ${c.after.toLocaleString()}해정 (변동 없음)${dangerTag(c.after)}`;
+    return `➖ **${iconName(c)}**: ${moneyOf(c, c.after)} (변동 없음)${dangerTag(c.after)}`;
   }
   const up = c.after > c.before;
   const pct = ((c.after - c.before) / c.before) * 100;
-  return `${up ? UP_MARK : DOWN_MARK} **${iconName(c)}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)${dangerTag(c.after)}`;
+  return `${up ? UP_MARK : DOWN_MARK} **${iconName(c)}**: ${moneyOf(c, c.before)} → ${moneyOf(c, c.after)} (${up ? "+" : ""}${pct.toFixed(1)}%)${dangerTag(c.after)}`;
 }
 
 // 시세가 변동될 때마다 주식채널(ALLOWED_CHANNEL_ID)에 변동 내역을 공지합니다.
@@ -2961,11 +2966,11 @@ export function newOrderId(items) {
 
 export const sideText = (side) => (side === "buy" ? "매수" : "매도");
 
-// 예: **종목A** 800해정 이하가 되면 3주 매수
-export function orderText(o) {
+// 예: **종목A** 800해정 이하가 되면 3주 매수 (stock을 넘기면 외국자산은 $로 표시)
+export function orderText(o, stock) {
   const cond = o.side === "buy" || o.dir === "down" ? "이하가 되면" : "이상이 되면";
   const tag = o.kind ? `[${o.kind}] ` : "";
-  return `${tag}**${o.stock}** ${o.price.toLocaleString()}해정 ${cond} ${o.qty.toLocaleString()}주 ${sideText(o.side)}`;
+  return `${tag}**${o.stock}** ${moneyOf(stock, o.price)} ${cond} ${o.qty.toLocaleString()}주 ${sideText(o.side)}`;
 }
 
 // 종목별로 이미 매도 예약에 묶인 수량. 손절/익절 짝(같은 link)은 한 번만 세요. (둘 중 하나만 체결되니까)
@@ -3024,6 +3029,7 @@ async function safeDM(env, userId, content) {
 export async function processOrders(env) {
   const [docs, stocks] = await Promise.all([listCollection(env, "orders"), listStocks(env)]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
   const usNames = new Set(stocks.filter((s) => s.kind === "us").map((s) => s.name));
   // 미국 장이 닫혀 있으면 미국 주식 예약은 취소하지 않고 그대로 두었다가, 장이 열리면 체결해요.
   const usOpen = usNames.size === 0 ? true : (await getUsMarketStatus(env)).open;
@@ -3068,6 +3074,7 @@ export async function processOrders(env) {
       // 3) 한 명의 예약은 순서대로 체결 (잔고/보유량이 이어지므로)
       for (const h of hits) {
         const label = `${h.o.stock} ${h.o.qty.toLocaleString()}주 ${sideText(h.o.side)}`;
+        const sk = stockMap[h.o.stock];
         try {
           if (h.gone) {
             summary.cancelled++;
@@ -3088,7 +3095,7 @@ export async function processOrders(env) {
               u: userId,
               cmd: "예약체결",
               a: label,
-              r: `예약가 ${h.o.price.toLocaleString()} → 체결가 ${h.price.toLocaleString()}해정`,
+              r: `예약가 ${moneyOf(sk, h.o.price)} → 체결가 ${moneyOf(sk, h.price)}`,
             });
             const cond = h.o.side === "buy" || h.o.dir === "down" ? "이하" : "이상";
             await safeDM(
@@ -3096,7 +3103,7 @@ export async function processOrders(env) {
               userId,
               [
                 `✅ **[${h.o.kind || "예약"} 체결]** ${label}`,
-                `${h.o.kind ? "기준가" : "예약가"} ${h.o.price.toLocaleString()}해정 ${cond} → 체결가 ${h.price.toLocaleString()}해정`,
+                `${h.o.kind ? "기준가" : "예약가"} ${moneyOf(sk, h.o.price)} ${cond} → 체결가 ${moneyOf(sk, h.price)}`,
                 ...(h.o.link ? ["(짝으로 걸어둔 손절/익절 주문은 자동으로 취소했어요.)"] : []),
                 result.message,
               ].join("\n")
@@ -3142,9 +3149,9 @@ async function saveWatch(env, userId, w) {
 
 const alertDirText = (dir) => (dir === "up" ? "이상" : "이하");
 
-// 예: **종목A** 1,500해정 이상이 되면 DM
-export function alertText(a) {
-  return `**${a.stock}** ${a.price.toLocaleString()}해정 ${alertDirText(a.dir)}이 되면 DM`;
+// 예: **종목A** 1,500해정 이상이 되면 DM (stock을 넘기면 외국자산은 $로 표시)
+export function alertText(a, stock) {
+  return `**${a.stock}** ${moneyOf(stock, a.price)} ${alertDirText(a.dir)}이 되면 DM`;
 }
 
 // 오래된 알림부터: [{ id, stock, price, dir, at }]
@@ -3161,6 +3168,7 @@ export async function processPriceAlerts(env) {
   const summary = { sent: 0, cleared: 0 };
   if (stocks.length === 0) return summary; // 목록을 못 읽었을 때 관심종목이 통째로 지워지지 않게
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
 
   await Promise.all(
     docs.map(async (doc) => {
@@ -3194,13 +3202,14 @@ export async function processPriceAlerts(env) {
             continue;
           }
           summary.sent++;
-          await addHistory(env, userId, `가격 알림: ${h.a.stock} ${h.price.toLocaleString()}해정 (설정 ${h.a.price.toLocaleString()}해정 ${alertDirText(h.a.dir)})`);
+          const sk = stockMap[h.a.stock];
+          await addHistory(env, userId, `가격 알림: ${h.a.stock} ${moneyOf(sk, h.price)} (설정 ${moneyOf(sk, h.a.price)} ${alertDirText(h.a.dir)})`);
           await safeDM(
             env,
             userId,
             [
               `🔔 **[가격 알림]** **${h.a.stock}**`,
-              `현재가 **${h.price.toLocaleString()}해정** — 설정한 ${h.a.price.toLocaleString()}해정 ${alertDirText(h.a.dir)}에 도달했어요.`,
+              `현재가 **${moneyOf(sk, h.price)}** — 설정한 ${moneyOf(sk, h.a.price)} ${alertDirText(h.a.dir)}에 도달했어요.`,
               "(이 알림은 한 번 보내고 자동으로 삭제됐어요.)",
             ].join("\n")
           );
@@ -3488,12 +3497,13 @@ export async function processFutures(env, changes = []) {
 // ============================================================
 // - 달러 잔고는 user.usd 에 "센트"(1달러 = 100센트) 정수로 저장해요.
 //   외국자산(코인·미국주식) 가격 숫자도 센트예요. (가격 1000 = $10.00)
-// - 환율 = 1달러가 몇 해정인지. FX_MIN ~ FX_MAX 사이에서 1시간마다 새로 뽑아 고정해요. (config/fxRate)
+// - 환율 = 1달러가 몇 해정인지. 1시간마다 직전 환율에서 ±FX_STEP_PCT%만 움직여요. (FX_MIN ~ FX_MAX 안에서, config/fxRate)
 // - 환전할 때 FX_FEE_RATE 수수료를 "받는 쪽" 금액에서 떼요.
 export const FX_BASE = 100;
 export const FX_MIN = 70;
 export const FX_MAX = 140;
 export const FX_FEE_RATE = 0.01; // 환전 수수료 1%
+export const FX_STEP_PCT = 5; // 1시간마다 직전 환율에서 최대 ±5%만 움직여요
 export const FX_MIN_KRW = 10; // 해정 → 달러 최소 환전액
 
 const FX_PATH = "config/fxRate";
@@ -3556,11 +3566,14 @@ export async function getFxRate(env) {
   return doc;
 }
 
-// 매시 1번 호출(크론): 새 환율을 뽑아 저장하고 주식채널에 무음 공지
+// 매시 1번 호출(크론): 직전 환율에서 ±FX_STEP_PCT% 안으로만 움직여 저장하고 주식채널에 무음 공지
 export async function rollFxRate(env) {
   const now = Date.now();
   const prev = await getFxRate(env);
-  const rate = +(FX_MIN + Math.random() * (FX_MAX - FX_MIN)).toFixed(2);
+  let raw = prev.rate * (1 + (Math.random() * 2 - 1) * (FX_STEP_PCT / 100));
+  if (raw > FX_MAX) raw = FX_MAX - (raw - FX_MAX); // 범위 밖으로 나가면 안쪽으로 튕겨요 (끝에 달라붙지 않게)
+  if (raw < FX_MIN) raw = FX_MIN + (FX_MIN - raw);
+  const rate = +Math.min(FX_MAX, Math.max(FX_MIN, raw)).toFixed(2);
   const next = { rate, prev: prev.rate, at: now };
   await setDoc(env, FX_PATH, next);
   fxCache = { at: 0, doc: null };
@@ -5167,7 +5180,7 @@ export const commandDefinitions = [
     description: "지정가 이하가 되면 자동 매수하도록 예약합니다. 종목2~5로 여러 개를 한 번에 예약해요.",
     options: multi([
       { name: "종목", description: "종목 이름 (목록에서 선택)", type: 3, required: true, autocomplete: true },
-      { name: "가격", description: "이 가격 이하가 되면 매수 (해정)", type: 4, required: true, autocomplete: true },
+      { name: "가격", description: "이 가격 이하가 되면 매수 (해정, 외국자산은 센트: 1000 = $10.00)", type: 4, required: true, autocomplete: true },
       { name: "수량", description: "매수할 수량 (기본 1)", type: 4, required: false, autocomplete: true },
     ]),
   },
@@ -5176,7 +5189,7 @@ export const commandDefinitions = [
     description: "지정가 이상이 되면 자동 매도하도록 예약합니다. 종목2~5로 여러 개를 한 번에 예약해요.",
     options: multi([
       { name: "종목", description: "내가 가진 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
-      { name: "가격", description: "이 가격 이상이 되면 매도 (해정)", type: 4, required: true, autocomplete: true },
+      { name: "가격", description: "이 가격 이상이 되면 매도 (해정, 외국자산은 센트: 1000 = $10.00)", type: 4, required: true, autocomplete: true },
       { name: "수량", description: "매도할 수량 (기본 1)", type: 4, required: false, autocomplete: true },
     ]),
   },
@@ -5207,7 +5220,7 @@ export const commandDefinitions = [
     description: "종목이 정한 가격에 도달하면 DM으로 알려줘요. (한 번 알리고 자동 삭제, 관심종목에도 담겨요)",
     options: [
       { name: "종목", description: "알림을 받을 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
-      { name: "가격", description: "이 가격에 도달하면 DM (현재가보다 높으면 이상, 낮으면 이하)", type: 4, required: true, autocomplete: true, min_value: 1 },
+      { name: "가격", description: "이 가격에 도달하면 DM (높으면 이상, 낮으면 이하 · 외국자산은 센트)", type: 4, required: true, autocomplete: true, min_value: 1 },
     ],
   },
   {
@@ -5526,7 +5539,7 @@ function mergeSlots(slots) {
 }
 
 // 자동완성용: 앞 칸에 이미 고른 만큼 잔고/보유 수량을 미리 빼서 보여줘요. (매수·구입은 잔고, 매도·예약매도는 보유 수량)
-function priorAdjusted(command, interaction, slot, user, priceMap) {
+function priorAdjusted(command, interaction, slot, user, priceMap, foreignNames = new Set()) {
   const isBuy = command === "매수" || command === "구입";
   const isSell = command === "매도" || command === "예약매도";
   if (!isBuy && !isSell) return user;
@@ -5541,7 +5554,9 @@ function priorAdjusted(command, interaction, slot, user, priceMap) {
     if (!Number.isSafeInteger(qty) || qty < 1) continue;
     if (isBuy) {
       const price = priceMap[name];
-      if (price !== undefined) copy.balance -= price * qty;
+      if (price === undefined) continue;
+      if (foreignNames.has(name)) copy.usd = (copy.usd || 0) - price * qty; // 외국자산은 달러(센트)에서 빼요
+      else copy.balance -= price * qty;
     } else {
       copy.holdings[name] = Math.max(0, (copy.holdings[name] || 0) - qty);
     }
@@ -5681,7 +5696,7 @@ async function quantityChoices(command, interaction, env, keyword, slot = "") {
   const [all, userRaw] = await Promise.all([listStocksForAutocomplete(env), getUser(env, userId)]);
   const stock = all.find((s) => s.name === stockName);
   if (!stock) return plain();
-  const user = slot ? priorAdjusted(command, interaction, slot, userRaw, Object.fromEntries(all.map((s) => [s.name, s.price]))) : userRaw;
+  const user = slot ? priorAdjusted(command, interaction, slot, userRaw, Object.fromEntries(all.map((s) => [s.name, s.price])), new Set(all.filter((s) => isForeign(s)).map((s) => s.name))) : userRaw;
 
   let labelFor;
   let values;
@@ -5728,11 +5743,11 @@ async function priceSuggestions(interaction, env, slot = "") {
   if (!stock) return [];
 
   const p = stock.price;
-  const list = [{ label: `현재가 ${p.toLocaleString()}해정`, value: p }];
+  const list = [{ label: `현재가 ${moneyOf(stock, p)}`, value: p }];
   for (const m of [0.5, 0.8, 1.2, 1.5, 2]) {
     const value = Math.max(1, Math.round(p * m));
     const pct = Math.round((m - 1) * 100);
-    list.push({ label: `${pct > 0 ? "+" : ""}${pct}% → ${value.toLocaleString()}해정`, value });
+    list.push({ label: `${pct > 0 ? "+" : ""}${pct}% → ${moneyOf(stock, value)}`, value });
   }
   return list.sort((a, b) => a.value - b.value);
 }
@@ -5785,14 +5800,14 @@ export async function autocomplete(interaction, env) {
 
     const userId = interaction.member?.user?.id;
     const rawUser = userId ? await getUser(env, userId) : { balance: 0, holdings: {}, costs: {} };
-    const user = priorAdjusted(command, interaction, slot, rawUser, Object.fromEntries(stocks.map((s) => [s.name, s.price])));
+    const user = priorAdjusted(command, interaction, slot, rawUser, Object.fromEntries(stocks.map((s) => [s.name, s.price])), new Set(stocks.filter((s) => isForeign(s)).map((s) => s.name)));
 
     if (command === "관심삭제") {
       // 내 관심종목만 보여줌
       const w = userId ? await getWatch(env, userId) : { stocks: {}, alerts: {} };
       const items = stocks
         .filter((s) => w.stocks[s.name])
-        .map((s) => ({ label: `${iconName(s)} (${s.price.toLocaleString()}해정)${mTag(s)}`, value: s.name }));
+        .map((s) => ({ label: `${iconName(s)} (${moneyOf(s, s.price)})${mTag(s)}`, value: s.name }));
       if (items.length > 1) items.push({ label: "전체 삭제", value: "all" });
       return textChoices(items, keyword);
     }
@@ -5816,7 +5831,7 @@ export async function autocomplete(interaction, env) {
 
     if (command === "보험가입") {
   const items = stocks
-    .filter((s) => (user.holdings[s.name] || 0) > 0 && s.price > DANGER_PRICE)
+    .filter((s) => !isForeign(s) && (user.holdings[s.name] || 0) > 0 && s.price > DANGER_PRICE)
     .map((s) => ({
       label: `${s.name} (보유 ${user.holdings[s.name].toLocaleString()}주 · ${s.price.toLocaleString()}해정 · 주당 보험료 1일 ${insuranceQuote(s.price, 1).perShare.toLocaleString()} / 3일 ${insuranceQuote(s.price, 3).perShare.toLocaleString()} / 30일 ${insuranceQuote(s.price, 30).perShare.toLocaleString()})`,
       value: s.name,
@@ -5855,7 +5870,7 @@ export async function autocomplete(interaction, env) {
     }
 
     return textChoices(
-      pickable(stocks.map((s) => ({ label: `${iconName(s)}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정)${mTag(s)}`, value: s.name }))),
+      pickable(stocks.map((s) => ({ label: `${iconName(s)}${dangerTag(s.price, true)} (${moneyOf(s, s.price)})${mTag(s)}`, value: s.name }))),
       keyword
     );
   }
@@ -6016,9 +6031,10 @@ export async function autocomplete(interaction, env) {
   // ----- 예약취소: 내 예약 목록 -----
   if (base === "예약") {
     const userId = interaction.member?.user?.id;
-    const orders = userId ? await getOrders(env, userId) : [];
+    const [orders, acStocks] = await Promise.all([userId ? getOrders(env, userId) : [], listStocksForAutocomplete(env)]);
+    const stockMap = Object.fromEntries(acStocks.map((s) => [s.name, s]));
     const items = orders.map((o) => ({
-      label: `[${o.id}] ${o.kind ? `${o.kind} ` : ""}${sideText(o.side)} ${o.stock} · ${o.price.toLocaleString()}해정 ${o.side === "buy" || o.dir === "down" ? "이하" : "이상"} · ${o.qty.toLocaleString()}주`,
+      label: `[${o.id}] ${o.kind ? `${o.kind} ` : ""}${sideText(o.side)} ${o.stock} · ${moneyOf(stockMap[o.stock], o.price)} ${o.side === "buy" || o.dir === "down" ? "이하" : "이상"} · ${o.qty.toLocaleString()}주`,
       value: o.id,
     }));
     const left = pickable(items);
@@ -6030,8 +6046,9 @@ export async function autocomplete(interaction, env) {
   if (base === "알림" && command === "알림취소") {
     const userId = interaction.member?.user?.id;
     const list = userId ? alertList((await getWatch(env, userId)).alerts) : [];
+    const stockMap = Object.fromEntries((await listStocksForAutocomplete(env)).map((s) => [s.name, s]));
     const items = list.map((a) => ({
-      label: `[${a.id}] ${a.stock} · ${a.price.toLocaleString()}해정 ${alertDirText(a.dir)}`,
+      label: `[${a.id}] ${a.stock} · ${moneyOf(stockMap[a.stock], a.price)} ${alertDirText(a.dir)}`,
       value: a.id,
     }));
     if (items.length > 1) items.push({ label: "전체 취소", value: "all" });
@@ -6124,13 +6141,13 @@ async function reserveOrder(side, interaction, env) {
     if (!stock) return;
     if (side === "buy") {
       if (stock.price <= s.price) {
-        errors.push(`${tag(s)}현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이하예요. 바로 \`/매수\`를 쓰거나, 더 낮은 가격으로 예약해 주세요.`);
+        errors.push(`${tag(s)}현재가(${moneyOf(stock, stock.price)})가 이미 예약가 이하예요. 바로 \`/매수\`를 쓰거나, 더 낮은 가격으로 예약해 주세요.`);
       } else if ((isForeign(stock) ? user.usd || 0 : user.balance) < s.price * s.qty + tradeFee(s.price * s.qty)) {
         errors.push(`${tag(s)}${isForeign(stock) ? "달러가" : "잔고가"} 부족해요. (예약가 기준 필요: ${moneyOf(stock, s.price * s.qty + tradeFee(s.price * s.qty))}(수수료 포함), 보유: ${moneyOf(stock, isForeign(stock) ? user.usd || 0 : user.balance)})`);
       }
     } else {
       if (stock.price >= s.price) {
-        errors.push(`${tag(s)}현재가(${stock.price.toLocaleString()}해정)가 이미 예약가 이상이에요. 바로 \`/매도\`를 쓰거나, 더 높은 가격으로 예약해 주세요.`);
+        errors.push(`${tag(s)}현재가(${moneyOf(stock, stock.price)})가 이미 예약가 이상이에요. 바로 \`/매도\`를 쓰거나, 더 높은 가격으로 예약해 주세요.`);
         return;
       }
       const held = user.holdings[s.name] || 0;
@@ -6150,18 +6167,18 @@ async function reserveOrder(side, interaction, env) {
     const id = newOrderId(next);
     const order = { stock: s.name, side, qty: s.qty, price: s.price, at: Date.now() + i };
     next[id] = order;
-    return { id, order, now: stocks[i].price };
+    return { id, order, now: stocks[i].price, stock: stocks[i] };
   });
   await saveOrderItems(env, userId, next);
 
   const footer = "시세가 변동될 때(평소 변동, 급등락)마다 확인하고, 체결되면 DM으로 알려드려요. (체결가는 그때의 현재가예요)";
   if (!many) {
-    const { id, order, now } = made[0];
-    return [`⏰ 예약했어요. \`${id}\``, orderText(order), `현재가 ${now.toLocaleString()}해정 · ${footer}`].join("\n");
+    const { id, order, now, stock } = made[0];
+    return [`⏰ 예약했어요. \`${id}\``, orderText(order, stock), `현재가 ${moneyOf(stock, now)} · ${footer}`].join("\n");
   }
   return [
     `⏰ ${made.length}건을 예약했어요.`,
-    ...made.map((m) => `- \`${m.id}\` ${orderText(m.order)} · 현재가 ${m.now.toLocaleString()}해정`),
+    ...made.map((m) => `- \`${m.id}\` ${orderText(m.order, m.stock)} · 현재가 ${moneyOf(m.stock, m.now)}`),
     footer,
   ].join("\n");
 }
@@ -6202,10 +6219,10 @@ function stockInfoText(stock, held = 0, divMod = 1, now = Date.now(), market = n
 
   return [
     `**🏷️ ${iconName(stock)} 종목정보**`,
-    `${mark(dayPct)} 현재가 **${stock.price.toLocaleString()}해정**${dangerTag(stock.price) ? `${dangerTag(stock.price)} 상장폐지 위기` : ""} · 오늘 ${sgn(dayPct)}% (0시 ${open.toLocaleString()}해정)`,
+    `${mark(dayPct)} 현재가 **${moneyOf(stock, stock.price)}**${dangerTag(stock.price) ? `${dangerTag(stock.price)} 상장폐지 위기` : ""} · 오늘 ${sgn(dayPct)}% (0시 ${moneyOf(stock, open)})`,
     `🗓️ 상장일: ${listedText(stock.listedAt)} (한국시간)${days ? ` · 상장 ${days.toLocaleString()}일째` : ""}`,
-    `🏆 역대 최고가: **${maxPrice.toLocaleString()}해정** (지금은 최고가의 ${ofMax.toFixed(1)}%)`,
-    `📏 오늘 변동폭: 최고 ${hi.toLocaleString()} ~ 최저 ${lo.toLocaleString()}해정 (**${rangePct.toFixed(1)}%**)`,
+    `🏆 역대 최고가: **${moneyOf(stock, maxPrice)}** (지금은 최고가의 ${ofMax.toFixed(1)}%)`,
+    `📏 오늘 변동폭: 최고 ${moneyOf(stock, hi)} ~ 최저 ${moneyOf(stock, lo)} (**${rangePct.toFixed(1)}%**)`,
     ...(isForeign(stock) ? foreignInfoLines(stock, now, market) : [divLine]),
   ].join("\n");
 }
@@ -6238,10 +6255,10 @@ async function stockChart(env, name) {
           title: `${name} 시세 그래프`,
           description: [
             `🗓️ 상장일: ${listedText(stock.listedAt)} (한국시간)`,
-            `${mark} 현재가 **${stock.price.toLocaleString()}해정**${dangerTag(stock.price) ? `${dangerTag(stock.price)} 상장폐지 위기` : ""}`,
-            `구간 변동: ${mark} ${fmtSigned(diff)}해정 (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%) · ${formatKST(first.t)} 시작가 ${first.p.toLocaleString()}해정 대비`,
-            `구간 최고 ${high.toLocaleString()} / 최저 ${low.toLocaleString()}해정`,
-            `역대 최고가 ${Math.max(stock.maxPrice || 0, high).toLocaleString()}해정`,
+            `${mark} 현재가 **${moneyOf(stock, stock.price)}**${dangerTag(stock.price) ? `${dangerTag(stock.price)} 상장폐지 위기` : ""}`,
+            `구간 변동: ${mark} ${diff > 0 ? "+" : diff < 0 ? "-" : ""}${moneyOf(stock, Math.abs(diff))} (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%) · ${formatKST(first.t)} 시작가 ${moneyOf(stock, first.p)} 대비`,
+            `구간 최고 ${moneyOf(stock, high)} / 최저 ${moneyOf(stock, low)}`,
+            `역대 최고가 ${moneyOf(stock, Math.max(stock.maxPrice || 0, high))}`,
           ].join("\n"),
           color: up ? 0xe53935 : 0x1e88e5, // 오름 = 빨강, 내림 = 파랑
           image: { url: imageUrl },
@@ -6269,6 +6286,12 @@ function futuresHelpText() {
     "- 가격 -10% → 🔽 -300해정",
     "- 가격 약 -33% → 💥 강제청산 (증거금 전부 잃어요)",
     "",
+    "**💵 코인·미국주식 선물은 달러로 해요**",
+    "- 증거금을 **달러**(1달러 단위, 최소 $1)로 걸고, 정산도 달러로 돌아와요",
+    "- 달러가 모자라면 `/환전`으로 해정을 바꿔 오세요",
+    "- 가격은 랜덤이 아니라 실제 시세를 따라가요 (급등락 시간에도 똑같아요)",
+    "- 미국주식은 미국 장이 닫혀 있으면 새로 열 수 없어요",
+    "",
     "**명령어**",
     "`/선물` 시작 · `/선물목록` 내 손익 보기 · `/선물청산` 정산하고 해정 받기",
     "",
@@ -6277,7 +6300,7 @@ function futuresHelpText() {
     "- 급등락 시간(18시/21시/0시)에는 변동이 훨씬 커서 더 위험해요",
     "- 강제청산은 시세가 바뀔 때 자동으로 돼요. 시작할 때 강제청산가를 알려줘요",
     "- 상장폐지되면 폐지 가격으로 자동 정산돼요",
-    `- 최대 ${MAX_FUTURES_PER_USER}개까지 열 수 있고, 증거금은 ${MIN_FUTURES_MARGIN}해정부터예요`,
+    `- 최대 ${MAX_FUTURES_PER_USER}개까지 열 수 있고, 증거금은 ${MIN_FUTURES_MARGIN}해정부터예요 (외국자산은 $1부터)`,
   ].join("\n");
 }
 
@@ -6302,7 +6325,7 @@ function bankHelpText(rate) {
     `- 빌릴 때 수수료 ${pctText(LOAN_FEE_RATE)}를 먼저 떼고 받아요 (빚은 빌린 금액 그대로)`,
     "- 이자는 빌린 순간부터 시간 단위로 계속 쌓여요",
     "- 일찍 갚으면 **그때까지 쌓인 이자만** 내요",
-    `- 한도: 내 순자산(해정+주식+예금+선물-빚)의 ${Math.round(LOAN_LIMIT_RATIO * 100)}%(신용등급에 따라 달라져요), 최소 ${LOAN_LIMIT_MIN.toLocaleString()}해정`,
+    `- 한도: 내 순자산(해정+달러+주식+예금+선물-빚)의 ${Math.round(LOAN_LIMIT_RATIO * 100)}%(신용등급에 따라 달라져요), 최소 ${LOAN_LIMIT_MIN.toLocaleString()}해정`,
     `- 동시에 최대 ${MAX_LOANS_PER_USER}건`,
     "",
     "**예시** 지금 1,000해정을 3일로 빌리면? (신용등급 B 기준)",
@@ -6328,6 +6351,10 @@ function bankHelpText(rate) {
     "",
     "**💸 송금**",
     `\`/송금 받는사람 금액\` — 다른 유저에게 해정 보내기. 은행 수수료 ${pctText(TRANSFER_FEE_RATE)}(최소 ${TRANSFER_FEE_MIN}해정)는 보내는 사람이 따로 내고, 받는 사람은 금액을 그대로 받아요`,
+    "",
+    "**💵 달러는?**",
+    "예금·대출·상환·송금은 **해정만** 돼요. 달러는 `/환전`으로 바꿔서 써요 (이자는 없어요)",
+    "연체돼도 달러와 외국자산은 자동 회수·강제 매도되지 않아요 (잔고 → 예금, 해정 주식 순서)",
     "",
     "`/은행` — 내 예금·대출·이자·한도를 지금 이 순간 기준으로 보기",
   ].join("\n");
@@ -6401,7 +6428,7 @@ export const handlers = {
           pct === 0
             ? "➖ 0.0%"
             : `${pct > 0 ? UP_MARK : DOWN_MARK} ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
-        return `${mark}**${iconName(s)}**${dangerTag(s.price)} — ${s.price.toLocaleString()}해정 (${change})${staleTag(s)}`;
+        return `${mark}**${iconName(s)}**${dangerTag(s.price)} — ${moneyOf(s, s.price)} (${change})${staleTag(s)}`;
       }),
     ].join("\n");
   },
@@ -6435,10 +6462,10 @@ export const handlers = {
                   : ""
               }`,
               `폐지 시각: \`${formatKSTFull(d.delistedAt)}\` (한국시간)`,
-              `${DOWN_MARK} 폐지된 변동: ${(d.lastPrice || 0).toLocaleString()} → ${(d.finalPrice || 0).toLocaleString()}해정 (**-${((d.lastPrice || 0) - (d.finalPrice || 0)).toLocaleString()}해정, -${d.dropPct}%**)`,
-              `📉 역대 최고가 ${(d.maxPrice || 0).toLocaleString()}해정 대비 **-${d.peakDropPct}%**`,
+              `${DOWN_MARK} 폐지된 변동: ${moneyOf(d, d.lastPrice || 0)} → ${moneyOf(d, d.finalPrice || 0)} (**-${moneyOf(d, (d.lastPrice || 0) - (d.finalPrice || 0))}, -${d.dropPct}%**)`,
+              `📉 역대 최고가 ${moneyOf(d, d.maxPrice || 0)} 대비 **-${d.peakDropPct}%**`,
               `⬇️ 기록 중 한 번에 가장 많이 하락: **-${d.maxDropPct}%**`,
-              `구간 최고 ${high.toLocaleString()} / 최저 ${low.toLocaleString()}해정 · 폐지 당시 보유자 ${(d.holders || 0).toLocaleString()}명`,
+              `구간 최고 ${moneyOf(d, high)} / 최저 ${moneyOf(d, low)} · 폐지 당시 보유자 ${(d.holders || 0).toLocaleString()}명`,
             ].join("\n"),
             color: 0x1e88e5,
             image: { url: imageUrl },
@@ -6464,7 +6491,7 @@ export const handlers = {
 
     const lines = list.map(
       (d) =>
-        `🚫 **${d.name}** · \`${formatKSTFull(d.delistedAt)}\` · ${(d.lastPrice || 0).toLocaleString()} → ${(d.finalPrice || 0).toLocaleString()}해정 (**-${((d.lastPrice || 0) - (d.finalPrice || 0)).toLocaleString()}해정, -${d.dropPct}%**) · 최고가 ${(d.maxPrice || 0).toLocaleString()} 대비 -${d.peakDropPct}% · 최대 하락 -${d.maxDropPct}%`
+        `🚫 **${d.name}** · \`${formatKSTFull(d.delistedAt)}\` · ${moneyOf(d, d.lastPrice || 0)} → ${moneyOf(d, d.finalPrice || 0)} (**-${moneyOf(d, (d.lastPrice || 0) - (d.finalPrice || 0))}, -${d.dropPct}%**) · 최고가 ${moneyOf(d, d.maxPrice || 0)} 대비 -${d.peakDropPct}% · 최대 하락 -${d.maxDropPct}%`
     );
 
     // 디스코드 메시지 한도(2000자) 보호
@@ -6596,7 +6623,7 @@ export const handlers = {
     w.stocks[name] = Date.now();
     await saveWatch(env, userId, w);
     return [
-      `⭐ **${name}**을(를) 관심종목에 담았어요. (${count + 1}/${MAX_WATCH_STOCKS}) · 현재가 ${stock.price.toLocaleString()}해정`,
+      `⭐ **${name}**을(를) 관심종목에 담았어요. (${count + 1}/${MAX_WATCH_STOCKS}) · 현재가 ${moneyOf(stock, stock.price)}`,
       "원하는 가격에 DM을 받으려면 `/가격알림`을 써 보세요.",
     ].join("\n");
   },
@@ -6647,14 +6674,14 @@ export const handlers = {
       const open = pts.length ? priceAtTime(pts, dayStart) : s.price;
       const pct = open > 0 ? ((s.price - open) / open) * 100 : 0;
       const mark = pct > 0 ? UP_MARK : pct < 0 ? DOWN_MARK : "➖";
-      lines.push(`- **${iconName(s)}**${dangerTag(s.price)} ${s.price.toLocaleString()}해정 ${mark} 오늘 ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%${staleTag(s)}`);
+      lines.push(`- **${iconName(s)}**${dangerTag(s.price)} ${moneyOf(s, s.price)} ${mark} 오늘 ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%${staleTag(s)}`);
     }
     if (alerts.length) {
       lines.push("", `**🔔 가격 알림 (${alerts.length}/${MAX_PRICE_ALERTS}개)**`);
       for (const a of alerts) {
         const s = byName[a.stock];
-        const left = s && s.price > 0 ? ` · 현재가 ${s.price.toLocaleString()}해정 (목표까지 ${(((a.price - s.price) / s.price) * 100).toFixed(1)}%)` : " · 상장폐지";
-        lines.push(`- \`${a.id}\` ${alertText(a)}${left}`);
+        const left = s && s.price > 0 ? ` · 현재가 ${moneyOf(s, s.price)} (목표까지 ${(((a.price - s.price) / s.price) * 100).toFixed(1)}%)` : " · 상장폐지";
+        lines.push(`- \`${a.id}\` ${alertText(a, s)}${left}`);
       }
     }
     return lines.join("\n");
@@ -6668,7 +6695,7 @@ export const handlers = {
 
     const [stock, w] = await Promise.all([getStock(env, name), getWatch(env, userId)]);
     if (!stock) return `"${name}" 종목을 찾을 수 없어요.`;
-    if (price === stock.price) return `현재가(${stock.price.toLocaleString()}해정)와 같은 가격이에요. 다른 가격으로 걸어 주세요.`;
+    if (price === stock.price) return `현재가(${moneyOf(stock, stock.price)})와 같은 가격이에요. 다른 가격으로 걸어 주세요.`;
 
     const dir = price > stock.price ? "up" : "down";
     if (Object.keys(w.alerts).length >= MAX_PRICE_ALERTS) {
@@ -6687,8 +6714,8 @@ export const handlers = {
     const gap = ((price - stock.price) / stock.price) * 100;
     return [
       `🔔 알림을 걸었어요. \`${id}\``,
-      alertText(w.alerts[id]),
-      `현재가 ${stock.price.toLocaleString()}해정 (목표까지 ${gap > 0 ? "+" : ""}${gap.toFixed(1)}%)${added ? " · 관심종목에도 담았어요." : ""}`,
+      alertText(w.alerts[id], stock),
+      `현재가 ${moneyOf(stock, stock.price)} (목표까지 ${gap > 0 ? "+" : ""}${gap.toFixed(1)}%)${added ? " · 관심종목에도 담았어요." : ""}`,
       "시세가 변동될 때(평소 변동, 급등락)마다 확인하고, 도달하면 DM으로 한 번 알려드려요. DM을 받을 수 있게 서버 개인 메시지 허용을 켜 두세요.",
     ].join("\n");
   },
@@ -6702,7 +6729,8 @@ export const handlers = {
     const removed = ids.map((id) => ({ id, ...w.alerts[id] }));
     for (const id of ids) delete w.alerts[id];
     await saveWatch(env, userId, w);
-    return [`**가격 알림 ${removed.length}건을 취소했어요.**`, ...removed.map((a) => `- \`${a.id}\` ${alertText(a)}`)].join("\n");
+    const stockMap = Object.fromEntries((await listStocksForAutocomplete(env)).map((s) => [s.name, s]));
+    return [`**가격 알림 ${removed.length}건을 취소했어요.**`, ...removed.map((a) => `- \`${a.id}\` ${alertText(a, stockMap[a.stock])}`)].join("\n");
   },
 
   종목정보: async (interaction, env) => {
@@ -6806,10 +6834,10 @@ export const handlers = {
 
     const errors = [];
     if (hasStop && stock.price <= stopPrice) {
-      errors.push(`현재가(${stock.price.toLocaleString()}해정)가 이미 손절가(${stopPrice.toLocaleString()}해정) 이하예요. 바로 \`/매도\`를 쓰거나 손절 %를 줄여 주세요.`);
+      errors.push(`현재가(${moneyOf(stock, stock.price)})가 이미 손절가(${moneyOf(stock, stopPrice)}) 이하예요. 바로 \`/매도\`를 쓰거나 손절 %를 줄여 주세요.`);
     }
     if (hasTake && stock.price >= takePrice) {
-      errors.push(`현재가(${stock.price.toLocaleString()}해정)가 이미 익절가(${takePrice.toLocaleString()}해정) 이상이에요. 바로 \`/매도\`를 쓰거나 익절 %를 높여 주세요.`);
+      errors.push(`현재가(${moneyOf(stock, stock.price)})가 이미 익절가(${moneyOf(stock, takePrice)}) 이상이에요. 바로 \`/매도\`를 쓰거나 익절 %를 높여 주세요.`);
     }
     if (errors.length) return errors.join("\n");
 
@@ -6831,8 +6859,8 @@ export const handlers = {
 
     return [
       `🛡️ **${name}** ${qty.toLocaleString()}주에 자동 매도를 걸었어요.`,
-      `평균 매수가 ${avg.toLocaleString()}해정 · 현재가 ${stock.price.toLocaleString()}해정`,
-      ...made.map((m) => `- \`${m.id}\` ${orderText(m.order)} (평균 매수가 ${m.pct})`),
+      `평균 매수가 ${moneyOf(stock, avg)} · 현재가 ${moneyOf(stock, stock.price)}`,
+      ...made.map((m) => `- \`${m.id}\` ${orderText(m.order, stock)} (평균 매수가 ${m.pct})`),
       made.length > 1 ? "둘 중 하나가 체결되면 나머지는 자동으로 취소돼요." : "",
       "시세가 변동될 때(평소 변동, 급등락)마다 확인하고, 체결되면 DM으로 알려드려요. 체결가는 그때의 현재가라서, 급락하면 손절가보다 더 낮게 팔릴 수 있어요.",
     ].filter(Boolean).join("\n");
@@ -6848,8 +6876,8 @@ export const handlers = {
     const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
     const orderLine = (o) => {
       const now = priceMap[o.stock];
-      const nowText = now === undefined ? "상장폐지" : `현재가 ${now.toLocaleString()}해정`;
-      return `\`${o.id}\` ${orderText(o)} · ${nowText}`;
+      const nowText = now === undefined ? "상장폐지" : `현재가 ${moneyOf(stockMap[o.stock], now)}`;
+      return `\`${o.id}\` ${orderText(o, stockMap[o.stock])} · ${nowText}`;
     };
     const domesticOrders = orders.filter((o) => !isForeign(stockMap[o.stock]));
     const foreignOrders = orders.filter((o) => isForeign(stockMap[o.stock]));
@@ -6868,9 +6896,10 @@ export const handlers = {
     if (!targets.length) return "취소할 예약을 골라 주세요.";
     const { removed, missing } = await cancelOrders(env, userId, targets);
     if (removed.length === 0) return "해당 예약을 찾지 못했어요. 칸을 눌러 목록에서 골라 주세요.";
+    const stockMap = Object.fromEntries((await listStocksForAutocomplete(env)).map((s) => [s.name, s]));
     return [
       `**예약 ${removed.length}건을 취소했어요.**`,
-      ...removed.map((o) => `- \`${o.id}\` ${orderText(o)}`),
+      ...removed.map((o) => `- \`${o.id}\` ${orderText(o, stockMap[o.stock])}`),
       ...(missing.length ? [`(찾지 못한 예약: ${missing.map((m) => `\`${m}\``).join(", ")})`] : []),
     ].join("\n");
   },
@@ -6957,7 +6986,7 @@ export const handlers = {
 
   공시목록: async (_interaction, env) => newsListText(env),
 
-  은행설명: async (interaction, env) => bankHelpText(await getBankRate(env)),
+  은행설명: async (interaction, env) => ({ embeds: [{ description: bankHelpText(await getBankRate(env)).slice(0, 4096), color: 0x5865f2 }] }),
 
   예금: async (interaction, env) => (await depositMoney(env, interaction.member.user.id, opt(interaction, "금액"))).message,
 
