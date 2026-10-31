@@ -1935,7 +1935,7 @@ export function limitInfoLine(stock) {
 // 시세 공지·DM에 붙는 거래 상태 표시
 function stateTag(c) {
   let t = "";
-  if (c.limit) t += c.limit === "up" ? " 🔒상한가" : " 🔒하한가";
+  if (c.limit) t += " 🔒";
   if (c.reviewPassed) t += " 🎉 심사 통과 · 상장 유지";
   else if (c.resumed) t += " ▶️ 거래 재개";
   else if (c.halted) t += ` ⛔ 거래정지 (${haltWhy(c.haltReason, c.haltLeft)})`;
