@@ -2020,15 +2020,6 @@ function buildConfig(points, up) {
   };
 }
 
-// 숫자 목록 -> "▁▂▃▅▇" 글자 그래프 (이미지가 안 뜰 때도 흐름은 보이게)
-function sparkline(values) {
-  const bars = "▁▂▃▄▅▆▇█";
-  const lo = Math.min(...values);
-  const hi = Math.max(...values);
-  if (!(hi > lo)) return bars[0].repeat(values.length);
-  return values.map((v) => bars[Math.min(bars.length - 1, Math.floor(((v - lo) / (hi - lo)) * bars.length))]).join("");
-}
-
 // points: [{ t(ms), p(가격) }], up: 구간 전체가 올랐으면 true(빨강), 아니면 false(파랑)
 // 반환: 이미지 주소(URL)
 export async function renderStockChart(points, up) {
@@ -6282,7 +6273,6 @@ async function stockChart(env, name) {
             `구간 변동: ${mark} ${diff > 0 ? "+" : diff < 0 ? "-" : ""}${moneyOf(stock, Math.abs(diff))} (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%) · ${formatKST(first.t)} 시작가 ${moneyOf(stock, first.p)} 대비`,
             `구간 최고 ${moneyOf(stock, high)} / 최저 ${moneyOf(stock, low)}`,
             `역대 최고가 ${moneyOf(stock, Math.max(stock.maxPrice || 0, high))}`,
-            `\`${sparkline(prices.slice(-30))}\``,
           ].join("\n"),
           color: up ? 0xe53935 : 0x1e88e5, // 오름 = 빨강, 내림 = 파랑
           image: { url: imageUrl },
