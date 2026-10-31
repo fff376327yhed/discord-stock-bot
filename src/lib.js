@@ -694,7 +694,9 @@ export async function upsertStock(env, name, price, known, extra = {}) {
     history,
     updatedAt: new Date(),
     ...(isNew ? { listedAt: Date.now() } : {}),
-    ...(resetFv ? { fv: price } : {}),
+    ...(resetFv ? { fv: price, dayRef: { day: todayKST(), p: price } } : {}),
+    // 관리자가 가격을 직접 정하면 거래정지도 풀려요 (같은 가격으로 다시 설정해도 풀려요)
+    ...(!known && base.halt ? { halt: null } : {}),
     // 관리자가 가격을 직접 정하면 그 전에 쌓인 유저 거래 압력은 버려요 (정한 가격이 바로 흔들리지 않게)
     ...(!known && Number.isFinite(base.flow) && base.flow !== 0 && extra.flow === undefined ? { flow: 0 } : {}),
     ...newSector,
@@ -827,6 +829,8 @@ export async function buyStock(env, userId, stockName, qty) {
   if (!stock) return { ok: false, message: `"${stockName}" 종목을 찾을 수 없어요.` };
   const closed = await usClosedNotice(env, [stock]);
   if (closed) return { ok: false, message: closed };
+  const halted = haltNotice([stock]);
+  if (halted) return { ok: false, message: halted };
 
   const user = await getUser(env, userId);
   const usd = isForeign(stock); // 외국자산은 달러(센트)로 결제
@@ -878,6 +882,8 @@ export async function sellStock(env, userId, stockName, qty) {
   if (!stock) return { ok: false, message: `"${stockName}" 종목을 찾을 수 없어요.` };
   const closed = await usClosedNotice(env, [stock]);
   if (closed) return { ok: false, message: closed };
+  const halted = haltNotice([stock]);
+  if (halted) return { ok: false, message: halted };
 
   const user = await getUser(env, userId);
   const held = user.holdings[stockName] || 0;
@@ -981,6 +987,10 @@ export async function buyStocks(env, userId, items) {
     const closed = await usClosedNotice(env, stocks);
     if (closed) return { ok: false, message: `${closed}\n(미국 주식: ${closedNames.join(", ")})\n(아무것도 매수하지 않았어요.)` };
   }
+  {
+    const halted = haltNotice(stocks);
+    if (halted) return { ok: false, message: `${halted}\n(아무것도 매수하지 않았어요.)` };
+  }
 
   const rows = items.map((it, i) => {
     const stock = stocks[i];
@@ -1055,6 +1065,10 @@ export async function sellStocks(env, userId, items) {
     const closedNames = items.filter((_, i) => stocks[i].kind === "us").map((i) => i.name);
     const closed = await usClosedNotice(env, stocks);
     if (closed) return { ok: false, message: `${closed}\n(미국 주식: ${closedNames.join(", ")})\n(아무것도 매도하지 않았어요.)` };
+  }
+  {
+    const halted = haltNotice(stocks);
+    if (halted) return { ok: false, message: `${halted}\n(아무것도 매도하지 않았어요.)` };
   }
 
   const hasUsd = stocks.some((s) => isForeign(s));
@@ -1673,11 +1687,12 @@ function randomSymNormal(sigma, max) {
 }
 
 // 이번 변동의 공통 충격을 한 번 뽑아요. (시장 1개, 업종별 1개씩) surge=true면 급등락용 큰 충격이에요.
-export function rollShocks(surge = false) {
+// macro: loadMacroTilt 결과(금리·환율 영향). 없으면 예전과 똑같이 동작해요.
+export function rollShocks(surge = false, macro = null) {
   const p = surge ? SHOCK_SURGE : SHOCK_NORMAL;
   const sectors = {};
-  for (const s of SECTORS) sectors[s] = randomSymNormal(p.sectorSigma, p.sectorMax);
-  return { market: randomSymNormal(p.marketSigma, p.marketMax), sectors, surge: !!surge };
+  for (const s of SECTORS) sectors[s] = randomSymNormal(p.sectorSigma, p.sectorMax) + (macro?.sectors?.[s] || 0);
+  return { market: randomSymNormal(p.marketSigma, p.marketMax), sectors, surge: !!surge, macro: macro ? { rateD: macro.rateD, fxD: macro.fxD } : null };
 }
 
 // 한 종목이 이번에 받는 공통 충격(로그) = beta × 시장 + 내 업종
@@ -1804,6 +1819,123 @@ export function nextChange(price, fvIn, { minPct, maxPct, crashChance = 0, crash
   return { pct: basePct + impact + newsShift + pull, fv };
 }
 
+// ---------- 상·하한가 / 서킷브레이커 / 거래정지 / 상장폐지 심사 ----------
+// 1) 가격 제한: 하루(한국시간 0시 이후 첫 변동 직전 가격 = 기준가) 동안 기준가의 ±DAILY_LIMIT_PCT%까지만 움직여요.
+//    위끝에 닿으면 "상한가", 아래끝에 닿으면 "하한가"예요. (급등락 -80%~+120%도 이 안으로 잘려요)
+// 2) 급등락 서킷브레이커
+//    - 종목: 급등락 때 상·하한가에 닿은 종목은 이어지는 CIRCUIT_STOCK_TICKS번의 변동 동안 거래정지(가격도 멈춰요).
+//    - 시장: 급등락의 시장 충격이 MARKET_BREAKER_PCT% 이하로 크게 빠지면 모든 종목이 MARKET_BREAKER_TICKS번 거래정지.
+// 3) 관리종목 → 거래정지 → 상장폐지 심사
+//    - 관리종목: DANGER_PRICE 이하 (⚠️ 표시, 기존 "위기 종목")
+//    - 가격이 DELIST_PRICE 이하로 떨어지면 바로 폐지하지 않고 REVIEW_TICKS번의 변동 동안 거래정지(상장폐지 심사)예요.
+//      심사가 끝나면 REVIEW_PASS_RATE 확률로 상장 유지(가격이 REVIEW_REBOUND_PRICE로 올라 재개), 아니면 상장폐지예요.
+//    - 거래정지 종목은 사고팔 수 없고, 예약 주문은 재개될 때까지 보류돼요. (보험은 심사 중에도 유효해서 폐지되면 보험금이 나가요)
+// 거래정지 상태는 종목 문서의 halt = { left: 남은 변동 횟수, reason: "limit" | "market" | "review" | "split", at, from? } 에 저장돼요.
+// 관리자가 /시세설정 으로 가격을 다시 정하면 거래정지와 기준가가 초기화돼요. (정지를 풀고 싶을 때 같은 가격으로 다시 설정하세요)
+//   LIMIT_ENABLED: false면 가격 제한·거래정지를 전부 끄고 예전처럼 동작해요.
+const LIMIT_ENABLED = true;
+export const DAILY_LIMIT_PCT = 30;
+const CIRCUIT_STOCK_TICKS = 2;
+const MARKET_BREAKER_PCT = -25;
+const MARKET_BREAKER_TICKS = 3;
+const REVIEW_TICKS = 8;
+const REVIEW_PASS_RATE = 0.25;
+const REVIEW_REBOUND_PRICE = Math.round(DELIST_PRICE * 1.5);
+
+const HALT_TEXT = { limit: "상·하한가 서킷브레이커", market: "시장 서킷브레이커", review: "상장폐지 심사", split: "액면분할 처리 중" };
+
+export const isHalted = (s) => !!s && !isForeign(s) && Number.isFinite(s.halt?.left) && s.halt.left > 0;
+export const haltTag = (s) => (isHalted(s) ? " ⛔" : "");
+
+// 거래정지 사유 문구 (reason: halt.reason, left: 남은 횟수)
+function haltWhy(reason, left) {
+  if (reason === "review") return `상장폐지 심사 중 · ${left}번 변동 뒤 결과 발표`;
+  if (reason === "split") return "액면분할 처리 중 · 곧 재개";
+  return `${HALT_TEXT[reason] || "거래정지"} · ${left}번 변동 뒤 재개`;
+}
+
+// 거래정지 종목이 있으면 안내 문구를, 없으면 null을 돌려줘요 (매수·매도·선물 시작 전에 확인)
+export function haltNotice(stocks) {
+  const hit = stocks.filter(isHalted);
+  if (hit.length === 0) return null;
+  return hit.map((s) => `⛔ **${s.name}**은(는) 거래정지 중이에요. (${haltWhy(s.halt.reason, s.halt.left)})`).join("\n");
+}
+
+// 오늘의 가격 제한 범위
+export function limitBand(stock) {
+  const ref = stock.dayRef && stock.dayRef.day === todayKST() && stock.dayRef.p > 0 ? stock.dayRef.p : stock.price;
+  return {
+    ref,
+    hi: Math.round(ref * (1 + DAILY_LIMIT_PCT / 100)),
+    lo: Math.max(1, Math.round(ref * (1 - DAILY_LIMIT_PCT / 100))),
+  };
+}
+
+// /종목정보에 보여줄 가격 제한·거래 상태 줄
+export function limitInfoLine(stock) {
+  const b = limitBand(stock);
+  let t = `🔒 오늘 가격 제한(±${DAILY_LIMIT_PCT}%): 하한 **${b.lo.toLocaleString()}** ~ 상한 **${b.hi.toLocaleString()}**해정 (기준가 ${b.ref.toLocaleString()})`;
+  if (isHalted(stock)) t += `\n⛔ **거래정지 중**: ${haltWhy(stock.halt.reason, stock.halt.left)}`;
+  else if (isDelistDanger(stock.price)) t += `\n⚠️ 관리종목: ${DELIST_PRICE.toLocaleString()}해정 이하로 떨어지면 거래정지 후 상장폐지 심사(${REVIEW_TICKS}번 변동)를 받아요.`;
+  return t;
+}
+
+// 시세 공지·DM에 붙는 거래 상태 표시
+function stateTag(c) {
+  let t = "";
+  if (c.limit) t += c.limit === "up" ? " 🔒상한가" : " 🔒하한가";
+  if (c.reviewPassed) t += " 🎉 심사 통과 · 상장 유지";
+  else if (c.resumed) t += " ▶️ 거래 재개";
+  else if (c.halted) t += ` ⛔ 거래정지 (${haltWhy(c.haltReason, c.haltLeft)})`;
+  if (c.split) t += ` ✂️ ${c.split}대1 액면분할`;
+  return t;
+}
+
+// ---------- 금리·환율이 업종에 주는 영향 ----------
+// 은행 금리(시장금리 배율)와 환율이 "바뀌면", 그 직후 1시간(시세 변동 4번) 동안 업종 충격에 조금씩 더해져요.
+//  - 변화량 기준이라 평균은 0이에요. (오른 만큼·내린 만큼 대칭이라 한쪽으로 쏠리지 않아요)
+//  - rateD = 금리 배율 변화 ÷ 배율 범위(-1~+1), fxD = 환율 변화율 ÷ 최대 변동폭(-1~+1)
+//  - 업종별 민감도 = 변화가 최대(±1)일 때 1시간 동안 더해지는 로그 수익률. 표준 1시간 업종 변동폭(약 ±10%) 안에서 은은하게 보이게 잡았어요.
+//    금리↑: 성장주(IT·바이오)·건설·소비재 ↓, 금융 ↑      환율↑(원화 약세): 수출주(IT·바이오) ↑, 에너지·소비재(수입 물가) ↓
+//  MACRO_ENABLED=false면 끄기. 숫자를 키우면 영향이 더 뚜렷해져요.
+const MACRO_ENABLED = true;
+const RATE_SECTOR_SENS = { IT: -0.15, 바이오: -0.15, 에너지: 0, 금융: 0.1, 소비재: -0.04, 건설: -0.08 };
+const FX_SECTOR_SENS = { IT: 0.1, 바이오: 0.04, 에너지: -0.06, 금융: 0, 소비재: -0.08, 건설: 0 };
+const MACRO_TICKS_PER_HOUR = 4;
+const MACRO_WINDOW_MS = 60 * 60 * 1000;
+const clampUnit = (x) => Math.max(-1, Math.min(1, x));
+
+// 지금 시세 변동에 더할 업종별 금리·환율 영향 (없으면 null)
+export async function loadMacroTilt(env, now = Date.now()) {
+  if (!MACRO_ENABLED) return null;
+  const [bank, fx] = await Promise.all([getBankRate(env).catch(() => null), getFxRate(env).catch(() => null)]);
+  let rateD = 0;
+  let fxD = 0;
+  if (bank && Number.isFinite(bank.mult) && Number.isFinite(bank.prevMult) && Number.isFinite(bank.indexAt) && now - bank.indexAt >= 0 && now - bank.indexAt < MACRO_WINDOW_MS) {
+    rateD = clampUnit((bank.mult - bank.prevMult) / (MARKET_RATE_MAX_MULT - MARKET_RATE_MIN_MULT));
+  }
+  if (fx && fx.prev > 0 && fx.rate > 0 && Number.isFinite(fx.at) && now - fx.at >= 0 && now - fx.at < MACRO_WINDOW_MS) {
+    fxD = clampUnit((fx.rate / fx.prev - 1) / (FX_STEP_PCT / 100));
+  }
+  if (!rateD && !fxD) return null;
+  const sectors = {};
+  for (const s of SECTORS) sectors[s] = ((RATE_SECTOR_SENS[s] || 0) * rateD + (FX_SECTOR_SENS[s] || 0) * fxD) / MACRO_TICKS_PER_HOUR;
+  return { sectors, rateD: +rateD.toFixed(3), fxD: +fxD.toFixed(3) };
+}
+
+// 금리·환율 공지 밑에 붙는 한 줄 (어느 업종이 영향을 받는지)
+function macroHintLine(kind, delta) {
+  if (!MACRO_ENABLED || !delta) return "";
+  const sens = kind === "rate" ? RATE_SECTOR_SENS : FX_SECTOR_SENS;
+  const dir = delta > 0 ? 1 : -1;
+  const up = SECTORS.filter((s) => sens[s] * dir > 0);
+  const down = SECTORS.filter((s) => sens[s] * dir < 0);
+  const parts = [];
+  if (up.length) parts.push(`📈 ${up.join("·")}`);
+  if (down.length) parts.push(`📉 ${down.join("·")}`);
+  return parts.length ? `\n-# 업종 영향(앞으로 1시간 동안 시세에 조금씩 반영): ${parts.join(" / ")}` : "";
+}
+
 // ---------- 시세 변동 ----------
 // 모든 종목 가격을 minPct~maxPct(%) 범위에서 무작위로 변동시킴 (외국자산은 실제 시세로 변동) (최저가 1해정 보장)
 // 변동 후 가격이 DELIST_PRICE 이하이면 상장폐지 처리합니다.
@@ -1817,8 +1949,20 @@ export function nextChange(price, fvIn, { minPct, maxPct, crashChance = 0, crash
 export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, crashPct = -100, impact = {}, news = {}, newsFv = null, surge = false }) {
   const stocks = await listStocks(env);
   const changes = [];
-  const shocks = rollShocks(surge); // 이번 변동의 시장 충격 1개 + 업종별 충격 1개씩
+  // 금리·환율이 방금 바뀌었으면 그 영향을 업종 충격에 더해요 (실패해도 시세 변동은 그대로)
+  let macro = null;
+  try {
+    macro = await loadMacroTilt(env);
+  } catch (err) {
+    console.error("금리·환율 영향 계산 실패:", err.message);
+  }
+  const shocks = rollShocks(surge, macro); // 이번 변동의 시장 충격 1개 + 업종별 충격 1개씩
   changes.shocks = shocks;
+  const today = todayKST();
+  const nowMs = Date.now();
+  // 시장 서킷브레이커: 급등락에서 시장 충격이 크게 빠지면 모든 종목이 거래정지
+  const marketBreak = LIMIT_ENABLED && surge && shocks.market <= Math.log(1 + MARKET_BREAKER_PCT / 100);
+  changes.marketBreaker = marketBreak;
 
   // 외국자산(코인·해외주식)은 랜덤 대신 실제 시세로 움직여요. 시세는 한 번에 모아서 가져와요.
   const quotes = await loadForeignQuotes(env, stocks);
@@ -1835,6 +1979,37 @@ export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, cr
       continue;
     }
 
+    // 거래정지 중: 가격은 그대로 두고 남은 횟수만 줄여요. (심사 중이면 마지막 횟수에 결과를 정해요)
+    if (isHalted(stock)) {
+      const h = stock.halt;
+      const left = h.left - 1;
+      if (h.reason === "review" && left <= 0) {
+        if (Math.random() < REVIEW_PASS_RATE) {
+          const price = REVIEW_REBOUND_PRICE;
+          await upsertStock(env, stock.name, price, stock, { fv: price, halt: null, dayRef: { day: today, p: price } });
+          changes.push({ name: stock.name, before: stock.price, after: price, pct: ((price - stock.price) / stock.price) * 100, delisted: false, holders: [], reviewPassed: true, resumed: true });
+        } else {
+          const from = Number.isFinite(h.from) ? h.from : stock.price;
+          const holders = await delistStock(env, stock.name, {
+            lastPrice: from,
+            finalPrice: stock.price,
+            maxPrice: Math.max(Number.isFinite(stock.maxPrice) ? stock.maxPrice : 0, stock.price),
+            history: stock.history,
+            listedAt: stock.listedAt,
+          });
+          changes.push({ name: stock.name, before: from, after: stock.price, pct: 0, delisted: true, holders });
+        }
+        continue;
+      }
+      const keep = left > 0;
+      await upsertStock(env, stock.name, stock.price, stock, { halt: keep ? { ...h, left } : null });
+      changes.push({
+        name: stock.name, before: stock.price, after: stock.price, pct: 0, delisted: false, holders: [], frozen: true,
+        ...(keep ? { halted: true, haltReason: h.reason, haltLeft: left } : { resumed: true }),
+      });
+      continue;
+    }
+
     // 6단계: 이 종목 문서에 쌓여 있던 유저 순매수(flow)를 영향으로 바꿔요. (이미 읽은 문서라 추가 읽기 없음)
     const trade = tradeImpactOf(stock.flow, stock);
     // news = 공시 기울기, impact = 봇 압력 + 유저 거래 압력, fv = 기업 가치(평균 회귀용)
@@ -1847,11 +2022,47 @@ export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, cr
       common: commonShockOf(shocks, stock.sector, stock.beta), // beta × 시장 + 내 업종 (업종 없으면 시장만)
       idioSigma: idioSigmaOf(stock, surge), // 변동성 등급에 따른 개별 충격 크기
     });
-    const newPrice = Math.max(1, Math.round(stock.price * (1 + pct / 100)));
+    let newPrice = Math.max(1, Math.round(stock.price * (1 + pct / 100)));
     // 최고가 기록이 없던 기존 종목은 지금 가격을 최고가로 시작
     const maxPrice = Math.max(Number.isFinite(stock.maxPrice) ? stock.maxPrice : stock.price, stock.price);
 
+    // 하루 ±DAILY_LIMIT_PCT% 가격 제한 (기준가 = 오늘 첫 변동 직전 가격). 폭락(-100%)도 하한가에서 멈춰요.
+    const ref = stock.dayRef && stock.dayRef.day === today && stock.dayRef.p > 0 ? stock.dayRef.p : stock.price;
+    const dayRef = { day: today, p: ref };
+    let limit = null;
+    if (LIMIT_ENABLED) {
+      const band = limitBand({ ...stock, dayRef });
+      if (newPrice >= band.hi) {
+        newPrice = band.hi;
+        limit = "up";
+      } else if (newPrice <= band.lo) {
+        newPrice = band.lo;
+        limit = "down";
+      }
+    }
+    const realPct = ((newPrice - stock.price) / stock.price) * 100;
+
+    // 등급이 없던 기존 종목은 이번에 가격 규칙으로 정해서 같이 저장해요. (쓰기 횟수는 그대로)
+    const tierExtra = VOL_TIERS.includes(stock.volTier) ? {} : { volTier: tierOf(stock) };
+    // 쌓였던 유저 거래 압력은 반영했으니 같은 쓰기에 실어서 비워요. (쓰기 횟수는 그대로)
+    const flowExtra = Number.isFinite(stock.flow) && stock.flow !== 0 ? { flow: 0 } : {};
+
     if (newPrice <= DELIST_PRICE) {
+      // 바로 폐지하지 않고 거래정지(상장폐지 심사)에 들어가요
+      if (LIMIT_ENABLED && REVIEW_TICKS > 0) {
+        await upsertStock(env, stock.name, newPrice, stock, {
+          fv: Math.round(fv * 100) / 100,
+          dayRef,
+          halt: { left: REVIEW_TICKS, reason: "review", at: nowMs, from: stock.price },
+          ...tierExtra,
+          ...flowExtra,
+        });
+        changes.push({
+          name: stock.name, before: stock.price, after: newPrice, pct: realPct, delisted: false, holders: [],
+          halted: true, haltNew: true, haltReason: "review", haltLeft: REVIEW_TICKS, ...(limit ? { limit } : {}),
+        });
+        continue;
+      }
       const holders = await delistStock(env, stock.name, {
         lastPrice: stock.price,
         finalPrice: newPrice,
@@ -1859,16 +2070,27 @@ export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, cr
         history: stock.history,
         listedAt: stock.listedAt,
       });
-      changes.push({ name: stock.name, before: stock.price, after: newPrice, pct, delisted: true, holders });
+      changes.push({ name: stock.name, before: stock.price, after: newPrice, pct: realPct, delisted: true, holders });
       continue;
     }
 
-    // 등급이 없던 기존 종목은 이번에 가격 규칙으로 정해서 같이 저장해요. (쓰기 횟수는 그대로)
-    const tierExtra = VOL_TIERS.includes(stock.volTier) ? {} : { volTier: tierOf(stock) };
-    // 쌓였던 유저 거래 압력은 반영했으니 같은 쓰기에 실어서 비워요. (쓰기 횟수는 그대로)
-    const flowExtra = Number.isFinite(stock.flow) && stock.flow !== 0 ? { flow: 0 } : {};
-    await upsertStock(env, stock.name, newPrice, stock, { fv: Math.round(fv * 100) / 100, ...tierExtra, ...flowExtra });
-    changes.push({ name: stock.name, before: stock.price, after: newPrice, pct, delisted: false, holders: [] });
+    // 서킷브레이커: 시장 전체 > 급등락에서 상·하한가에 닿은 종목
+    let halt = null;
+    if (LIMIT_ENABLED && marketBreak && MARKET_BREAKER_TICKS > 0) halt = { left: MARKET_BREAKER_TICKS, reason: "market", at: nowMs };
+    else if (LIMIT_ENABLED && surge && limit && CIRCUIT_STOCK_TICKS > 0) halt = { left: CIRCUIT_STOCK_TICKS, reason: "limit", at: nowMs };
+
+    await upsertStock(env, stock.name, newPrice, stock, {
+      fv: Math.round(fv * 100) / 100,
+      dayRef,
+      ...(halt ? { halt } : {}),
+      ...tierExtra,
+      ...flowExtra,
+    });
+    changes.push({
+      name: stock.name, before: stock.price, after: newPrice, pct: realPct, delisted: false, holders: [],
+      ...(limit ? { limit } : {}),
+      ...(halt ? { halted: true, haltNew: true, haltReason: halt.reason, haltLeft: halt.left } : {}),
+    });
   }
 
   // 종목 수가 기준 이하로 줄었으면 자동 상장
@@ -2908,13 +3130,14 @@ export async function prepareCrowd(env) {
     pct: changeOf(s),
     maxPrice: s.maxPrice || s.price,
     age: getPriceHistory(s).length, // 시세 기록 수 (적을수록 신규 상장)
+    halted: isHalted(s), // 거래정지 종목은 새로 사지 않아요
   }));
   const byName = Object.fromEntries(rows.map((r) => [r.name, r]));
-  const tradable = rows.filter((r) => r.price > DANGER_PRICE); // 폐지 위기 종목은 안 삼
+  const tradable = rows.filter((r) => r.price > DANGER_PRICE && !r.halted); // 폐지 위기·거래정지 종목은 안 삼
   const ctx = {
     byName,
     tradable,
-    danger: rows.filter((r) => r.price <= DANGER_PRICE), // 폐지 위기 종목 (복권러용)
+    danger: rows.filter((r) => r.price <= DANGER_PRICE && !r.halted), // 폐지 위기 종목 (복권러용)
     avgPct: rows.reduce((sum, r) => sum + r.pct, 0) / rows.length, // 시장 평균 변동률
     byUp: [...tradable].sort((a, b) => b.pct - a.pct),
     byDown: [...tradable].sort((a, b) => a.pct - b.pct),
@@ -3079,7 +3302,7 @@ function formatLines(list) {
       const pct = ((c.after - c.before) / c.before) * 100;
       const sign = pct > 0 ? "+" : "";
       const mark = c.after > c.before ? UP_MARK : c.after < c.before ? DOWN_MARK : "➖";
-      return `• ${mark} **${iconName(c)}**${dangerTag(c.after)}: ${moneyOf(c, c.before)} → ${moneyOf(c, c.after)} (${sign}${pct.toFixed(1)}%)`;
+      return `• ${mark} **${iconName(c)}**${dangerTag(c.after)}: ${moneyOf(c, c.before)} → ${moneyOf(c, c.after)} (${sign}${pct.toFixed(1)}%)${stateTag(c)}`;
     })
     .join("\n");
 }
@@ -3116,11 +3339,11 @@ function announceLine(c) {
     return `🚫 **${iconName(c)}**: 상장폐지 (${moneyOf(c, c.before)} → ${moneyOf(c, c.after)} · ${dropText(c)} 하락)`;
   }
   if (c.after === c.before) {
-    return `➖ **${iconName(c)}**: ${moneyOf(c, c.after)} (변동 없음)${dangerTag(c.after)}`;
+    return `➖ **${iconName(c)}**: ${moneyOf(c, c.after)} (변동 없음)${dangerTag(c.after)}${stateTag(c)}`;
   }
   const up = c.after > c.before;
   const pct = ((c.after - c.before) / c.before) * 100;
-  return `${up ? UP_MARK : DOWN_MARK} **${iconName(c)}**: ${moneyOf(c, c.before)} → ${moneyOf(c, c.after)} (${up ? "+" : ""}${pct.toFixed(1)}%)${dangerTag(c.after)}`;
+  return `${up ? UP_MARK : DOWN_MARK} **${iconName(c)}**: ${moneyOf(c, c.before)} → ${moneyOf(c, c.after)} (${up ? "+" : ""}${pct.toFixed(1)}%)${dangerTag(c.after)}${stateTag(c)}`;
 }
 
 // 시세가 변동될 때마다 주식채널(ALLOWED_CHANNEL_ID)에 변동 내역을 공지합니다.
@@ -3180,11 +3403,23 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
     const sortByPrice = (list) =>
       [...list].sort((a, b) => b.after - a.after || String(a.name).localeCompare(String(b.name), "ko"));
 
+    if (changes.marketBreaker) {
+      pushBlock(`🚨 **시장 서킷브레이커 발동!** 시장이 크게 무너져서 모든 종목의 거래를 ${MARKET_BREAKER_TICKS}번 변동 동안 멈췄어요. 재개될 때까지 사고팔 수 없어요.`);
+    }
     for (const c of sortByPrice(mainChanges)) pushLine(announceLine(c));
 
     // 미국 주식 (있을 때만, 하단에 따로)
     if (visibleUs.length) {
       pushBlock(["🌐 **미국 주식**", ...sortByPrice(visibleUs).map(announceLine)].join("\n"));
+    }
+
+    // 거래 제한 안내: 해당하는 종목이 있을 때만 표시
+    if (mainChanges.some((c) => c.halted || c.resumed || c.limit)) {
+      const notes = [];
+      if (mainChanges.some((c) => c.limit)) notes.push(`🔒 상·하한가: 하루(0시 기준가) ±${DAILY_LIMIT_PCT}%까지만 움직여요.`);
+      if (mainChanges.some((c) => c.halted)) notes.push("⛔ 거래정지 종목은 가격이 멈추고 사고팔 수 없어요. (예약 주문은 재개 후에 체결돼요)");
+      if (mainChanges.some((c) => c.haltReason === "review")) notes.push(`📋 상장폐지 심사 중인 종목은 ${REVIEW_TICKS}번 변동 뒤 결과가 나와요. (상장 유지 확률 ${Math.round(REVIEW_PASS_RATE * 100)}%)`);
+      if (notes.length) pushBlock(notes.map((n) => `-# ${n}`).join("\n"));
     }
 
     // 공시 결과 (있을 때만)
@@ -3457,6 +3692,7 @@ export async function processOrders(env) {
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
   const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
   const usNames = new Set(stocks.filter((s) => s.kind === "us").map((s) => s.name));
+  const haltedNames = new Set(stocks.filter(isHalted).map((s) => s.name)); // 거래정지 종목의 예약은 취소하지 않고 재개될 때까지 보류
   // 미국 장이 닫혀 있으면 미국 주식 예약은 취소하지 않고 그대로 두었다가, 장이 열리면 체결해요.
   const usOpen = usNames.size === 0 ? true : (await getUsMarketStatus(env)).open;
   const summary = { filled: 0, cancelled: 0 };
@@ -3474,6 +3710,8 @@ export async function processOrders(env) {
           hits.push({ id, o, gone: true });
         } else if (!usOpen && usNames.has(o.stock)) {
           continue; // 장 마감: 보류 (취소 아님)
+        } else if (haltedNames.has(o.stock)) {
+          continue; // 거래정지: 보류 (취소 아님)
         } else if (o.side === "buy" || o.dir === "down" ? price <= o.price : price >= o.price) {
           hits.push({ id, o, price });
         }
@@ -3739,6 +3977,8 @@ export async function openFuture(env, userId, { stock: stockName, side, margin, 
   if (!stock) return { ok: false, message: `"${stockName}" 종목을 찾을 수 없어요.` };
   const closed = await usClosedNotice(env, [stock]);
   if (closed) return { ok: false, message: closed };
+  const halted = haltNotice([stock]);
+  if (halted) return { ok: false, message: halted };
 
   const usd = isForeign(stock); // 외국자산 선물은 달러 증거금 (입력은 달러 정수, 저장은 센트)
   if (!usd && margin < MIN_FUTURES_MARGIN) {
@@ -4047,7 +4287,7 @@ export async function rollFxRate(env) {
       }
       const nextUnix = Math.floor((Math.ceil((now + 1) / FX_HOUR_MS) * FX_HOUR_MS) / 1000);
       const posted = await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, {
-        content: `💵 **환율 변경** ${arrow} ${prev.rate}해정 → **${rate}해정** (1달러 기준)\n다음 변경: <t:${nextUnix}:t> (<t:${nextUnix}:R>)`,
+        content: `💵 **환율 변경** ${arrow} ${prev.rate}해정 → **${rate}해정** (1달러 기준)\n다음 변경: <t:${nextUnix}:t> (<t:${nextUnix}:R>)${macroHintLine("fx", rate - prev.rate)}`,
         flags: 4096,
         allowed_mentions: { parse: [] },
       });
@@ -4197,7 +4437,8 @@ export async function rollBankRate(env) {
     Object.entries(LOAN_TERMS).map(([term, base]) => [term, +(base * mult).toFixed(5)])
   );
 
-  const next = { mult, depositRate, loanRates, index, indexAt: now };
+  // prevMult: 직전 배율 (금리가 오르내린 만큼 업종 시세에 영향을 줘요. loadMacroTilt 참고)
+  const next = { mult, prevMult: prev.mult ?? 1, depositRate, loanRates, index, indexAt: now };
   await setDoc(env, bankRatePath, next);
 
   // 주식채널에 무음 한 줄 공지 (실패해도 금리 변경 자체는 그대로)
@@ -4214,7 +4455,8 @@ export async function rollBankRate(env) {
       const posted = await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, {
         content:
           `🏦 **은행 금리 변경** ${arrow} 시장금리 ×${prev.mult ?? 1} → ×${mult}\n` +
-          `예금 일 ${pctText(depositRate)} · 대출 ${loanRatesText(next)} (신용등급 B 기준)`,
+          `예금 일 ${pctText(depositRate)} · 대출 ${loanRatesText(next)} (신용등급 B 기준)` +
+          macroHintLine("rate", mult - (prev.mult ?? 1)),
         flags: 4096,
         allowed_mentions: { parse: [] },
       });
@@ -5238,6 +5480,10 @@ export const NEWS_PER_DAY = 4;
 export const NEWS_COOLDOWN_HOURS = 6;
 const NEWS_SHIFT = { 1: 6, 2: 10, 3: 14 }; // 기울기 세기(퍼센트포인트). 평소 변동이 -20~+20%라면 중간 호재는 -10~+30%
 const NEWS_MAX_SHIFT = 20; // 한 종목에 겹쳐도 이 이상은 안 기울어요
+// 액면분할: 분할 뒤 가격이 SPLIT_MIN_RESULT 이상이 되는 비율만 골라요. (가격이 낮은 종목은 분할 공시가 안 나와요)
+const SPLIT_RATIOS = [2, 3, 4, 5, 10];
+const SPLIT_MIN_RESULT = 1500;
+export const splitRatiosFor = (price) => SPLIT_RATIOS.filter((r) => price / r >= SPLIT_MIN_RESULT);
 const NEWS_RUMOR_TRUE_RATE = 0.6;
 const NEWS_KEEP = 12; // /공시목록에 남겨두는 최근 공시 수
 const NEWS_HOUR_MS = 60 * 60 * 1000;
@@ -5258,6 +5504,16 @@ const NEWS_MANUAL = {
 //  scope: normal(일반 종목만) / danger(위기 종목만) / both
 //  div: 2 = 다음 배당 2배, 0 = 다음 배당 없음   rumor: true = 확인 안 된 소문
 const NEWS_TEMPLATES = [
+  // 유상증자: 주식을 새로 찍어 돈을 모으는 거라 기존 주주 지분이 희석돼요. 주가가 내려가고 적정 가치(fv)도 같이 내려가요.
+  { kind: "유상증자", tone: "bad", tilt: 2, weight: 1, scope: "normal", texts: [
+    "{n} 운영 자금 마련을 위해 유상증자를 결정했어요 (주식 수가 늘어 기존 주주 지분이 희석돼요)",
+    "{n} 대규모 유상증자를 발표했어요 (새 주식이 풀려 주당 가치가 줄어요)",
+  ] },
+  // 액면분할: 1주를 r주로 쪼개요. 가격은 1/r, 내 수량은 r배라 자산 가치는 그대로예요. (다음 시세 변동 직후에 적용)
+  //   split: true 면 분할 비율({r})을 종목 가격에 맞게 자동으로 정해요. 가격이 충분히 높은 종목에만 나와요.
+  { kind: "액면분할", tone: "none", tilt: 0, weight: 1, scope: "normal", split: true, texts: [
+    "{n} 주식을 {r}분의 1로 쪼개는 액면분할을 결정했어요 (1주가 {r}주가 되고 가격은 1/{r}이 돼요, 자산 가치는 그대로예요)",
+  ] },
   { kind: "실적 발표", tone: "good", tilt: 2, weight: 2, scope: "normal", texts: [
     "{n} 이번 분기 실적이 시장 예상을 크게 웃돌았어요",
     "{n} 역대 최대 분기 매출을 달성했어요",
@@ -5323,15 +5579,18 @@ const newsId = (at) => `n${at.toString(36)}${Math.random().toString(36).slice(2,
 // 종목 하나에 붙일 공시를 만들어요 (위기 종목이면 위기용 문구만)
 function buildNewsItem(stock, at) {
   const danger = isDelistDanger(stock.price);
-  const pool = NEWS_TEMPLATES.filter((t) => t.scope === "both" || t.scope === (danger ? "danger" : "normal"));
+  const pool = NEWS_TEMPLATES.filter(
+    (t) => (t.scope === "both" || t.scope === (danger ? "danger" : "normal")) && (!t.split || splitRatiosFor(stock.price).length > 0)
+  );
   const t = newsPickWeighted(pool);
   const sign = t.tone === "good" ? 1 : -1;
-  let shift = NEWS_SHIFT[t.tilt] * sign;
+  let shift = t.split ? 0 : NEWS_SHIFT[t.tilt] * sign;
+  const splitRatio = t.split ? newsPickOne(splitRatiosFor(stock.price)) : 0;
   const item = {
     id: newsId(at),
     stock: stock.name,
     kind: t.kind,
-    text: newsPickOne(t.texts).replaceAll("{n}", stock.name) + (t.rumor ? " (확인되지 않았어요)" : ""),
+    text: newsPickOne(t.texts).replaceAll("{n}", stock.name).replaceAll("{r}", String(splitRatio)) + (t.rumor ? " (확인되지 않았어요)" : ""),
     tone: t.tone,
     rumor: !!t.rumor,
     manual: false,
@@ -5343,6 +5602,7 @@ function buildNewsItem(stock, at) {
   }
   item.shift = shift;
   if (t.div !== undefined) item.div = t.div;
+  if (t.split) item.split = splitRatio;
   return item;
 }
 
@@ -5423,7 +5683,7 @@ export async function publishNews(env) {
   const queued = new Set(Object.values(doc.queue || {}).map((i) => i.stock));
   const cool = doc.cool || {};
   const eligible = stocks.filter(
-    (s) => !isForeign(s) && s.price > DELIST_PRICE && !queued.has(s.name) && !(cool[s.name] && now - cool[s.name] < NEWS_COOLDOWN_HOURS * NEWS_HOUR_MS)
+    (s) => !isForeign(s) && s.price > DELIST_PRICE && !isHalted(s) && !queued.has(s.name) && !(cool[s.name] && now - cool[s.name] < NEWS_COOLDOWN_HOURS * NEWS_HOUR_MS)
   );
   if (eligible.length === 0) return { published: 0, reason: "공시할 수 있는 종목이 없어요 (쿨다운 중)" };
 
@@ -5484,6 +5744,155 @@ export async function takeNews(env) {
   return { items, shifts, fvShifts };
 }
 
+// ---------- 액면분할 실행 ----------
+// 1주를 ratio주로 쪼개요. 가격은 1/ratio, 보유 수량은 ratio배, 원가(총 매수 금액)는 그대로라서 내 자산 가치는 변하지 않아요.
+// 고치는 곳: 종목(가격·최고가·fv·시세 기록·오늘 기준가), 유저 보유 수량·보험, 예약 주문, 선물 진입가, 가격 알림, 봇 보유분
+// 끝나기 전까지 이 종목은 거래정지(split)예요. (중간에 사고팔면 수량과 가격이 어긋나서요)
+// 반환: { ok: true, ratio, before, after, holders, orders, futures, alerts, bots, errors } 또는 { ok: false, reason }
+export async function splitStock(env, name, ratio) {
+  const r = Math.floor(Number(ratio));
+  if (!(r >= 2)) return { ok: false, reason: "분할 비율이 올바르지 않아요" };
+  const stock = await getStock(env, name);
+  if (!stock) return { ok: false, reason: "종목을 찾지 못했어요" };
+  if (isForeign(stock)) return { ok: false, reason: "외국자산은 분할할 수 없어요" };
+
+  const path = `stocks/${encodeURIComponent(name)}`;
+  await setDoc(env, path, { halt: { left: 1, reason: "split", at: Date.now() } });
+  invalidateStocksCache();
+
+  const stats = { holders: 0, orders: 0, futures: 0, alerts: 0, bots: 0, errors: 0 };
+  const guard = async (label, fn) => {
+    try {
+      await fn();
+    } catch (err) {
+      stats.errors++;
+      console.error(`액면분할 ${label} 실패 (${name}):`, err.message);
+    }
+  };
+  const priceOf = (p) => Math.max(1, Math.round(p / r));
+  const oldPrice = stock.price;
+  const newPrice = priceOf(oldPrice);
+
+  const [users, orders, futures, watches] = await Promise.all([
+    listCollection(env, "users"),
+    listCollection(env, "orders"),
+    listCollection(env, "futures"),
+    listCollection(env, "watch"),
+  ]);
+
+  await Promise.all([
+    // 유저: 보유 수량 × r, 보험 수량 × r (보험금은 주당 1/r, 내림해서 이득이 생기지 않게)
+    ...users
+      .filter((u) => (u.holdings?.[name] || 0) > 0 || u.insurance?.[name])
+      .map((u) =>
+        guard(`유저 ${u.id}`, async () => {
+          const fresh = await getDoc(env, `users/${u.id}`); // 방금 값을 다시 읽어서 그 사이 바뀐 걸 덮어쓰지 않게 해요
+          if (!fresh) return;
+          const patch = {};
+          const held = fresh.holdings?.[name] || 0;
+          if (held > 0) patch.holdings = { ...fresh.holdings, [name]: held * r };
+          const pol = fresh.insurance?.[name];
+          if (pol) patch.insurance = { ...fresh.insurance, [name]: { ...pol, qty: pol.qty * r, payout: Math.max(1, Math.floor(pol.payout / r)) } };
+          if (Object.keys(patch).length === 0) return;
+          await setDoc(env, `users/${u.id}`, patch);
+          if (held > 0) {
+            stats.holders++;
+            await addHistory(env, u.id, `액면분할: ${name} 1주 → ${r}주 (${held.toLocaleString()}주 → ${(held * r).toLocaleString()}주, 가격 ${oldPrice.toLocaleString()} → ${newPrice.toLocaleString()}해정)`);
+          }
+        })
+      ),
+    // 예약 주문: 수량 × r, 기준가 ÷ r
+    ...orders
+      .filter((d) => Object.values(d.items || {}).some((o) => o.stock === name))
+      .map((d) =>
+        guard(`예약 ${d.id}`, async () => {
+          const items = await getOrderItems(env, d.id);
+          let n = 0;
+          for (const o of Object.values(items)) {
+            if (o.stock !== name) continue;
+            o.qty = o.qty * r;
+            o.price = priceOf(o.price);
+            n++;
+          }
+          if (n) {
+            await saveOrderItems(env, d.id, items);
+            stats.orders += n;
+          }
+        })
+      ),
+    // 선물: 진입가 ÷ r (증거금·배율은 그대로)
+    ...futures
+      .filter((d) => Object.values(d.items || {}).some((f) => f.stock === name))
+      .map((d) =>
+        guard(`선물 ${d.id}`, async () => {
+          const items = await getFutureItems(env, d.id);
+          let n = 0;
+          for (const f of Object.values(items)) {
+            if (f.stock !== name) continue;
+            f.entry = priceOf(f.entry);
+            n++;
+          }
+          if (n) {
+            await saveFutureItems(env, d.id, items);
+            stats.futures += n;
+          }
+        })
+      ),
+    // 가격 알림: 기준가 ÷ r
+    ...watches
+      .filter((d) => Object.values(d.alerts || {}).some((a) => a.stock === name))
+      .map((d) =>
+        guard(`알림 ${d.id}`, async () => {
+          const w = await getWatch(env, d.id);
+          let n = 0;
+          for (const a of Object.values(w.alerts)) {
+            if (a.stock !== name) continue;
+            a.price = priceOf(a.price);
+            n++;
+          }
+          if (n) {
+            await saveWatch(env, d.id, w);
+            stats.alerts += n;
+          }
+        })
+      ),
+    // 봇 보유분 × r
+    guard("봇", async () => {
+      const { total } = crowdConfig();
+      if (total <= 0) return;
+      const docs = await loadBots(env, total);
+      let n = 0;
+      for (const bots of docs) {
+        for (const b of bots) {
+          if (b.h && b.h[name] > 0) {
+            b.h[name] = b.h[name] * r;
+            n++;
+          }
+        }
+      }
+      if (n) {
+        await saveBots(env, docs);
+        stats.bots = n;
+      }
+    }),
+  ]);
+
+  // 마지막에 종목 문서를 바꾸고 거래정지를 풀어요
+  const history = Object.fromEntries(Object.entries(stock.history || {}).map(([k, p]) => [k, priceOf(p)]));
+  await setDoc(env, path, {
+    price: newPrice,
+    maxPrice: priceOf(Number.isFinite(stock.maxPrice) ? stock.maxPrice : oldPrice),
+    fv: Number.isFinite(stock.fv) && stock.fv > 0 ? Math.max(1, Math.round((stock.fv / r) * 100) / 100) : newPrice,
+    history,
+    dayRef: stock.dayRef && stock.dayRef.p > 0 ? { day: stock.dayRef.day, p: priceOf(stock.dayRef.p) } : { day: todayKST(), p: newPrice },
+    halt: null,
+    splitAt: Date.now(),
+    splitRatio: r,
+  });
+  invalidateStocksCache();
+  return { ok: true, ratio: r, before: oldPrice, after: newPrice, ...stats };
+}
+
 // 시세 변동 직후에 호출: 반영된 공시를 비우고, 결과 문구를 만들어요
 export async function finishNews(env, news, changes) {
   if (!news) return { lines: [], count: 0 };
@@ -5502,6 +5911,30 @@ export async function finishNews(env, news, changes) {
       line += " → 종목이 사라졌어요";
     } else if (c.delisted) {
       line += " → 🚫 상장폐지";
+    } else if (it.split) {
+      // 액면분할: 가격이 오르내린 것과 상관없이 시세 변동이 끝난 지금 가격에서 쪼개요
+      const r = it.split;
+      if (c.halted || c.frozen) {
+        line += " → ⛔ 거래정지 중이라 분할을 취소했어요";
+      } else if (Math.round(c.after / r) <= DANGER_PRICE) {
+        line += " → 가격이 많이 내려서 분할을 취소했어요";
+      } else {
+        const res = await splitStock(env, it.stock, r).catch((err) => {
+          console.error(`액면분할 실패 (${it.stock}):`, err.message);
+          return null;
+        });
+        if (res?.ok) {
+          line += ` → ✂️ 1주가 ${r}주로! ${res.before.toLocaleString()}해정 → ${res.after.toLocaleString()}해정 (내 자산 가치는 그대로)`;
+          // 이어지는 시세 공지·DM이 분할 뒤 가격으로 보이게 맞춰요
+          c.before = Math.max(1, Math.round(c.before / r));
+          c.after = res.after;
+          c.split = r;
+        } else {
+          line += " → 분할에 실패했어요 (관리자 확인이 필요해요)";
+        }
+      }
+    } else if (c.frozen && c.halted) {
+      line += " → ⛔ 거래정지 중이라 반영되지 않았어요";
     } else {
       pct = ((c.after - c.before) / c.before) * 100;
       line += ` → ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
@@ -6859,6 +7292,7 @@ function stockInfoText(stock, held = 0, divMod = 1, now = Date.now(), market = n
   return [
     `**🏷️ ${iconName(stock)} 종목정보**`,
     `${mark(dayPct)} 현재가 **${moneyOf(stock, stock.price)}**${dangerTag(stock.price) ? `${dangerTag(stock.price)} 상장폐지 위기` : ""} · 오늘 ${sgn(dayPct)}% (0시 ${moneyOf(stock, open)})`,
+    ...(isForeign(stock) ? [] : [limitInfoLine(stock)]),
     `🗓️ 상장일: ${listedText(stock.listedAt)} (한국시간)${days ? ` · 상장 ${days.toLocaleString()}일째` : ""}`,
     ...(isForeign(stock) ? [] : [`🏢 업종: **${sectorOf(stock)}** · 📊 변동성 등급: **${tierOf(stock)}**`]),
     `🏆 역대 최고가: **${moneyOf(stock, maxPrice)}** (지금은 최고가의 ${ofMax.toFixed(1)}%)`,
@@ -7156,7 +7590,7 @@ export const handlers = {
             ? "➖ 0.0%"
             : `${pct > 0 ? UP_MARK : DOWN_MARK} ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
         const sec = isForeign(s) ? "" : ` \`${sectorOf(s)}\``; // 업종 (외국자산은 업종이 없어요)
-        return `${mark}**${iconName(s)}**${sec}${dangerTag(s.price)} — ${moneyOf(s, s.price)} (${change})${staleTag(s)}`;
+        return `${mark}**${iconName(s)}**${sec}${dangerTag(s.price)}${haltTag(s)} — ${moneyOf(s, s.price)} (${change})${staleTag(s)}`;
       }),
     ].join("\n");
   },

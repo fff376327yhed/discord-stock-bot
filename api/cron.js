@@ -115,6 +115,9 @@ async function runFluctuation(env, range, label) {
     shocks: changes.shocks, // 이번에 뽑은 시장·업종 충격(로그 수익률)
     count: changes.length,
     delisted: changes.filter((c) => c.delisted).map((c) => c.name),
+    marketBreaker: !!changes.marketBreaker, // 시장 서킷브레이커 발동 여부
+    halted: changes.filter((c) => c.halted).map((c) => c.name), // 거래정지 종목
+    limits: changes.filter((c) => c.limit).map((c) => `${c.name}${c.limit === "up" ? "↑" : "↓"}`), // 상·하한가 종목
     changes,
   });
 }
