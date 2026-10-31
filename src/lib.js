@@ -267,6 +267,54 @@ async function listCollection(env, collection) {
   }));
 }
 
+// 숫자 필드를 "원자적으로" 더해요. (읽지 않고 한 번의 요청으로 처리, 여러 문서·여러 사람이 동시에 더해도 값이 안 사라져요)
+// items: [{ path: "stocks/이름", field: "flow", by: 숫자 }]  문서가 없으면 그 항목은 건너뛰어요(생성하지 않음).
+async function incrementFields(env, items) {
+  if (!items.length) return true;
+  const token = await getAccessToken(env);
+  const docRoot = `projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents`;
+  const res = await fetch(`${baseUrl(env)}:commit`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      writes: items.map((it) => ({
+        update: { name: `${docRoot}/${it.path}` },
+        updateMask: { fieldPaths: [] }, // 다른 필드는 건드리지 않아요
+        updateTransforms: [{ fieldPath: it.field, increment: { doubleValue: it.by } }],
+        currentDocument: { exists: true },
+      })),
+    }),
+  });
+  if (!res.ok) throw new Error(`Firestore 증가 실패: ${await res.text()}`);
+  return true;
+}
+
+// since < t <= until 범위만 가져오는 쿼리 (컬렉션 전체를 읽지 않아서 읽기 비용을 아껴요)
+async function queryByTime(env, collection, since, until) {
+  const token = await getAccessToken(env);
+  const res = await fetch(`${baseUrl(env)}:runQuery`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId: collection }],
+        where: {
+          compositeFilter: {
+            op: "AND",
+            filters: [
+              { fieldFilter: { field: { fieldPath: "t" }, op: "GREATER_THAN", value: { integerValue: String(since) } } },
+              { fieldFilter: { field: { fieldPath: "t" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(until) } } },
+            ],
+          },
+        },
+      },
+    }),
+  });
+  if (!res.ok) throw new Error(`Firestore 쿼리 실패: ${await res.text()}`);
+  const data = await res.json();
+  return data.filter((row) => row.document).map((row) => fromFields(row.document.fields));
+}
+
 export { getDoc, setDoc, deleteDoc, listCollection };
 
 // ============================================================
@@ -306,6 +354,9 @@ async function createStock(env, name, price) {
     name,
     price,
     maxPrice: price,
+    fv: price,
+    sector: randomSector(), // 자동 상장 종목은 업종을 랜덤으로 배정해요
+    volTier: newStockTier(price), // 변동성 등급도 배정해요 (1000해정 상장이면 랜덤)
     listedAt: Date.now(),
     history: { [String(Date.now()).padStart(13, "0")]: price },
     updatedAt: new Date(),
@@ -425,6 +476,13 @@ export const TRADE_FEE_TEXT = `${TRADE_FEE_PERMILLE / 10}%`;
 
 export const tradeFee = (amount) => (TRADE_FEE_PERMILLE > 0 ? Math.max(1, Math.ceil((amount * TRADE_FEE_PERMILLE) / 1000)) : 0);
 
+// 증권거래세: 주식을 "팔 때만" 떼요. (국내 종목만, 코인·해외주식은 없음. 올림, 최소 1해정, 떼간 돈은 사라져요)
+// 퍼센트를 바꾸려면 아래 숫자(천분율)만 바꾸면 돼요. 2 = 0.2%, 0이면 거래세 없음.
+export const SELL_TAX_PERMILLE = 2;
+export const SELL_TAX_TEXT = `${SELL_TAX_PERMILLE / 10}%`;
+export const sellTax = (stock, amount) =>
+  SELL_TAX_PERMILLE > 0 && !isForeign(stock) ? Math.max(1, Math.ceil((amount * SELL_TAX_PERMILLE) / 1000)) : 0;
+
 // 잔고로 살 수 있는 최대 수량 (수수료 포함해서 잔고를 넘지 않는 가장 큰 값)
 export function maxBuyQty(balance, price) {
   if (!(price > 0) || balance <= 0) return 0;
@@ -448,9 +506,10 @@ export function previewSell(user, stock, qty) {
   const prevCost = costOf(user, stock.name, stock.price);
   const basis = Math.round((prevCost * qty) / held);
   const fee = tradeFee(stock.price * qty);
-  const earned = stock.price * qty - fee; // 수수료를 뺀 실수령액
+  const tax = sellTax(stock, stock.price * qty);
+  const earned = stock.price * qty - fee - tax; // 수수료·거래세를 뺀 실수령액
   const have = isForeign(stock) ? user.usd || 0 : user.balance;
-  return { ok: true, held, earned, fee, basis, profit: earned - basis, after: have + earned };
+  return { ok: true, held, earned, fee, tax, basis, profit: earned - basis, after: have + earned };
 }
 
 // ---------- 종목 ----------
@@ -618,6 +677,15 @@ export async function upsertStock(env, name, price, known, extra = {}) {
   // 처음 만들어지는 종목일 때만 상장일(listedAt)을 기록 (기존 종목의 상장일은 건드리지 않음)
   const isNew = !Number.isFinite(base.price);
 
+  // 기업 가치(fv): 시세 변동이 아니라 "가격을 직접 정하거나 새로 만들 때"(known을 안 넘기거나 새 종목)는 fv도 그 가격으로 맞춰요.
+  // (안 그러면 관리자가 정한 가격이 옛 fv 쪽으로 도로 끌려가요) 외국자산은 fv를 쓰지 않아요.
+  const resetFv = extra.fv === undefined && (!known || isNew) && !isForeign({ kind: extra.kind ?? base.kind });
+
+  // 업종: 새로 만드는 일반 종목인데 업종을 안 정했으면 랜덤 배정. (이미 있는 종목의 업종은 건드리지 않아요)
+  const newSector = isNew && extra.sector === undefined && !isForeign({ kind: extra.kind ?? base.kind }) ? { sector: randomSector() } : {};
+  // 변동성 등급도 같아요: 새 일반 종목이 등급을 안 정했으면 배정해요.
+  const newTier = isNew && extra.volTier === undefined && !isForeign({ kind: extra.kind ?? base.kind }) ? { volTier: newStockTier(price) } : {};
+
   await setDoc(env, `stocks/${encodeURIComponent(name)}`, {
     name,
     price,
@@ -625,6 +693,11 @@ export async function upsertStock(env, name, price, known, extra = {}) {
     history,
     updatedAt: new Date(),
     ...(isNew ? { listedAt: Date.now() } : {}),
+    ...(resetFv ? { fv: price } : {}),
+    // 관리자가 가격을 직접 정하면 그 전에 쌓인 유저 거래 압력은 버려요 (정한 가격이 바로 흔들리지 않게)
+    ...(!known && Number.isFinite(base.flow) && base.flow !== 0 && extra.flow === undefined ? { flow: 0 } : {}),
+    ...newSector,
+    ...newTier,
     ...extra,
   });
   invalidateStocksCache();
@@ -784,6 +857,7 @@ export async function buyStock(env, userId, stockName, qty) {
   await Promise.all([
     saveUser(env, userId, user),
     addHistory(env, userId, `매수: ${summary} → ${usd ? "달러" : "잔고"} ${moneyOf(stock, after)}`),
+    recordTradeFlow(env, [{ stock, amount: stock.price * qty }]), // 6단계: 다음 변동에 반영될 순매수 압력
   ]);
 
   return {
@@ -794,6 +868,7 @@ export async function buyStock(env, userId, stockName, qty) {
       `📊 평균 매수가: ${moneyOf(stock, avg)} (보유 ${totalQty.toLocaleString()}주)`,
     ].join("\n"),
     user,
+    amount: stock.price * qty, // 거래 압력 집계용 (수수료 제외, 매수는 +)
   };
 }
 
@@ -814,7 +889,8 @@ export async function sellStock(env, userId, stockName, qty) {
   const prevCost = costOf(user, stockName, stock.price);
   const basis = Math.round((prevCost * qty) / held);
   const fee = tradeFee(stock.price * qty);
-  const earned = stock.price * qty - fee; // 수수료를 뺀 실수령액
+  const tax = sellTax(stock, stock.price * qty);
+  const earned = stock.price * qty - fee - tax; // 수수료·거래세를 뺀 실수령액
   const profit = earned - basis;
   const balanceBefore = usd ? user.usd || 0 : user.balance;
 
@@ -836,10 +912,11 @@ export async function sellStock(env, userId, stockName, qty) {
   const after = usd ? user.usd : user.balance;
   const pl = usd ? profitUsdLabel(profit, basis) : profitLabel(profit, basis);
 
-  const summary = `${stockName} ${qty}주 매도 완료 (+${moneyOf(stock, earned)}, 수수료 ${moneyOf(stock, fee)} 차감)`;
+  const summary = `${stockName} ${qty}주 매도 완료 (+${moneyOf(stock, earned)}, 수수료 ${moneyOf(stock, fee)}${tax > 0 ? ` + 거래세 ${moneyOf(stock, tax)}` : ""} 차감)`;
   await Promise.all([
     saveUser(env, userId, user),
     addHistory(env, userId, `매도: ${summary} · ${pl} → ${usd ? "달러" : "잔고"} ${moneyOf(stock, after)}`),
+    recordTradeFlow(env, [{ stock, amount: -(stock.price * qty) }]),
   ]);
 
   return {
@@ -850,6 +927,7 @@ export async function sellStock(env, userId, stockName, qty) {
       `📊 이번 매도 손익: ${pl}`,
     ].join("\n"),
     user,
+    amount: -(stock.price * qty), // 거래 압력 집계용 (수수료 제외, 매도는 -)
   };
 }
 
@@ -946,6 +1024,7 @@ export async function buyStocks(env, userId, items) {
   await Promise.all([
     saveUser(env, userId, user),
     addHistory(env, userId, `매수: ${rows.map((r) => `${r.name} ${fmt(r.qty)}주`).join(", ")} (-${moneyPair(totalKrw, totalUsd)}) → 잔고 ${fmt(user.balance)}해정 · 달러 ${centsText(user.usd)}`),
+    recordTradeFlow(env, rows.map((r) => ({ stock: r.stock, amount: r.price * r.qty }))),
   ]);
   return {
     ok: true,
@@ -956,6 +1035,7 @@ export async function buyStocks(env, userId, items) {
       ...(totalUsd > 0 ? [usdLine(usdBefore, user.usd)] : []),
     ].join("\n"),
     user,
+    amount: rows.reduce((sum, r) => sum + r.price * r.qty, 0), // 거래 압력 집계용 (여러 종목 합계, 매수는 +)
   };
 }
 
@@ -988,7 +1068,7 @@ export async function sellStocks(env, userId, items) {
     const held = user.holdings[it.name];
     const prevCost = costOf(user, it.name, price);
     const basis = Math.round((prevCost * it.qty) / held);
-    const earned = price * it.qty - tradeFee(price * it.qty); // 수수료를 뺀 실수령액
+    const earned = price * it.qty - tradeFee(price * it.qty) - sellTax(stock, price * it.qty); // 수수료·거래세를 뺀 실수령액
     const profit = earned - basis;
 
     user.holdings[it.name] = held - it.qty;
@@ -1014,6 +1094,7 @@ export async function sellStocks(env, userId, items) {
       userId,
       `매도: ${items.map((it) => `${it.name} ${fmt(it.qty)}주`).join(", ")} (+${moneyPair(earnedKrw, earnedUsd)}) → 잔고 ${fmt(user.balance)}해정 · 달러 ${centsText(user.usd)}`
     ),
+    recordTradeFlow(env, items.map((it, i) => ({ stock: stocks[i], amount: -(stocks[i].price * it.qty) }))),
   ]);
   return {
     ok: true,
@@ -1024,6 +1105,7 @@ export async function sellStocks(env, userId, items) {
       ...(earnedUsd > 0 ? [usdLine(usdBefore, user.usd), `📊 이번 매도 손익 합계(달러): ${profitUsdLabel(profitUsd, basisUsd)}`] : []),
     ].join("\n"),
     user,
+    amount: -items.reduce((sum, it, i) => sum + stocks[i].price * it.qty, 0), // 거래 압력 집계용 (여러 종목 합계, 매도는 -)
   };
 }
 
@@ -1446,6 +1528,281 @@ async function updateForeignStock(env, stock, quotes) {
   return { name: stock.name, kind: stock.kind, before, after, pct, delisted: false, holders: [] };
 }
 
+// ---------- 변동률 뽑기 (하락 편향 보정) ----------
+// 예전에는 변동률(%)을 -20~+20 균등 난수로 뽑았어요. 평균이 0%여도 가격은 곱셈으로 누적되기 때문에
+// 중앙값이 계속 떨어졌어요. (예: +20% 다음 -20% 이면 원래 가격의 96%)
+// 지금은 "로그 수익률"을 정규분포(범위 안으로 잘라낸 것)에서 뽑고, 잘라낸 뒤에도 평균이 정확히 0이 되도록 중심을 맞춰요.
+// 그래서 곱셈으로 누적해도 가격이 한쪽으로 쏠리지 않아요. 변동 범위(minPct~maxPct)는 그대로 지켜요.
+//   FLUCT_RANGE_SIGMAS: 범위 전체 폭이 표준편차의 몇 배인지. 작을수록 범위 끝까지 자주 가고, 클수록 가운데에 몰려요.
+//   FLUCT_DRIFT: 로그 수익률의 평균(한 번 변동당). 0이면 중립, 양수면 완만한 상승, 음수면 완만한 하락이에요.
+const FLUCT_RANGE_SIGMAS = 3.6;
+const FLUCT_DRIFT = 0;
+
+// 표준정규 분포함수 Φ, 밀도함수 φ (erf 근사식)
+function erfApprox(x) {
+  const sign = x < 0 ? -1 : 1;
+  const ax = Math.abs(x);
+  const t = 1 / (1 + 0.3275911 * ax);
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-ax * ax);
+  return sign * y;
+}
+const normCdf = (z) => 0.5 * (1 + erfApprox(z / Math.SQRT2));
+const normPdf = (z) => Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI);
+
+// mu를 중심으로 하고 [lo, hi]로 자른 정규분포의 평균
+function truncatedMean(mu, sigma, lo, hi) {
+  const a = (lo - mu) / sigma;
+  const b = (hi - mu) / sigma;
+  const mass = normCdf(b) - normCdf(a);
+  if (mass < 1e-12) return mu;
+  return mu + (sigma * (normPdf(a) - normPdf(b))) / mass;
+}
+
+// 잘라낸 뒤의 평균이 target이 되는 mu를 이분법으로 찾아요
+function solveCenter(lo, hi, sigma, target) {
+  let a = lo;
+  let b = hi;
+  for (let i = 0; i < 60; i++) {
+    const mid = (a + b) / 2;
+    if (truncatedMean(mid, sigma, lo, hi) < target) a = mid;
+    else b = mid;
+  }
+  return (a + b) / 2;
+}
+
+const fluctParamsCache = new Map();
+function fluctParams(minPct, maxPct, sigmaOverride) {
+  const key = `${minPct}|${maxPct}|${sigmaOverride ?? ""}`;
+  let p = fluctParamsCache.get(key);
+  if (!p) {
+    const lo = Math.log(1 + Math.max(minPct, -99.9) / 100);
+    const hi = Math.log(1 + maxPct / 100);
+    const sigma = sigmaOverride ?? (hi - lo) / FLUCT_RANGE_SIGMAS;
+    // 목표 평균은 범위 안에 들어와야 해요
+    const target = Math.min(Math.max(FLUCT_DRIFT, lo + 1e-6), hi - 1e-6);
+    p = { lo, hi, sigma, mu: solveCenter(lo, hi, sigma, target) };
+    fluctParamsCache.set(key, p);
+  }
+  return p;
+}
+
+function randomNormal() {
+  // Box-Muller
+  const u = 1 - Math.random();
+  const v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+// minPct~maxPct(%) 범위 안에서 변동률(%)을 하나 뽑아요. (하락 편향 없음)
+export function randomChangePct(minPct, maxPct, sigmaOverride) {
+  const { lo, hi, sigma, mu } = fluctParams(minPct, maxPct, sigmaOverride);
+  for (let i = 0; i < 100; i++) {
+    const r = mu + sigma * randomNormal();
+    if (r >= lo && r <= hi) return (Math.exp(r) - 1) * 100;
+  }
+  return (Math.exp(lo + Math.random() * (hi - lo)) - 1) * 100; // 거의 일어나지 않는 예외 상황
+}
+
+// ---------- 기업 가치(fv)와 평균 회귀 ----------
+// 종목 문서에 fv(적정 가치)가 있어요. 가격은 fv 주변을 오가고, 너무 벗어나면 서서히 fv 쪽으로 끌려와요.
+// fv는 유저에게 보여주지 않아요. (관리자 API의 종목 목록에만 들어 있어요)
+//   FV_REVERT: 한 번 변동당 끌어당기는 세기(로그 기준). 0이면 끌어당김 없음. 0.02면 가격이 fv에서 벗어난 만큼의 약 2%씩 돌아와요.
+//   FV_DRIFT_SIGMA: fv가 한 번 변동당 제멋대로 움직이는 정도(로그 표준편차). 평균은 0이라 한쪽으로 쏠리지 않아요.
+//   NEWS_FV_FACTOR: 공시 효과 중 fv에 오래 남는 비율. 1이면 공시로 오른 만큼 적정 가치도 그대로 올라요.
+const FV_REVERT = 0.02;
+const FV_DRIFT_SIGMA = 0.004;
+const NEWS_FV_FACTOR = 0.8;
+
+// ---------- 유저 거래의 가격 영향 (6단계) ----------
+// 유저가 /매수·/매도(예약 체결 포함)로 거래하면, 종목 문서의 flow 필드에 "순매수 금액(해정)"이 쌓여요.
+//   (매수 +, 매도 −. 사고 바로 팔면 서로 상쇄돼서 영향이 거의 없어요. 선물·강제청산·외국자산은 안 쌓여요)
+// 다음 시세 변동 때 flow를 읽어 변동률(impact)에 더하고, 종목 문서를 저장할 때 flow를 0으로 비워요. (별도 읽기·쓰기 없음)
+// 영향 크기는 시장충격 연구의 "제곱근 법칙"을 따라요: 영향 = Y × (그 종목의 개별 변동성) × √(순매수 금액 ÷ 유동성)
+//   - 제곱근이라 금액을 4배로 늘려도 영향은 2배만 늘어요. (큰손이 돈으로 가격을 밀어붙이기 어려워요)
+//   - 같은 금액이면 소형주가 대형주보다 훨씬 많이 움직여요. (유동성이 작고 변동성이 커서)
+//   - 마지막에 tanh로 부드럽게 눌러서 TRADE_IMPACT_CAP(%p)를 넘지 못해요.
+//   - 영향 중 TRADE_PERMANENT_SHARE만큼은 fv도 같이 옮겨서 오래 남고, 나머지는 평균 회귀로 서서히 돌아와요.
+//   TRADE_IMPACT_ENABLED: false면 쌓지도, 반영하지도 않아요.
+//   TRADE_IMPACT_Y: 영향 세기 계수 (1이 연구에서 흔한 값. 줄이면 둔해져요)
+//   TRADE_LIQUIDITY: 등급별 유동성(해정). 한 번 변동 사이에 이만큼 순매수하면 "개별 변동성 1배"만큼 움직여요.
+//   TRADE_IMPACT_CAP: 한 번 변동에 유저 거래가 줄 수 있는 최대 영향(%p, 위·아래 모두)
+//   TRADE_FLOW_MAX_PER_TRADE: 거래 1건이 flow에 더할 수 있는 최대 금액(해정). 한 번에 어마어마한 금액을 넣어도 이만큼만 쳐줘요.
+//   TRADE_PERMANENT_SHARE: 영향 중 fv(적정 가치)에 남는 비율 (0이면 전부 일시적)
+const TRADE_IMPACT_ENABLED = true;
+const TRADE_IMPACT_Y = 1;
+const TRADE_LIQUIDITY = { 대형: 2_000_000, 중형: 500_000, 소형: 100_000 };
+const TRADE_IMPACT_CAP = 10;
+const TRADE_FLOW_MAX_PER_TRADE = 1_000_000;
+const TRADE_PERMANENT_SHARE = 0.3;
+
+// ---------- 업종과 시장 공통 요인 ----------
+// 한 번 변동할 때 "시장 충격 1개 + 업종별 충격 1개씩 + 종목 개별 충격"을 합쳐서 반영해요. (모두 로그 수익률 기준)
+//   종목 충격 합 = beta × 시장 충격 + 내 업종 충격 + 개별 충격
+// 시장·업종 충격은 0을 중심으로 좌우 대칭이라 평균이 0이고, 개별 충격은 나머지 범위 안에서 평균 0이 되게 맞춰요.
+// 그래서 1단계의 "하락 편향 없음"이 그대로 유지돼요. 전체 변동 폭(minPct~maxPct)도 넘지 않아요.
+//   SECTORS: 업종 목록. 업종이 없거나 목록에 없는 종목("기타")은 시장 충격만 받고 업종 충격은 없어요.
+//   BETA_DEFAULT / BETA_MAX: 종목 beta(시장 민감도) 기본값 / 최대값. beta가 2면 시장 충격을 2배로 받아요.
+//   SHOCK_NORMAL: 평소 변동(15분마다). market/sector = 충격의 표준편차, *Max = 충격의 최대 크기 (개별 충격은 아래 변동성 등급이 정해요)
+//   SHOCK_SURGE : 급등락(18시/21시/0시). 시장·업종 충격이 크게 나오는 이벤트예요. (cron.js의 range.surge === true)
+//   COMMON_LIMIT_RATIO: 시장+업종 충격 합이 변동 범위 한쪽 끝의 몇 %까지만 가도록 제한 (0.95면 95%)
+export const SECTORS = ["IT", "바이오", "에너지", "금융", "소비재", "건설"];
+export const NO_SECTOR = "기타";
+export const BETA_DEFAULT = 1;
+export const BETA_MAX = 3;
+const SHOCK_NORMAL = { marketSigma: 0.03, marketMax: 0.08, sectorSigma: 0.05, sectorMax: 0.12 };
+const SHOCK_SURGE = { marketSigma: 0.3, marketMax: 0.5, sectorSigma: 0.4, sectorMax: 0.6 };
+const COMMON_LIMIT_RATIO = 0.95;
+
+export function randomSector() {
+  return SECTORS[Math.floor(Math.random() * SECTORS.length)];
+}
+
+// 업종 이름 정리: 목록에 있으면 그대로, 아니면 "기타"
+export function sectorOf(stock) {
+  return SECTORS.includes(stock?.sector) ? stock.sector : NO_SECTOR;
+}
+
+// 0 중심, 좌우 대칭으로 잘라낸 정규분포 (평균 0 유지)
+function randomSymNormal(sigma, max) {
+  for (let i = 0; i < 100; i++) {
+    const x = sigma * randomNormal();
+    if (Math.abs(x) <= max) return x;
+  }
+  return 0;
+}
+
+// 이번 변동의 공통 충격을 한 번 뽑아요. (시장 1개, 업종별 1개씩) surge=true면 급등락용 큰 충격이에요.
+export function rollShocks(surge = false) {
+  const p = surge ? SHOCK_SURGE : SHOCK_NORMAL;
+  const sectors = {};
+  for (const s of SECTORS) sectors[s] = randomSymNormal(p.sectorSigma, p.sectorMax);
+  return { market: randomSymNormal(p.marketSigma, p.marketMax), sectors, surge: !!surge };
+}
+
+// 한 종목이 이번에 받는 공통 충격(로그) = beta × 시장 + 내 업종
+export function commonShockOf(shocks, sector, beta) {
+  const b = Number.isFinite(beta) && beta >= 0 ? Math.min(beta, BETA_MAX) : BETA_DEFAULT;
+  const sec = SECTORS.includes(sector) ? shocks.sectors[sector] : 0;
+  return b * shocks.market + sec;
+}
+
+// ---------- 변동성 등급 (대형 / 중형 / 소형) ----------
+// 종목마다 등급이 있고, 등급에 따라 "종목 개별 충격"의 크기가 달라요. (시장·업종 충격은 등급과 무관해요)
+//   VOL_TIER_SIGMA: 등급별 개별 충격의 표준편차(로그). normal = 평소 변동, surge = 급등락.
+//                   평소에는 표준편차의 약 2배가 "대형 ±5% / 중형 ±10% / 소형 ±20%"쯤이에요.
+//   TIER_LARGE_PRICE / TIER_MID_PRICE: 등급을 안 정한 종목의 기본 배정 규칙. 가격이 높을수록 대형이에요.
+//                   (이 가격 이상이면 대형 / 중형, 아니면 소형)
+//   TIER_LISTING_WEIGHTS: 가격이 똑같은 1000해정(LISTING_PRICE)으로 새로 상장되는 종목은 이 비율로 랜덤 배정해요.
+export const VOL_TIERS = ["대형", "중형", "소형"];
+export const VOL_TIER_SIGMA = {
+  대형: { normal: 0.025, surge: 0.12 },
+  중형: { normal: 0.05, surge: 0.22 },
+  소형: { normal: 0.1, surge: 0.35 },
+};
+const TIER_LARGE_PRICE = 10000;
+const TIER_MID_PRICE = 2000;
+const TIER_LISTING_WEIGHTS = { 대형: 0.1, 중형: 0.3, 소형: 0.6 };
+
+// 가격으로 정하는 기본 등급
+export function tierByPrice(price) {
+  if (price >= TIER_LARGE_PRICE) return "대형";
+  if (price >= TIER_MID_PRICE) return "중형";
+  return "소형";
+}
+
+function randomTier() {
+  let r = Math.random();
+  for (const t of VOL_TIERS) {
+    r -= TIER_LISTING_WEIGHTS[t];
+    if (r < 0) return t;
+  }
+  return "소형";
+}
+
+// 새로 만드는 종목의 등급: 1000해정 상장이면 랜덤, 그 밖의 가격이면 가격 규칙
+export function newStockTier(price) {
+  return price === LISTING_PRICE ? randomTier() : tierByPrice(price);
+}
+
+// 종목의 등급 (등급이 없으면 가격 규칙)
+export function tierOf(stock) {
+  return VOL_TIERS.includes(stock?.volTier) ? stock.volTier : tierByPrice(stock?.price);
+}
+
+// 이번 변동에서 이 종목의 개별 충격 크기
+export function idioSigmaOf(stock, surge = false) {
+  return VOL_TIER_SIGMA[tierOf(stock)][surge ? "surge" : "normal"];
+}
+
+// 쌓인 순매수 금액(flow, 해정) -> 이번 변동에 더할 영향(%p)과 fv에 남길 몫(%p). (fluctuatePrices와 scripts/simulate.js가 같이 써요)
+// flow가 없거나 0이면 영향 없음. 종목 문서에 flow 필드가 없던 기존 종목도 그대로 동작해요.
+export function tradeImpactOf(flow, stock) {
+  if (!TRADE_IMPACT_ENABLED || !Number.isFinite(flow) || flow === 0) return { impact: 0, fvShift: 0 };
+  const tier = tierOf(stock);
+  const raw = TRADE_IMPACT_Y * VOL_TIER_SIGMA[tier].normal * 100 * Math.sqrt(Math.abs(flow) / TRADE_LIQUIDITY[tier]);
+  const impact = Math.sign(flow) * TRADE_IMPACT_CAP * Math.tanh(raw / TRADE_IMPACT_CAP);
+  return { impact, fvShift: impact * TRADE_PERMANENT_SHARE };
+}
+
+// 유저 거래를 종목 문서의 flow에 더해요. (원자적 증가 1번, 읽기 없음) 실패해도 거래 자체는 그대로 성공해요.
+// trades: [{ stock(종목 문서), amount(해정, 매수 +/매도 −) }]  외국자산은 건너뛰어요.
+async function recordTradeFlow(env, trades) {
+  if (!TRADE_IMPACT_ENABLED) return;
+  const merged = new Map(); // 같은 종목은 합쳐서 문서당 쓰기 1번
+  for (const t of trades) {
+    if (!t.stock || isForeign(t.stock) || !Number.isFinite(t.amount) || t.amount === 0) continue;
+    const by = Math.sign(t.amount) * Math.min(Math.abs(t.amount), TRADE_FLOW_MAX_PER_TRADE); // 거래 1건당 상한은 그대로
+    const path = `stocks/${encodeURIComponent(t.stock.name)}`;
+    merged.set(path, (merged.get(path) || 0) + by);
+  }
+  const items = [...merged].filter(([, by]) => by !== 0).map(([path, by]) => ({ path, field: "flow", by }));
+  if (items.length === 0) return;
+  try {
+    await incrementFields(env, items);
+  } catch (err) {
+    console.error("거래 압력 기록 실패:", err.message);
+  }
+}
+
+// [lo, hi] 안에서 평균이 0이 되게 뽑은 로그 수익률 (범위가 매번 달라서 중심을 그때그때 맞춰요)
+function randomLogWithin(lo, hi, sigma) {
+  const target = Math.min(Math.max(FLUCT_DRIFT, lo + 1e-6), hi - 1e-6);
+  const mu = solveCenter(lo, hi, sigma, target);
+  for (let i = 0; i < 100; i++) {
+    const r = mu + sigma * randomNormal();
+    if (r >= lo && r <= hi) return r;
+  }
+  return lo + Math.random() * (hi - lo); // 거의 일어나지 않는 예외 상황
+}
+
+// 한 종목의 이번 변동률(%)과 새 fv를 계산해요. (fluctuatePrices와 scripts/simulate.js가 같이 써요)
+//   fvIn: 지금 fv (없으면 현재 가격으로 시작)
+//   impact: 봇 순매수 압력(%p), newsShift: 공시 기울기(%p)
+//   newsFvShift: 공시 기울기 중 fv에도 반영할 몫(%p). 안 넘기면 newsShift와 같아요. (실적 발표는 fv를 이미 직접 바꿨으니 0)
+//   common: 시장·업종 공통 충격(로그, commonShockOf 결과). idioSigma: 개별 충격 표준편차(idioSigmaOf 결과, 등급별).
+//           idioSigma를 안 넘기면 예전(2단계)처럼 공통 충격 없이 개별 변동만 써요.
+export function nextChange(price, fvIn, { minPct, maxPct, crashChance = 0, crashPct = -100, impact = 0, newsShift = 0, newsFvShift = newsShift, common = 0, idioSigma, tradeFvShift = 0 }) {
+  const fvBase = Number.isFinite(fvIn) && fvIn > 0 ? fvIn : price;
+  // fv는 공시를 따라 움직이고(+ 유저 거래 영향 중 오래 남는 몫), 아주 조금씩 제멋대로 움직여요
+  const fv = Math.max(1, fvBase * (1 + (newsFvShift * NEWS_FV_FACTOR + tradeFvShift) / 100) * Math.exp(FV_DRIFT_SIGMA * randomNormal()));
+  if (Math.random() < crashChance) return { pct: crashPct, fv };
+  // 끌어당김은 지난번 fv 기준이에요. (공시 효과는 newsShift로 이미 더해지니까 이번 변동에 두 번 세지 않아요)
+  const pull = (Math.exp(FV_REVERT * Math.log(fvBase / price)) - 1) * 100;
+
+  let basePct;
+  if (idioSigma === undefined) {
+    basePct = randomChangePct(minPct, maxPct);
+  } else {
+    const lo = Math.log(1 + Math.max(minPct, -99.9) / 100);
+    const hi = Math.log(1 + maxPct / 100);
+    // 공통 충격은 0 대칭으로 제한해서(평균 0 유지), 개별 충격이 들어갈 자리를 항상 남겨요
+    const lim = Math.min(-lo, hi) * COMMON_LIMIT_RATIO;
+    const c = Math.min(Math.max(common, -lim), lim);
+    basePct = (Math.exp(c + randomLogWithin(lo - c, hi - c, idioSigma)) - 1) * 100;
+  }
+  return { pct: basePct + impact + newsShift + pull, fv };
+}
+
 // ---------- 시세 변동 ----------
 // 모든 종목 가격을 minPct~maxPct(%) 범위에서 무작위로 변동시킴 (외국자산은 실제 시세로 변동) (최저가 1해정 보장)
 // 변동 후 가격이 DELIST_PRICE 이하이면 상장폐지 처리합니다.
@@ -1454,9 +1811,13 @@ async function updateForeignStock(env, stock, quotes) {
 //   - holders: 상장폐지된 종목을 보유 중이던 유저 ID 목록 (아니면 빈 배열)
 // crashChance: 종목마다 이 확률로 crashPct(예: -100%)가 그대로 적용돼요. (0.005 = 0.5%)
 // impact: { 종목이름: %p } 봇 순매수 압력 등 종목별로 변동률에 더해지는 값 (crowd.js 에서 계산)
-export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, crashPct = -100, impact = {}, news = {} }) {
+// surge: true면 급등락 변동이라 시장·업종 충격이 크게 나와요. (cron.js의 SURGE_RANGE)
+// 반환 배열에는 이번에 뽑은 시장·업종 충격이 changes.shocks 로 같이 붙어 있어요. (로그용)
+export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, crashPct = -100, impact = {}, news = {}, newsFv = null, surge = false }) {
   const stocks = await listStocks(env);
   const changes = [];
+  const shocks = rollShocks(surge); // 이번 변동의 시장 충격 1개 + 업종별 충격 1개씩
+  changes.shocks = shocks;
 
   // 외국자산(코인·해외주식)은 랜덤 대신 실제 시세로 움직여요. 시세는 한 번에 모아서 가져와요.
   const quotes = await loadForeignQuotes(env, stocks);
@@ -1473,9 +1834,18 @@ export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, cr
       continue;
     }
 
-    const pct = Math.random() < crashChance
-      ? crashPct
-      : minPct + Math.random() * (maxPct - minPct) + (impact[stock.name] || 0) + (news[stock.name] || 0); // news = 공시 기울기
+    // 6단계: 이 종목 문서에 쌓여 있던 유저 순매수(flow)를 영향으로 바꿔요. (이미 읽은 문서라 추가 읽기 없음)
+    const trade = tradeImpactOf(stock.flow, stock);
+    // news = 공시 기울기, impact = 봇 압력 + 유저 거래 압력, fv = 기업 가치(평균 회귀용)
+    const { pct, fv } = nextChange(stock.price, stock.fv, {
+      minPct, maxPct, crashChance, crashPct,
+      impact: (impact[stock.name] || 0) + trade.impact,
+      tradeFvShift: trade.fvShift,
+      newsShift: news[stock.name] || 0,
+      newsFvShift: newsFv ? newsFv[stock.name] || 0 : undefined, // 실적 발표 공시는 fv를 또 움직이지 않아요
+      common: commonShockOf(shocks, stock.sector, stock.beta), // beta × 시장 + 내 업종 (업종 없으면 시장만)
+      idioSigma: idioSigmaOf(stock, surge), // 변동성 등급에 따른 개별 충격 크기
+    });
     const newPrice = Math.max(1, Math.round(stock.price * (1 + pct / 100)));
     // 최고가 기록이 없던 기존 종목은 지금 가격을 최고가로 시작
     const maxPrice = Math.max(Number.isFinite(stock.maxPrice) ? stock.maxPrice : stock.price, stock.price);
@@ -1492,7 +1862,11 @@ export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, cr
       continue;
     }
 
-    await upsertStock(env, stock.name, newPrice, stock);
+    // 등급이 없던 기존 종목은 이번에 가격 규칙으로 정해서 같이 저장해요. (쓰기 횟수는 그대로)
+    const tierExtra = VOL_TIERS.includes(stock.volTier) ? {} : { volTier: tierOf(stock) };
+    // 쌓였던 유저 거래 압력은 반영했으니 같은 쓰기에 실어서 비워요. (쓰기 횟수는 그대로)
+    const flowExtra = Number.isFinite(stock.flow) && stock.flow !== 0 ? { flow: 0 } : {};
+    await upsertStock(env, stock.name, newPrice, stock, { fv: Math.round(fv * 100) / 100, ...tierExtra, ...flowExtra });
     changes.push({ name: stock.name, before: stock.price, after: newPrice, pct, delisted: false, holders: [] });
   }
 
@@ -1638,7 +2012,8 @@ export function firstLine(content) {
 }
 
 // 로그 1건 저장 (실패해도 조용히 넘어감)
-export async function logAction(env, { u, n = "", cmd, a = "", r = "", k }) {
+// amt: 거래 금액(해정/센트, 부호 있음 — 매수 +, 매도 -). 없는 명령어는 필드 자체를 생략해요.
+export async function logAction(env, { u, n = "", cmd, a = "", r = "", k, amt }) {
   try {
     const t = Date.now();
     const id = `${String(t).padStart(13, "0")}_${Math.random().toString(36).slice(2, 7)}`;
@@ -1650,10 +2025,46 @@ export async function logAction(env, { u, n = "", cmd, a = "", r = "", k }) {
       k: k || categoryOf(cmd),
       a: String(a || ""),
       r: String(r || ""),
+      ...(Number.isFinite(amt) ? { amt } : {}),
     });
   } catch (err) {
     console.error(`활동 로그 저장 실패 (${cmd}):`, err.message);
   }
+}
+
+// ---------- 로그 기반 거래 압력 집계 (매수/매도/선물/선물청산의 amt 합산) ----------
+// 매번 컬렉션 전체를 읽지 않도록, 마지막으로 집계한 시각(config/tradePressure.lastFluctuationAt) 이후의 로그만 읽어요.
+// 자정(KST)을 걸치면 날짜별 컬렉션이 최대 2개로 나뉘어 있어서 그만큼만 쿼리해요.
+const TRADE_PRESSURE_PATH = "config/tradePressure";
+
+export async function logTradePressure(env) {
+  const now = Date.now();
+  const state = await getDoc(env, TRADE_PRESSURE_PATH);
+  const since = Number.isFinite(state?.lastFluctuationAt) ? state.lastFluctuationAt : now; // 첫 실행이면 지금부터 쌓기 시작 (과거는 건너뜀)
+
+  let amount = 0, count = 0;
+  if (since < now) {
+    const days = [...new Set([dayKST(since), dayKST(now)])];
+    const results = await Promise.all(days.map((day) => queryByTime(env, collectionOf(day), since, now)));
+    for (const docs of results) {
+      for (const doc of docs) {
+        if (Number.isFinite(doc.amt)) {
+          amount += doc.amt;
+          count++;
+        }
+      }
+    }
+  }
+
+  const result = { amount, count, since, until: now };
+  // lastAmount/lastCount도 같이 저장해서, 관리자 콘솔은 새로 쿼리하지 않고 이 문서만 읽으면 돼요.
+  await setDoc(env, TRADE_PRESSURE_PATH, { lastFluctuationAt: now, lastAmount: amount, lastCount: count, lastSince: since });
+  return result;
+}
+
+// 관리자 콘솔 조회용: 커서를 소비하지 않고 마지막 집계 결과만 읽어요.
+export async function getTradePressureState(env) {
+  return (await getDoc(env, TRADE_PRESSURE_PATH)) || { lastFluctuationAt: null, lastAmount: 0, lastCount: 0, lastSince: null };
 }
 
 // 최근 days일(오늘 포함, 1~7)의 로그를 최신순으로
@@ -3110,6 +3521,7 @@ export async function processOrders(env) {
               cmd: "예약체결",
               a: label,
               r: `예약가 ${moneyOf(sk, h.o.price)} → 체결가 ${moneyOf(sk, h.price)}`,
+              amt: result.amount, // 거래 압력 집계용 (매수/매도와 동일하게 buyStock/sellStock이 계산한 값)
             });
             const cond = h.o.side === "buy" || h.o.dir === "down" ? "이하" : "이상";
             await safeDM(
@@ -3253,6 +3665,10 @@ export async function processPriceAlerts(env) {
 //  - 평가금이 0이 되면 강제청산(증거금 전액 손실). 정산하면 평가금을 해정으로 돌려받아요.
 //  - 저장: futures/{유저ID} 문서의 items 맵 { 번호: { stock, side, margin, lev, entry, t } }
 export const MAX_FUTURES_PER_USER = 3;
+// 선물도 시세에 영향을 줘요. (진입/청산 금액 = 증거금 × 배율, recordTradeFlow로 stock.flow에 쌓임)
+// FUTURES_LIQ_FLOW: 강제청산도 반영할지. 롱이 청산되면 매도 압력이 생겨서 연쇄 청산이 일어날 수 있어요. false면 강제청산은 제외해요.
+export const FUTURES_FLOW_ENABLED = true;
+export const FUTURES_LIQ_FLOW = true;
 export const MIN_FUTURES_MARGIN = 100;
 export const FUTURES_LEVERAGES = [2, 3, 5];
 
@@ -3264,6 +3680,12 @@ export async function getFutureItems(env, userId) {
 }
 
 export async function saveFutureItems(env, userId, items) {
+  // 포지션이 하나도 안 남으면 문서 자체를 지워요. 안 그러면 빈 문서가 쌓여서
+  // processFutures가 매 변동마다 읽는 "futures" 컬렉션이 계속 불어나요.
+  if (Object.keys(items).length === 0) {
+    await deleteDoc(env, futuresPath(userId));
+    return;
+  }
   await setDoc(env, futuresPath(userId), { items });
 }
 
@@ -3356,7 +3778,12 @@ export async function openFuture(env, userId, { stock: stockName, side, margin, 
     return { ok: false, message: "선물을 여는 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
   }
 
-  await addHistory(env, userId, `선물 시작: ${stockName} ${sideLabel(side)} x${lev} · 증거금 ${moneyOf(stock, marginAmt)} (진입가 ${moneyOf(stock, f.entry)})`);
+  await Promise.all([
+    addHistory(env, userId, `선물 시작: ${stockName} ${sideLabel(side)} x${lev} · 증거금 ${moneyOf(stock, marginAmt)} (진입가 ${moneyOf(stock, f.entry)})`),
+    FUTURES_FLOW_ENABLED
+      ? recordTradeFlow(env, [{ stock, amount: (side === "long" ? 1 : -1) * marginAmt * lev }]) // 롱 +, 숏 − (외국자산은 내부에서 제외)
+      : null,
+  ]);
 
   const liq = futureLiqPrice(f);
   const after = usd ? user.usd : user.balance;
@@ -3368,6 +3795,7 @@ export async function openFuture(env, userId, { stock: stockName, side, margin, 
       `- 💥 강제청산가: ${moneyOf(stock, liq)} ${side === "long" ? "이하" : "이상"} (증거금 전부 잃어요)`,
       usd ? usdLine(balanceBefore, after) : balanceLine(balanceBefore, after),
     ].join("\n"),
+    amount: (side === "long" ? 1 : -1) * marginAmt * lev, // 거래 압력 집계용 (진입 방향대로: 롱 +, 숏 -)
   };
 }
 
@@ -3375,6 +3803,8 @@ export async function openFuture(env, userId, { stock: stockName, side, margin, 
 export async function closeFutures(env, userId, targets) {
   const [items, stocks] = await Promise.all([getFutureItems(env, userId), listStocks(env)]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
+  const flows = []; // 시세 영향용
   let ids = targets.includes("all") ? Object.keys(items) : [...new Set(targets)].filter((t) => items[t]);
   if (ids.length === 0) {
     return { ok: false, message: "정산할 선물 포지션을 찾지 못했어요. 칸을 눌러 목록에서 골라 주세요." };
@@ -3401,6 +3831,7 @@ export async function closeFutures(env, userId, targets) {
   const closed = [];
   let payoutKrw = 0, payoutUsd = 0, pnlKrw = 0, pnlUsd = 0;
   let hasKrw = false, hasUsd = false;
+  let exitAmount = 0; // 거래 압력 집계용: 청산은 진입 방향의 반대 (롱 청산 -, 숏 청산 +)
 
   for (const id of ids) {
     const f = items[id];
@@ -3411,6 +3842,8 @@ export async function closeFutures(env, userId, targets) {
     const pnl = equity - f.margin;
     if (isUsd) { payoutUsd += equity; pnlUsd += pnl; hasUsd = true; }
     else { payoutKrw += equity; pnlKrw += pnl; hasKrw = true; }
+    exitAmount += (f.side === "long" ? -1 : 1) * f.margin * f.lev;
+    if (stockMap[f.stock] && !isUsd) flows.push({ stock: stockMap[f.stock], amount: (f.side === "long" ? -1 : 1) * f.margin * f.lev }); // 폐지된 종목은 문서가 없어서 제외
     delete items[id];
     lines.push(`- ${futureText(f)}\n  진입 ${m(f.entry)} → 정산 ${m(price)} · ${isUsd ? profitUsdLabel(pnl, f.margin) : profitLabel(pnl, f.margin)}`);
     closed.push(`${f.stock} ${sideLabel(f.side)} x${f.lev} ${isUsd ? `${pnl < 0 ? "-" : pnl > 0 ? "+" : ""}${centsText(Math.abs(pnl))}` : `${fmtSigned(pnl)}해정`}`);
@@ -3424,6 +3857,7 @@ export async function closeFutures(env, userId, targets) {
   await Promise.all([
     saveUser(env, userId, user),
     addHistory(env, userId, `선물 정산: ${closed.join(", ")} → 잔고 ${user.balance.toLocaleString()}해정 · 달러 ${centsText(user.usd)}`),
+    FUTURES_FLOW_ENABLED ? recordTradeFlow(env, flows) : null,
   ]);
 
   return {
@@ -3435,6 +3869,7 @@ export async function closeFutures(env, userId, targets) {
       ...(hasUsd ? [usdLine(usdBefore, user.usd)] : []),
       ...(heldBack.length ? [`🌙 미국 장이 닫혀 있어서 ${heldBack.length}건(${[...new Set(heldBack.map((id) => items[id]?.stock))].join(", ")})은 정산하지 않고 그대로 두었어요. 장이 열리면 다시 정산해 주세요.`] : []),
     ].join("\n"),
+    amount: exitAmount,
   };
 }
 
@@ -3443,6 +3878,7 @@ export async function closeFutures(env, userId, targets) {
 export async function processFutures(env, changes = []) {
   const [docs, stocks] = await Promise.all([listCollection(env, "futures"), listStocks(env)]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
   const delistedAfter = Object.fromEntries(changes.filter((c) => c.delisted).map((c) => [c.name, c.after]));
   const summary = { liquidated: 0, settled: 0 };
 
@@ -3475,6 +3911,7 @@ export async function processFutures(env, changes = []) {
         const user = await getUser(env, userId);
         const fxRate = (await getFxRate(env)).rate;
         const lines = [];
+        const flows = []; // 강제청산 압력 (폐지 정산은 문서가 없어서 제외)
         for (const h of live) {
           const pnl = h.equity - h.f.margin;
           const isUsd = h.f.cur === "usd";
@@ -3488,13 +3925,19 @@ export async function processFutures(env, changes = []) {
             lines.push(`🏁 ${label} — 상장폐지로 ${m(h.price)}에 정산 (${pnl < 0 ? "-" : pnl > 0 ? "+" : ""}${m(Math.abs(pnl))})`);
           } else {
             summary.liquidated++;
+            if (FUTURES_LIQ_FLOW && stockMap[h.f.stock] && !isUsd) {
+              flows.push({ stock: stockMap[h.f.stock], amount: (h.f.side === "long" ? -1 : 1) * h.f.margin * h.f.lev });
+            }
             lines.push(`💥 ${label} — 시세가 ${m(h.price)}이 되어 강제청산 (-${m(h.f.margin)})`);
           }
         }
+        // 거래 압력 집계용: 청산은 진입 방향의 반대 (롱 청산 -, 숏 청산 +)
+        const exitAmount = live.reduce((sum, h) => sum + (h.f.side === "long" ? -1 : 1) * h.f.margin * h.f.lev, 0);
         await saveUser(env, userId, user);
         await Promise.all([
           addHistory(env, userId, `선물 자동 정산 ${live.length}건 → 잔고 ${user.balance.toLocaleString()}해정`),
-          logAction(env, { u: userId, cmd: "선물청산", a: `${live.length}건`, r: "자동 정산: 강제청산/상장폐지" }),
+          recordTradeFlow(env, flows),
+          logAction(env, { u: userId, cmd: "선물청산", a: `${live.length}건`, r: "자동 정산: 강제청산/상장폐지", amt: exitAmount }),
           safeDM(env, userId, [`⚠️ **[선물 자동 정산]**`, ...lines].join("\n")),
         ]);
       } catch (err) {
@@ -4660,7 +5103,10 @@ export const DIVIDEND_HOUR = 9; // 한국시간 오전 9시
 export const DIVIDEND_MAX_PER_USER = 10000;
 const DIVIDEND_PATH = "config/dividend";
 
-export const dividendOf = (price, qty) => (price > DANGER_PRICE ? Math.floor(price * qty * DIVIDEND_RATE) : 0);
+// 배당소득세: 배당금에서 이 비율을 떼고 받아요. (세금을 뗀 뒤 금액이 dividendOf 결과예요. 0이면 세금 없음)
+export const DIVIDEND_TAX_RATE = 0.154;
+
+export const dividendOf = (price, qty) => (price > DANGER_PRICE ? Math.floor(price * qty * DIVIDEND_RATE * (1 - DIVIDEND_TAX_RATE)) : 0);
 
 export async function processDividends(env) {
   if (currentHourKST() < DIVIDEND_HOUR) return { ran: false, reason: "아직 배당 시각이 아니에요" };
@@ -4757,7 +5203,7 @@ export async function dividendInfo(env, userId) {
 
   const lines = [
     "**💰 내 배당금**",
-    `보유 종목 가치의 하루 ${pctText(DIVIDEND_RATE)}를 매일 오전 ${DIVIDEND_HOUR}시(한국시간) 이후 첫 시세 변동 때 줘요. 위기 종목(⚠️ ${DANGER_PRICE}해정 이하)은 무배당이에요.`,
+    `보유 종목 가치의 하루 ${pctText(DIVIDEND_RATE)}를 매일 오전 ${DIVIDEND_HOUR}시(한국시간) 이후 첫 시세 변동 때 줘요. 배당소득세 ${pctText(DIVIDEND_TAX_RATE)}를 떼고 받아요. 위기 종목(⚠️ ${DANGER_PRICE}해정 이하)은 무배당이에요.`,
     `⏰ 다음 지급: <t:${nextUnix}:f> (<t:${nextUnix}:R>)`,
     "",
   ];
@@ -5030,7 +5476,11 @@ export async function takeNews(env) {
   const shifts = {};
   for (const it of items) shifts[it.stock] = (shifts[it.stock] || 0) + (it.shift || 0);
   for (const k of Object.keys(shifts)) shifts[k] = Math.max(-NEWS_MAX_SHIFT, Math.min(NEWS_MAX_SHIFT, shifts[k]));
-  return { items, shifts };
+  // fv에도 반영할 몫: 실적 발표 공시(fvDone)는 fv를 이미 바꿔 놓았으니 빼요
+  const fvShifts = {};
+  for (const it of items) if (!it.fvDone) fvShifts[it.stock] = (fvShifts[it.stock] || 0) + (it.shift || 0);
+  for (const k of Object.keys(fvShifts)) fvShifts[k] = Math.max(-NEWS_MAX_SHIFT, Math.min(NEWS_MAX_SHIFT, fvShifts[k]));
+  return { items, shifts, fvShifts };
 }
 
 // 시세 변동 직후에 호출: 반영된 공시를 비우고, 결과 문구를 만들어요
@@ -5065,6 +5515,169 @@ export async function finishNews(env, news, changes) {
   }
   await setDoc(env, NEWS_PATH, { queue, recent });
   return { lines, count: news.items.length };
+}
+
+// ---------- 실적 시즌 ----------
+// 일정 주기(EARNINGS_INTERVAL_DAYS일)마다 실적 발표 이벤트를 열어요.
+//  1) 시작: 대상 종목을 뽑아서 주식채널에 "누가 발표하는지" 미리 알려요. (대상은 일반 종목 중 EARNINGS_TARGET_RATIO 비율)
+//  2) 발표(예고 EARNINGS_LEAD_MIN분 뒤 첫 호출): 종목마다 "예상 대비 서프라이즈"를 뽑아서 fv를 한 번에 크게 바꾸고,
+//     공시 기록(queue)에 "실적 호조/부진"으로 올려요. 다음 시세 변동 때 가격이 그 방향으로 기울고(공시 방식 그대로),
+//     끝나면 평소 공시처럼 "→ +12.3%" 결과가 주식채널 공지에 붙어요. 그 뒤로는 fv 쪽으로 서서히 끌려가요.
+//  - 서프라이즈는 0 중심 좌우 대칭이라 호조와 부진이 같은 확률이에요. (한쪽으로 쏠리지 않아요)
+//  - 같은 주기에 두 번 실행되지 않게 Firestore config/earnings 에 기록해요:
+//      { nextAt: 다음 시작 시각(ms), pending: { key, targets(줄바꿈 구분), releaseAt, announcedAt } | null, lastKey, lastAt }
+//  - 호출: cron-job.org에서 5,20,35,50분마다 /api/cron?task=earnings (시세 변동이 0,15,30,45분이라 겹치지 않게 5분 뒤)
+//    (평소엔 문서 1개만 읽고 끝나요. 급등락 시각 근처에는 쉬어요.)
+//    테스트: /api/cron?task=earnings&force=1 → 주기·시각과 상관없이 지금 바로 시작해요. (진행 중이면 무시)
+//  EARNINGS_INTERVAL_DAYS: 실적 시즌 주기(일)    EARNINGS_HOUR_KST: 시작 시각(한국시간 시)
+//  EARNINGS_LEAD_MIN: 예고 후 발표까지 최소 대기(분)    EARNINGS_TARGET_RATIO: 대상 종목 비율 (1이면 전부)
+//  EARNINGS_SIGMA / EARNINGS_MAX: fv 서프라이즈(로그)의 표준편차 / 최대 크기. (0.18이면 ±20% 안팎, 최대 ±49%쯤)
+//  EARNINGS_SHIFT_FACTOR: 서프라이즈의 몇 %를 다음 변동의 가격 기울기로 줄지. (공시 최대 기울기 NEWS_MAX_SHIFT까지만)
+//  EARNINGS_ITEMS_PER_POST: 결과 공지를 한 번에 올리는 종목 수 (디스코드 글자 수 제한 때문에 나눠 올려요)
+const EARNINGS_PATH = "config/earnings";
+const EARNINGS_INTERVAL_DAYS = 7;
+const EARNINGS_HOUR_KST = 20;
+const EARNINGS_LEAD_MIN = 30;
+const EARNINGS_TARGET_RATIO = 0.5;
+const EARNINGS_SIGMA = 0.18;
+const EARNINGS_MAX = 0.4;
+const EARNINGS_SHIFT_FACTOR = 0.5;
+const EARNINGS_NAMES_SHOWN = 20;
+const EARNINGS_ITEMS_PER_POST = 10;
+
+// 한국시간 EARNINGS_HOUR_KST시 시각(ms). days=0이면 지금 이후 가장 가까운 시각, days>0이면 오늘로부터 days일 뒤 그 시각이에요.
+function earningsStartAfter(now, days = 0) {
+  const dayStart = Math.floor((now + IDX_KST_MS) / IDX_DAY_MS) * IDX_DAY_MS - IDX_KST_MS;
+  let t = dayStart + days * IDX_DAY_MS + EARNINGS_HOUR_KST * NEWS_HOUR_MS;
+  if (days === 0 && t <= now) t += IDX_DAY_MS;
+  return t;
+}
+
+// 크론(5,20,35,50분마다): 시작 / 발표 중 지금 할 일을 해요
+export async function runEarnings(env, { force = false } = {}) {
+  const now = Date.now();
+  if (isSurgeMoment(now)) return { ok: true, skipped: true, reason: "급등락 시각이라 쉬어요" };
+
+  const doc = (await getDoc(env, EARNINGS_PATH)) || {};
+
+  // 예고를 올리고 발표를 기다리는 중
+  if (doc.pending) {
+    if (now < doc.pending.releaseAt) return { ok: true, phase: "waiting", releaseAt: doc.pending.releaseAt };
+    return releaseEarnings(env, doc, now);
+  }
+
+  if (!force) {
+    if (!Number.isFinite(doc.nextAt)) {
+      // 처음 실행: 다음 EARNINGS_HOUR_KST시를 첫 시작으로 정해 둬요
+      const nextAt = earningsStartAfter(now);
+      await setDoc(env, EARNINGS_PATH, { nextAt });
+      return { ok: true, skipped: true, reason: "첫 실행이라 시작 시각만 정해 뒀어요", nextAt };
+    }
+    if (now < doc.nextAt) return { ok: true, skipped: true, reason: "아직 실적 시즌이 아니에요", nextAt: doc.nextAt };
+  }
+  return startEarnings(env, doc, now);
+}
+
+// 1단계: 대상 뽑기 + 예고 공지
+async function startEarnings(env, doc, now) {
+  const stocks = await listStocks(env);
+  const pool = stocks.filter((s) => !isForeign(s) && s.price > DELIST_PRICE);
+  if (pool.length === 0) return { ok: true, skipped: true, reason: "실적을 발표할 일반 종목이 없어요" };
+
+  pool.sort(() => Math.random() - 0.5);
+  const count = Math.min(pool.length, Math.max(1, Math.round(pool.length * EARNINGS_TARGET_RATIO)));
+  const targets = pool.slice(0, count).map((s) => s.name).sort(compareKo);
+  const releaseAt = now + EARNINGS_LEAD_MIN * 60 * 1000;
+
+  // 먼저 기록해서(두 번 시작 방지) 다음 시즌 시각까지 정해 두고, 공지가 실패하면 되돌려요
+  const prevNextAt = Number.isFinite(doc.nextAt) ? doc.nextAt : earningsStartAfter(now);
+  await setDoc(env, EARNINGS_PATH, {
+    pending: { key: String(now), targets: targets.join("\n"), releaseAt, announcedAt: now },
+    nextAt: earningsStartAfter(now, EARNINGS_INTERVAL_DAYS),
+  });
+
+  const shown = targets.slice(0, EARNINGS_NAMES_SHOWN).map((n) => `**${n}**`).join(", ");
+  const more = targets.length > EARNINGS_NAMES_SHOWN ? ` 외 ${targets.length - EARNINGS_NAMES_SHOWN}개` : "";
+  const post = await appendToAnnouncement(
+    env,
+    [
+      `📊 **[실적 시즌 예고]** 약 ${EARNINGS_LEAD_MIN}분 뒤 실적을 발표해요!`,
+      `발표 대상 ${targets.length}개: ${shown}${more}`,
+      "-# 실적이 예상보다 좋으면 기업 가치가 크게 오르고, 나쁘면 크게 내려가요. 발표 결과는 다음 시세 변동에 반영돼요.",
+    ].join("\n")
+  );
+  if (!post.sent) {
+    await setDoc(env, EARNINGS_PATH, { pending: null, nextAt: prevNextAt });
+    return { ok: false, phase: "announce", reason: post.reason };
+  }
+  return { ok: true, phase: "announced", targets: targets.length, releaseAt };
+}
+
+// 2단계: 서프라이즈 뽑기 → fv 변경 + 공시 기록 + 결과 공지
+async function releaseEarnings(env, doc, now) {
+  const pending = doc.pending;
+  // 두 번 발표되지 않게 먼저 비워요. (공지가 실패하면 아래에서 되돌려서 다음 호출 때 다시 시도해요)
+  await setDoc(env, EARNINGS_PATH, { pending: null, lastKey: pending.key, lastAt: now });
+
+  invalidateStocksCache(); // 예고 이후 종목이 바뀌었을 수 있어요
+  const stocks = await listStocks(env);
+  const byName = Object.fromEntries(stocks.map((s) => [s.name, s]));
+  const names = String(pending.targets || "").split("\n").filter(Boolean);
+
+  const items = [];
+  const fvChanges = [];
+  names.forEach((name, i) => {
+    const s = byName[name];
+    if (!s || isForeign(s) || s.price <= DELIST_PRICE) return; // 그 사이 사라졌거나 상장폐지된 종목은 빼요
+    const surprise = randomSymNormal(EARNINGS_SIGMA, EARNINGS_MAX); // 예상 대비 서프라이즈(로그)
+    const pct = (Math.exp(surprise) - 1) * 100;
+    const fvOld = Number.isFinite(s.fv) && s.fv > 0 ? s.fv : s.price;
+    const fvNew = Math.max(1, Math.round(fvOld * Math.exp(surprise) * 100) / 100);
+    const good = surprise >= 0;
+    const shift = Math.max(-NEWS_MAX_SHIFT, Math.min(NEWS_MAX_SHIFT, pct * EARNINGS_SHIFT_FACTOR));
+    const at = now + i;
+    fvChanges.push({ name, fv: fvNew });
+    items.push({
+      id: newsId(at),
+      stock: name,
+      kind: good ? "실적 호조" : "실적 부진",
+      text: `${name} 이번 분기 실적이 시장 예상보다 약 ${Math.round(Math.abs(pct))}% ${good ? "좋았어요" : "나빴어요"}`,
+      tone: good ? "good" : "bad",
+      shift: Math.round(shift * 10) / 10,
+      rumor: false,
+      manual: false,
+      earnings: true,
+      fvDone: true, // fv는 여기서 이미 바꿨어요. 다음 변동에서 공시로 fv를 또 움직이지 않아요.
+      at,
+    });
+  });
+  if (items.length === 0) return { ok: true, phase: "released", released: 0, reason: "발표할 종목이 남아 있지 않았어요" };
+
+  // 결과 공지가 먼저 올라가야 유저가 알 수 있어요. 첫 공지가 실패하면 되돌려서 다음 호출 때 다시 시도해요.
+  const chunks = [];
+  for (let i = 0; i < items.length; i += EARNINGS_ITEMS_PER_POST) chunks.push(items.slice(i, i + EARNINGS_ITEMS_PER_POST));
+  for (let c = 0; c < chunks.length; c++) {
+    const lines = chunks[c].map(newsAnnounceLine);
+    const head = c === 0 ? [`📊 **[실적 발표]** ${items.length}개 종목의 실적이 나왔어요! 다음 시세 변동에 반영돼요.`] : [];
+    const post = await appendToAnnouncement(env, [...head, ...lines].join("\n"));
+    if (!post.sent) {
+      if (c === 0) {
+        await setDoc(env, EARNINGS_PATH, { pending, lastKey: doc.lastKey ?? "" });
+        return { ok: false, phase: "release", reason: post.reason };
+      }
+      console.error("실적 발표 공지 일부 실패:", post.reason); // 일부만 실패해도 효과는 그대로 기록해요
+    }
+  }
+
+  // 공시 기록(다음 변동에 반영) + 기업 가치 변경
+  const newsDoc = (await getDoc(env, NEWS_PATH)) || {};
+  await saveNewsItems(env, newsDoc, items);
+  const results = await Promise.allSettled(fvChanges.map((f) => setDoc(env, `stocks/${encodeURIComponent(f.name)}`, { fv: f.fv })));
+  results.forEach((r, i) => {
+    if (r.status === "rejected") console.error(`실적 fv 저장 실패 (${fvChanges[i].name}):`, r.reason?.message);
+  });
+  invalidateStocksCache();
+  return { ok: true, phase: "released", released: items.length, stocks: items.map((it) => `${it.stock} ${it.kind}`) };
 }
 
 // /공시설정 (관리자)
@@ -5183,7 +5796,7 @@ export const commandDefinitions = [
   },
   {
     name: "매도",
-    description: "종목을 매도합니다. (수수료 0.3%) 종목2~5로 여러 종목을 한 번에 팔아요. 수량 기본 1주.",
+    description: "종목을 매도합니다. (수수료 0.3% + 거래세 0.2%) 종목2~5로 여러 종목을 한 번에 팔아요. 수량 기본 1주.",
     options: multi([
       { name: "종목", description: "내가 가진 종목 (목록에서 선택)", type: 3, required: true, autocomplete: true },
       { name: "수량", description: "매도할 수량 (기본 1, '전량'은 보유 전부)", type: 4, required: false, autocomplete: true },
@@ -5388,10 +6001,16 @@ export const commandDefinitions = [
   {
     name: "종목추가",
     description: "[관리자] 새 종목을 등록합니다. 종목2~5로 여러 종목을 한 번에 등록해요.",
-    options: multi([
-      { name: "종목", description: "종목 이름", type: 3, required: true },
-      { name: "가격", description: "초기 가격(해정)", type: 4, required: true, autocomplete: true },
-    ]),
+    options: [
+      ...multi([
+        { name: "종목", description: "종목 이름", type: 3, required: true },
+        { name: "가격", description: "초기 가격(해정)", type: 4, required: true, autocomplete: true },
+      ]),
+      // 업종: 안 고르면 랜덤 배정. 여러 종목을 한 번에 등록하면 모두 같은 업종이에요.
+      { name: "업종", description: "업종 (안 고르면 랜덤 배정)", type: 3, required: false, choices: [...SECTORS, NO_SECTOR].map((s) => ({ name: s, value: s })) },
+      // 변동성 등급: 안 고르면 가격으로 정해요. (가격이 높을수록 대형)
+      { name: "등급", description: "변동성 등급 (안 고르면 가격에 맞춰 자동)", type: 3, required: false, choices: VOL_TIERS.map((t) => ({ name: t, value: t })) },
+    ],
   },
   {
     name: "종목삭제",
@@ -6228,13 +6847,14 @@ function stockInfoText(stock, held = 0, divMod = 1, now = Date.now(), market = n
     divLine =
       `💵 배당 예상: 하루 ${pctText(DIVIDEND_RATE)}${divMod === 2 ? " ×2(공시 확대)" : ""} · 10주 약 **${pay(10)}해정** · 100주 약 **${pay(100)}해정**` +
       `${held > 0 ? `\n   ↳ 내 보유 ${held.toLocaleString()}주 → 약 **+${pay(held)}해정**` : ""}` +
-      `\n   (매일 오전 ${DIVIDEND_HOUR}시 이후 첫 시세 변동 때 지급 · 지급 시점 가격 기준)`;
+      `\n   (매일 오전 ${DIVIDEND_HOUR}시 이후 첫 시세 변동 때 지급 · 지급 시점 가격 기준 · 배당소득세 ${pctText(DIVIDEND_TAX_RATE)} 뗀 금액)`;
   }
 
   return [
     `**🏷️ ${iconName(stock)} 종목정보**`,
     `${mark(dayPct)} 현재가 **${moneyOf(stock, stock.price)}**${dangerTag(stock.price) ? `${dangerTag(stock.price)} 상장폐지 위기` : ""} · 오늘 ${sgn(dayPct)}% (0시 ${moneyOf(stock, open)})`,
     `🗓️ 상장일: ${listedText(stock.listedAt)} (한국시간)${days ? ` · 상장 ${days.toLocaleString()}일째` : ""}`,
+    ...(isForeign(stock) ? [] : [`🏢 업종: **${sectorOf(stock)}** · 📊 변동성 등급: **${tierOf(stock)}**`]),
     `🏆 역대 최고가: **${moneyOf(stock, maxPrice)}** (지금은 최고가의 ${ofMax.toFixed(1)}%)`,
     `📏 오늘 변동폭: 최고 ${moneyOf(stock, hi)} ~ 최저 ${moneyOf(stock, lo)} (**${rangePct.toFixed(1)}%**)`,
     ...(isForeign(stock) ? foreignInfoLines(stock, now, market) : [divLine]),
@@ -6442,7 +7062,8 @@ export const handlers = {
           pct === 0
             ? "➖ 0.0%"
             : `${pct > 0 ? UP_MARK : DOWN_MARK} ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
-        return `${mark}**${iconName(s)}**${dangerTag(s.price)} — ${moneyOf(s, s.price)} (${change})${staleTag(s)}`;
+        const sec = isForeign(s) ? "" : ` \`${sectorOf(s)}\``; // 업종 (외국자산은 업종이 없어요)
+        return `${mark}**${iconName(s)}**${sec}${dangerTag(s.price)} — ${moneyOf(s, s.price)} (${change})${staleTag(s)}`;
       }),
     ].join("\n");
   },
@@ -6789,8 +7410,8 @@ export const handlers = {
     const { items, merged, error: mergeError } = mergeSlots(slots);
     if (mergeError) return mergeError;
     const note = merged ? "ℹ️ 같은 종목은 수량을 합쳤어요.\n" : "";
-    if (items.length === 1) return note + (await buyStock(env, userId, items[0].name, items[0].qty)).message;
-    return note + (await buyStocks(env, userId, items)).message;
+    const result = items.length === 1 ? await buyStock(env, userId, items[0].name, items[0].qty) : await buyStocks(env, userId, items);
+    return { message: note + result.message, amount: result.ok ? result.amount : undefined };
   },
 
   매도: async (interaction, env) => {
@@ -6801,8 +7422,8 @@ export const handlers = {
     const { items, merged, error: mergeError } = mergeSlots(slots);
     if (mergeError) return mergeError;
     const note = merged ? "ℹ️ 같은 종목은 수량을 합쳤어요.\n" : "";
-    if (items.length === 1) return note + (await sellStock(env, userId, items[0].name, items[0].qty)).message;
-    return note + (await sellStocks(env, userId, items)).message;
+    const result = items.length === 1 ? await sellStock(env, userId, items[0].name, items[0].qty) : await sellStocks(env, userId, items);
+    return { message: note + result.message, amount: result.ok ? result.amount : undefined };
   },
 
   예약매수: (interaction, env) => reserveOrder("buy", interaction, env),
@@ -6926,7 +7547,7 @@ export const handlers = {
       margin: opt(interaction, "증거금"),
       lev: opt(interaction, "배율"),
     });
-    return result.message;
+    return { message: result.message, amount: result.ok ? result.amount : undefined };
   },
 
   선물목록: async (interaction, env) => {
@@ -6963,7 +7584,8 @@ export const handlers = {
     if (error) return error;
     const targets = slots.map((s) => s.name);
     if (!targets.length) return "정산할 포지션을 골라 주세요.";
-    return (await closeFutures(env, userId, targets)).message;
+    const result = await closeFutures(env, userId, targets);
+    return { message: result.message, amount: result.ok ? result.amount : undefined };
   },
 
   선물설명: async () => futuresHelpText(),
@@ -7111,9 +7733,16 @@ export const handlers = {
     const dup = slots.find((s, i) => slots.findIndex((x) => x.name === s.name) !== i);
     if (dup) return `같은 종목이 두 번 들어 있어요: "${dup.name}"`;
 
-    await Promise.all(slots.map((s) => upsertStock(env, s.name, s.price)));
-    if (slots.length === 1) return `"${slots[0].name}" 종목을 ${slots[0].price.toLocaleString()}해정에 등록했어요.`;
-    return [`${slots.length}개 종목을 등록했어요.`, ...slots.map((s) => `- "${s.name}" ${s.price.toLocaleString()}해정`)].join("\n");
+    const sectorOpt = opt(interaction, "업종"); // 없으면 새 종목에 랜덤 배정 (upsertStock이 처리)
+    const tierOpt = opt(interaction, "등급");
+    const extra = {
+      ...(sectorOpt && (SECTORS.includes(sectorOpt) || sectorOpt === NO_SECTOR) ? { sector: sectorOpt } : {}),
+      ...(VOL_TIERS.includes(tierOpt) ? { volTier: tierOpt } : {}),
+    };
+    await Promise.all(slots.map((s) => upsertStock(env, s.name, s.price, undefined, extra)));
+    const secText = extra.sector || extra.volTier ? ` (${[extra.sector && `업종 ${extra.sector}`, extra.volTier && `등급 ${extra.volTier}`].filter(Boolean).join(", ")})` : "";
+    if (slots.length === 1) return `"${slots[0].name}" 종목을 ${slots[0].price.toLocaleString()}해정에 등록했어요.${secText}`;
+    return [`${slots.length}개 종목을 등록했어요.${secText}`, ...slots.map((s) => `- "${s.name}" ${s.price.toLocaleString()}해정`)].join("\n");
   },
 
   종목삭제: async (interaction, env) => {

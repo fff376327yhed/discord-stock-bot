@@ -1,12 +1,12 @@
 import {
   loadEnv, isAuthorizedCron, currentSurgeSlot, surgeSlotKey, isSurgeMoment,
   fluctuatePrices, announcePriceChanges, notifyPriceChanges, announcePreAlert,
-  processOrders, processPriceAlerts, processFutures, processBank, processDividends, takeNews, finishNews, publishNews, prepareCrowd, finishCrowd, getDoc, setDoc,
-  rollBankRate, rollFxRate,
+  processOrders, processPriceAlerts, processFutures, processBank, processDividends, takeNews, finishNews, publishNews, runEarnings, prepareCrowd, finishCrowd, getDoc, setDoc,
+  rollBankRate, rollFxRate, logTradePressure,
 } from "../src/lib.js";
 
 // 크론 엔드포인트 3개(fluctuate / midnight / prealert)를 한 함수로 합친 파일이에요.
-// 호출: /api/cron?task=fluctuate | midnight | prealert | news | bankRate | fxRate
+// 호출: /api/cron?task=fluctuate | midnight | prealert | news | bankRate | fxRate | earnings
 //  - vercel.json의 rewrites 덕분에 예전 주소(/api/cron/fluctuate 등)도 그대로 동작해요.
 //  - 인증: Authorization: Bearer <CRON_SECRET>
 
@@ -28,7 +28,7 @@ async function runFluctuation(env, range, label) {
     console.error("공시 불러오기 실패:", err.message);
   }
 
-  const changes = await fluctuatePrices(env, { ...range, impact: crowd?.impact, news: news?.shifts });
+  const changes = await fluctuatePrices(env, { ...range, impact: crowd?.impact, news: news?.shifts, newsFv: news?.fvShifts });
 
   // 상장폐지 종목을 봇 보유분에서 지우고 봇 저장
   try {
@@ -92,6 +92,14 @@ async function runFluctuation(env, range, label) {
   // 3) 알림을 켠 유저에게 DM
   await notifyPriceChanges(env, changes);
 
+  // 4) 로그 기반 거래 압력 집계 (마지막 집계 시각 이후 로그만 읽어요, 실패해도 시세 변동 결과는 그대로 응답)
+  let logPressure = null;
+  try {
+    logPressure = await logTradePressure(env);
+  } catch (err) {
+    console.error("로그 거래 압력 집계 실패:", err.message);
+  }
+
   return Response.json({
     ok: true,
     announce,
@@ -102,7 +110,9 @@ async function runFluctuation(env, range, label) {
     dividends,
     news: newsResult.count,
     crowd: crowd?.summary,
+    logPressure,
     mode: label,
+    shocks: changes.shocks, // 이번에 뽑은 시장·업종 충격(로그 수익률)
     count: changes.length,
     delisted: changes.filter((c) => c.delisted).map((c) => c.name),
     changes,
@@ -110,7 +120,7 @@ async function runFluctuation(env, range, label) {
 }
 
 // ---------- 1) 평소 변동: -20% ~ +20% (15분마다, cron-job.org: */15 * * * *) ----------
-const NORMAL_RANGE = { minPct: -20, maxPct: 20 };
+const NORMAL_RANGE = { minPct: -20, maxPct: 20 }; // 평소에도 시장·업종 충격은 작게 들어가요 (surge 아님)
 
 async function fluctuateTask(env) {
   // 급등락 시각 직전·직후에는 평소 변동을 쉬어서 겹치지 않게 함
@@ -124,7 +134,8 @@ async function fluctuateTask(env) {
 // 하루 3번(18시/21시/0시 KST), 슬롯마다 딱 1번만 실행. 실행 기록은 Firebase config/surge 에 남겨요.
 // 슬롯 시각이 아니면 아무것도 읽지 않고 바로 끝내요. (평소 변동은 fluctuate 가 담당)
 // 그래서 cron-job.org에서 5분마다 호출해도 읽기가 거의 늘지 않아요.
-const SURGE_RANGE = { minPct: -80, maxPct: 120, crashChance: 0.005, crashPct: -100 };
+// surge: true -> fluctuatePrices가 시장 충격·업종 충격을 급등락용(크게)으로 뽑아요. (상수는 src/lib.js의 SHOCK_SURGE)
+const SURGE_RANGE = { minPct: -80, maxPct: 120, crashChance: 0.005, crashPct: -100, surge: true };
 
 async function midnightTask(env) {
   const slot = currentSurgeSlot();
@@ -194,7 +205,16 @@ async function fxRateTask(env) {
   return Response.json({ ok: true, ...rate });
 }
 
-const TASKS = { fluctuate: fluctuateTask, midnight: midnightTask, prealert: prealertTask, news: newsTask, bankRate: bankRateTask, fxRate: fxRateTask };
+// ---------- 7) 실적 시즌 (cron-job.org: 5,20,35,50 * * * *, 주소: /api/cron?task=earnings) ----------
+// 주기(기본 7일)마다 대상 종목을 예고하고, 30분쯤 뒤 실적을 발표해요. (상수는 src/lib.js의 EARNINGS_*)
+// 시세 변동(0,15,30,45분)과 겹치지 않게 5분 뒤에 불러요. 평소엔 문서 1개만 읽고 끝나요.
+// 테스트: /api/cron?task=earnings&force=1 → 시각과 상관없이 지금 바로 시작해요.
+async function earningsTask(env, url) {
+  const result = await runEarnings(env, { force: url?.searchParams.get("force") === "1" });
+  return Response.json(result);
+}
+
+const TASKS = { fluctuate: fluctuateTask, midnight: midnightTask, prealert: prealertTask, news: newsTask, bankRate: bankRateTask, fxRate: fxRateTask, earnings: earningsTask };
 
 export default {
   fetch: async function handler(request) {
@@ -209,6 +229,6 @@ export default {
     if (!run) {
       return Response.json({ ok: false, error: `알 수 없는 task예요: ${task}`, tasks: Object.keys(TASKS) }, { status: 400 });
     }
-    return run(env);
+    return run(env, url);
   },
 };

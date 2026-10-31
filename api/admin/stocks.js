@@ -4,15 +4,43 @@ import {
   listProducts, upsertProduct, removeProduct, getProduct, setUserItem, DELIST_PRICE,
   listCollection, setDoc, getDoc, deleteDoc,
   resetBots,
-  logAction, listLogs, purgeLogs,
+  logAction, listLogs, purgeLogs, getTradePressureState,
   getAttendanceConfig, setAttendanceConfig,
   getAnnounceConfig, setAnnounceConfig,
   getListingConfig, setListingConfig, parseNames, ensureMinimumStocks, LISTING_PRICE,
+  SECTORS, NO_SECTOR, BETA_MAX, VOL_TIERS,
 } from "../../src/lib.js";
 import { isForeign, FOREIGN_KINDS, FOREIGN_START_PRICE, DEFAULT_MULT, symbolOfKind, defaultSourceOf } from "../../src/foreign.js";
 
 // 외국자산(코인·해외주식) 종목 문서에만 있는 필드들 (이름을 바꿀 때 새 문서로 그대로 옮겨요)
 const FOREIGN_FIELDS = ["kind", "symbol", "source", "mult", "startPrice", "baseReal", "lastReal", "quoteAt", "stale"];
+
+// 종목 문서에 같이 저장할 선택 필드(fv·업종·beta·변동성 등급)를 검사해서 만들어요. 빈 값은 건드리지 않아요.
+function parseStockExtras(body) {
+  const has = (v) => v !== undefined && v !== null && v !== "";
+  const extra = {};
+  if (has(body.fv)) {
+    const fv = Number(body.fv);
+    if (!Number.isFinite(fv) || fv <= 0) return { error: "기업 가치(fv)는 0보다 큰 숫자여야 합니다." };
+    extra.fv = fv;
+  }
+  if (has(body.sector)) {
+    const sector = String(body.sector);
+    if (!SECTORS.includes(sector) && sector !== NO_SECTOR) return { error: `업종은 ${[...SECTORS, NO_SECTOR].join(", ")} 중 하나여야 합니다.` };
+    extra.sector = sector;
+  }
+  if (has(body.beta)) {
+    const beta = Number(body.beta);
+    if (!Number.isFinite(beta) || beta < 0 || beta > BETA_MAX) return { error: `beta는 0 이상 ${BETA_MAX} 이하의 숫자여야 합니다. (기본 1)` };
+    extra.beta = beta;
+  }
+  if (has(body.volTier)) {
+    const volTier = String(body.volTier);
+    if (!VOL_TIERS.includes(volTier)) return { error: `변동성 등급은 ${VOL_TIERS.join(", ")} 중 하나여야 합니다.` };
+    extra.volTier = volTier;
+  }
+  return { extra };
+}
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -158,6 +186,10 @@ async function handle(request) {
       case "listLogs":
         return json(await listLogs(env, url.searchParams.get("days")));
 
+      // 로그 기반 거래 압력: 마지막 집계 결과만 읽어요 (커서를 건드리지 않아서 cron 쪽과 안 겹쳐요)
+      case "tradePressure":
+        return json(await getTradePressureState(env));
+
       // keepDays일보다 오래된 로그 삭제
       case "purgeLogs": {
         const keepDays = Number(body.keepDays);
@@ -178,7 +210,10 @@ async function handle(request) {
         if (!Number.isInteger(price) || price < 1) {
           return json({ error: "가격은 1 이상의 정수여야 합니다." }, 400);
         }
-        await upsertStock(env, name, price);
+        // fv(기업 가치)·업종·beta·변동성 등급은 선택이에요. 비우면 건드리지 않아요. (새 종목은 fv=가격, 업종·등급은 자동 배정)
+        const parsed = parseStockExtras(body);
+        if (parsed.error) return json({ error: parsed.error }, 400);
+        await upsertStock(env, name, price, undefined, parsed.extra);
         return json({ ok: true });
       }
 
@@ -257,7 +292,17 @@ async function handle(request) {
         const foreignExtra = isForeign(old)
           ? Object.fromEntries(FOREIGN_FIELDS.filter((k) => old[k] !== undefined && old[k] !== null).map((k) => [k, old[k]]))
           : {};
-        await upsertStock(env, to, price, undefined, foreignExtra);
+        // 일반 종목은 업종·beta·등급·기업 가치(fv)도 새 문서로 옮겨요. (안 옮기면 업종·등급이 다시 뽑히고 fv가 가격으로 리셋돼요)
+        // 폼에서 같이 고친 값이 있으면 그 값이 우선이에요.
+        const parsed = parseStockExtras(body);
+        if (parsed.error) return json({ error: parsed.error }, 400);
+        const normalExtra = old && !isForeign(old)
+          ? {
+              ...Object.fromEntries(["sector", "beta", "volTier", "fv"].filter((k) => old[k] !== undefined && old[k] !== null).map((k) => [k, old[k]])),
+              ...parsed.extra,
+            }
+          : {};
+        await upsertStock(env, to, price, undefined, { ...foreignExtra, ...normalExtra });
         if (old && Number.isFinite(old.listedAt)) {
           await setDoc(env, `stocks/${encodeURIComponent(to)}`, { listedAt: old.listedAt });
         }
@@ -286,7 +331,7 @@ async function handle(request) {
             updatedAt: new Date(),
             ...(isForeign(s)
               ? { startPrice: price, baseReal: Number.isFinite(s.lastReal) && s.lastReal > 0 ? s.lastReal : null }
-              : {}),
+              : { fv: price }), // 일반 종목은 기업 가치도 새 가격으로 맞춰요
           })
         );
         invalidateStocksCache();

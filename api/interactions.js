@@ -24,6 +24,15 @@ const SUPPRESS_NOTIFICATIONS = 4096;
 // 멘션(<@유저ID>)이 글자로는 보이지만 알림은 보내지 않게 하는 설정 (랭킹처럼 멘션이 들어간 응답용)
 const NO_PING = { parse: [] };
 
+// 핸들러가 거래 금액을 로그에 남기고 싶을 때 { message, amount } 형태로 반환해요.
+// 디스코드에는 message만 보내고, amount는 로그용으로만 떼어내요.
+function splitAmount(raw) {
+  if (raw && typeof raw === "object" && "message" in raw && "amount" in raw) {
+    return { content: raw.message, amount: raw.amount };
+  }
+  return { content: raw, amount: undefined };
+}
+
 // 기본값은 "나만 보기"예요. 아래 목록들은 예외로 쓰는 거예요.
 
 // 여기에 적은 명령어는 "나만 보기"로 보내요. 예: new Set(["잔고", "내역"])
@@ -161,7 +170,7 @@ async function handler(request) {
     const work = (async () => {
       try {
         if (userId) await touchUsername(env, userId, displayName);
-        const content = await handlerFn(interaction, env);
+        const { content, amount } = splitAmount(await handlerFn(interaction, env));
         // 활동 로그 (응답을 늦추지 않게 뒤에서 저장)
         if (userId && !VIEW_ONLY.has(commandName)) {
           waitUntil(
@@ -171,6 +180,7 @@ async function handler(request) {
               cmd: commandName,
               a: summarizeOptions(interaction.data.options),
               r: firstLine(content),
+              amt: amount,
             })
           );
         }

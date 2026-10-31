@@ -91,12 +91,22 @@
     <div class="form-row">
       <input id="stockName" placeholder="종목 이름">
       <input id="stockPrice" type="number" min="1" placeholder="가격">
+      <select id="stockSector" title="업종 (새 종목에서 '자동'이면 랜덤 배정, 기존 종목은 그대로)">
+        <option value="">업종: 자동/유지</option>
+        <option>IT</option><option>바이오</option><option>에너지</option><option>금융</option><option>소비재</option><option>건설</option><option>기타</option>
+      </select>
+      <input id="stockBeta" type="number" min="0" max="3" step="0.1" placeholder="beta (기본 1)" title="시장 민감도. 비우면 그대로(없으면 1)">
+      <select id="stockTier" title="변동성 등급 (새 종목에서 '자동'이면 가격에 맞춰 배정, 기존 종목은 그대로)">
+        <option value="">등급: 자동/유지</option>
+        <option>대형</option><option>중형</option><option>소형</option>
+      </select>
+      <input id="stockFv" type="number" min="1" step="any" placeholder="fv 기업 가치 (비우면 유지)" title="적정 가치. 유저에게는 안 보이고 가격이 이쪽으로 서서히 끌려가요. 새 종목은 비우면 가격과 같게 시작해요.">
       <button onclick="saveStock()">저장</button>
       <button class="ghost" onclick="clearStockForm()">입력 초기화</button>
     </div>
     <input type="hidden" id="stockOrigName">
     <table>
-      <thead><tr><th>이름</th><th class="num">가격</th><th></th></tr></thead>
+      <thead><tr><th>이름</th><th class="num">가격</th><th class="num" title="기업 가치(관리자만 볼 수 있어요)">fv</th><th></th></tr></thead>
       <tbody id="stockTable"></tbody>
     </table>
   </div>
@@ -475,26 +485,31 @@ function renderStocks(stocks) {
     const icon = s.kind === "crypto" ? "₿ " : s.kind === "us" ? "🌐 " : "";
     const tag = foreign
       ? ` <span class="tag">${esc(s.symbol)} ×${Number(s.mult ?? 3)}${s.stale ? " · 시세 지연" : ""}</span>`
-      : "";
+      : ` <span class="tag">${esc(s.sector || "기타")}${s.volTier ? " · " + esc(s.volTier) : ""}${Number.isFinite(s.beta) && s.beta !== 1 ? " · β" + s.beta : ""}</span>`;
     const edit = foreign
       ? `editForeign(${JSON.stringify(s.name)}, ${JSON.stringify(s.kind)}, ${JSON.stringify(s.symbol || "")}, ${Number(s.mult ?? 3)}, ${Number(s.startPrice ?? 1000)})`
-      : `editStock(${JSON.stringify(s.name)}, ${Number(s.price)})`;
+      : `editStock(${JSON.stringify(s.name)}, ${Number(s.price)}, ${JSON.stringify(s.sector || "기타")}, ${Number.isFinite(s.beta) ? s.beta : 1}, ${JSON.stringify(s.volTier || "")}, ${Number.isFinite(s.fv) ? Math.round(s.fv * 100) / 100 : "null"})`;
     return `
     <tr>
       <td>${icon}${esc(s.name)}${tag}</td>
       <td class="num">${Number(s.price).toLocaleString()}</td>
+      <td class="num">${!foreign && Number.isFinite(s.fv) ? Math.round(s.fv).toLocaleString() : "-"}</td>
       <td><div class="actions">
         <button class="ghost" onclick='${edit}'>수정</button>
         <button class="danger" onclick='removeStock(${JSON.stringify(s.name)})'>삭제</button>
       </div></td>
     </tr>`;
-  }).join("") || `<tr><td colspan="3" class="muted">등록된 종목이 없습니다.</td></tr>`;
+  }).join("") || `<tr><td colspan="4" class="muted">등록된 종목이 없습니다.</td></tr>`;
 }
 
-function editStock(name, price) {
+function editStock(name, price, sector, beta, tier, fv) {
   $("stockOrigName").value = name;
   $("stockName").value = name;
   $("stockPrice").value = price;
+  $("stockSector").value = sector || "";
+  $("stockBeta").value = beta ?? "";
+  $("stockTier").value = tier || "";
+  $("stockFv").value = fv ?? "";
   log(`"${name}" 수정 모드입니다. 이름이나 가격을 고친 뒤 저장을 누르세요.`);
 }
 
@@ -502,17 +517,24 @@ function clearStockForm() {
   $("stockOrigName").value = "";
   $("stockName").value = "";
   $("stockPrice").value = "";
+  $("stockSector").value = "";
+  $("stockBeta").value = "";
+  $("stockTier").value = "";
+  $("stockFv").value = "";
 }
 
 function saveStock() {
   const from = $("stockOrigName").value;
   const to = $("stockName").value.trim();
   const price = $("stockPrice").value;
+  const sector = $("stockSector").value;
+  const beta = $("stockBeta").value;
+  const extras = { sector, beta, volTier: $("stockTier").value, fv: $("stockFv").value };
   if (from && from !== to) {
-    return act(() => call("renameStock", { from, to, price: Number(price) }), `"${from}" → "${to}" 이름 변경 완료`)
+    return act(() => call("renameStock", { from, to, price: Number(price), ...extras }), `"${from}" → "${to}" 이름 변경 완료`)
       .then(clearStockForm);
   }
-  return act(() => call("upsertStock", { name: to, price }), `"${to}" 저장 완료`)
+  return act(() => call("upsertStock", { name: to, price, ...extras }), `"${to}" 저장 완료`)
     .then(clearStockForm);
 }
 
