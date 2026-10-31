@@ -1617,6 +1617,59 @@ export function randomChangePct(minPct, maxPct, sigmaOverride) {
   return (Math.exp(lo + Math.random() * (hi - lo)) - 1) * 100; // 거의 일어나지 않는 예외 상황
 }
 
+// 종 모양 난수: [lo, hi] 안에서 center 근처가 가장 흔하고, 끝으로 갈수록 확률이 거의 0이 돼요.
+// 정규분포를 범위 안으로 잘라서 쓰고, 가장 가까운 끝까지가 BELL_TAIL_SIGMAS 표준편차쯤 되게 폭을 잡아요. (4면 끝 확률은 중심의 0.03%)
+const BELL_TAIL_SIGMAS = 4;
+export function randomBell(lo, hi, center = (lo + hi) / 2) {
+  const c = Math.min(Math.max(center, lo), hi);
+  const sigma = Math.max(Math.min(c - lo, hi - c) / BELL_TAIL_SIGMAS, (hi - lo) / 25);
+  for (let i = 0; i < 100; i++) {
+    const x = c + sigma * randomNormal();
+    if (x >= lo && x <= hi) return x;
+  }
+  return c;
+}
+
+// ---------- 은행·환율·주식을 잇는 돈의 흐름 ----------
+// 유저가 환전·예금·출금·대출·상환을 할 때마다 config/econFlow 에 순흐름을 쌓아 두고(원자적 증가 1번),
+// 매시 정각에 금리·환율을 뽑을 때 읽어서 중심을 옮긴 뒤 절반씩 덜어내요. (읽기는 문서 1개)
+//   fx     : 해정 → 달러로 바꾼 순액(해정). 많으면 달러가 비싸져요(환율 ↑)
+//   bank   : 예금 − 출금 − 대출 + 상환 (해정). 은행에 돈이 쌓이면 금리 ↓, 빠지면 금리 ↑
+//   stress : 연체 1점, 강제매도 3점. 많으면 금리 ↑ (은행이 몸을 사려요)
+const ECON_PATH = "config/econFlow";
+const ECON_DECAY = 0.5; // 한 번 쓰고 나면 이만큼만 남겨서 다음 시간에도 영향이 이어져요
+const ECON_FIELDS = ["fx", "bank", "stress"];
+
+async function recordEconFlow(env, field, by) {
+  if (!Number.isFinite(by) || by === 0) return;
+  try {
+    await incrementFields(env, [{ path: ECON_PATH, field, by }]);
+  } catch (err) {
+    try {
+      const doc = await getDoc(env, ECON_PATH).catch(() => null);
+      if (!doc) await setDoc(env, ECON_PATH, { fx: 0, bank: 0, stress: 0 });
+      await incrementFields(env, [{ path: ECON_PATH, field, by }]);
+    } catch (err2) {
+      console.error("돈의 흐름 기록 실패:", err2.message); // 실패해도 거래는 그대로 성공해요
+    }
+  }
+}
+
+async function readEconFlow(env) {
+  const doc = await getDoc(env, ECON_PATH).catch(() => null);
+  return Object.fromEntries(ECON_FIELDS.map((f) => [f, Number.isFinite(doc?.[f]) ? doc[f] : 0]));
+}
+
+async function decayEconFlow(env, flow, fields) {
+  const items = fields.filter((f) => flow[f]).map((f) => ({ path: ECON_PATH, field: f, by: -flow[f] * (1 - ECON_DECAY) }));
+  if (!items.length) return;
+  try {
+    await incrementFields(env, items);
+  } catch (err) {
+    console.error("돈의 흐름 정리 실패:", err.message);
+  }
+}
+
 // ---------- 기업 가치(fv)와 평균 회귀 ----------
 // 종목 문서에 fv(적정 가치)가 있어요. 가격은 fv 주변을 오가고, 너무 벗어나면 서서히 fv 쪽으로 끌려와요.
 // fv는 유저에게 보여주지 않아요. (관리자 API의 종목 목록에만 들어 있어요)
@@ -1663,8 +1716,8 @@ export const SECTORS = ["IT", "바이오", "에너지", "금융", "소비재", "
 export const NO_SECTOR = "기타";
 export const BETA_DEFAULT = 1;
 export const BETA_MAX = 3;
-const SHOCK_NORMAL = { marketSigma: 0.03, marketMax: 0.08, sectorSigma: 0.05, sectorMax: 0.12 };
-const SHOCK_SURGE = { marketSigma: 0.3, marketMax: 0.5, sectorSigma: 0.4, sectorMax: 0.6 };
+const SHOCK_NORMAL = { marketSigma: 0.03, marketMax: 0.3, sectorSigma: 0.05, sectorMax: 0.5 };
+const SHOCK_SURGE = { marketSigma: 0.3, marketMax: 1.5, sectorSigma: 0.4, sectorMax: 2 };
 const COMMON_LIMIT_RATIO = 0.95;
 
 export function randomSector() {
@@ -1691,7 +1744,7 @@ export function rollShocks(surge = false, macro = null) {
   const p = surge ? SHOCK_SURGE : SHOCK_NORMAL;
   const sectors = {};
   for (const s of SECTORS) sectors[s] = randomSymNormal(p.sectorSigma, p.sectorMax) + (macro?.sectors?.[s] || 0);
-  return { market: randomSymNormal(p.marketSigma, p.marketMax), sectors, surge: !!surge, macro: macro ? { rateD: macro.rateD, fxD: macro.fxD } : null };
+  return { market: randomSymNormal(p.marketSigma, p.marketMax) + (macro?.market || 0), sectors, surge: !!surge, macro: macro ? { rateD: macro.rateD, fxD: macro.fxD } : null };
 }
 
 // 한 종목이 이번에 받는 공통 충격(로그) = beta × 시장 + 내 업종
@@ -1900,6 +1953,10 @@ function stateTag(c) {
 const MACRO_ENABLED = true;
 const RATE_SECTOR_SENS = { IT: -0.15, 바이오: -0.15, 에너지: 0, 금융: 0.1, 소비재: -0.04, 건설: -0.08 };
 const FX_SECTOR_SENS = { IT: 0.1, 바이오: 0.04, 에너지: -0.06, 금융: 0, 소비재: -0.08, 건설: 0 };
+// 금리·환율 "수준"이 시장 전체에 주는 은은한 힘 (시세 변동 1번당, 로그 수익률):
+//   금리가 낮으면(배율<1) 시장 ↑, 높으면 ↓ / 환율이 기준(100)보다 높으면(달러 강세) 시장 ↓, 낮으면 ↑
+const MACRO_LEVEL_RATE_K = 0.01;
+const MACRO_LEVEL_FX_K = 0.02;
 const MACRO_TICKS_PER_HOUR = 4;
 const MACRO_WINDOW_MS = 60 * 60 * 1000;
 const clampUnit = (x) => Math.max(-1, Math.min(1, x));
@@ -1916,10 +1973,14 @@ export async function loadMacroTilt(env, now = Date.now()) {
   if (fx && fx.prev > 0 && fx.rate > 0 && Number.isFinite(fx.at) && now - fx.at >= 0 && now - fx.at < MACRO_WINDOW_MS) {
     fxD = clampUnit((fx.rate / fx.prev - 1) / (FX_STEP_PCT / 100));
   }
-  if (!rateD && !fxD) return null;
+  let market = 0;
+  if (bank && bank.mult > 0) market -= MACRO_LEVEL_RATE_K * Math.log(bank.mult);
+  if (fx && fx.rate > 0) market -= MACRO_LEVEL_FX_K * Math.log(fx.rate / FX_BASE);
+  market /= MACRO_TICKS_PER_HOUR;
+  if (!rateD && !fxD && !market) return null;
   const sectors = {};
   for (const s of SECTORS) sectors[s] = ((RATE_SECTOR_SENS[s] || 0) * rateD + (FX_SECTOR_SENS[s] || 0) * fxD) / MACRO_TICKS_PER_HOUR;
-  return { sectors, rateD: +rateD.toFixed(3), fxD: +fxD.toFixed(3) };
+  return { sectors, market, rateD: +rateD.toFixed(3), fxD: +fxD.toFixed(3) };
 }
 
 // 금리·환율 공지 밑에 붙는 한 줄 (어느 업종이 영향을 받는지)
@@ -2501,7 +2562,10 @@ export async function mineOnce(env, userId) {
   }
 
   const { min, max: rewardMax } = rewardRangeFor(mining.level);
-  const reward = Math.round(min + Math.random() * (rewardMax - min));
+  // 보상: 평균은 그대로, 범위는 3배로 넓히고 종 모양으로 뽑아요 (끝값은 거의 안 나와요)
+  const half = ((rewardMax - min) / 2) * 3;
+  const mid = (min + rewardMax) / 2;
+  const reward = Math.max(1, Math.round(randomBell(mid - half, mid + half)));
   const balanceBefore = user.balance;
 
   mining.stamina -= 1;
@@ -4188,10 +4252,13 @@ export async function processFutures(env, changes = []) {
 // - 환율 = 1달러가 몇 해정인지. 1시간마다 직전 환율에서 ±FX_STEP_PCT%만 움직여요. (FX_MIN ~ FX_MAX 안에서, config/fxRate)
 // - 환전할 때 FX_FEE_RATE 수수료를 "받는 쪽" 금액에서 떼요.
 export const FX_BASE = 100;
-export const FX_MIN = 70;
-export const FX_MAX = 140;
+export const FX_MIN = 40;
+export const FX_MAX = 250;
 export const FX_FEE_RATE = 0.01; // 환전 수수료 1%
-export const FX_STEP_PCT = 5; // 1시간마다 직전 환율에서 최대 ±5%만 움직여요
+export const FX_STEP_PCT = 15; // 1시간마다 직전 환율에서 최대 ±15% (종 모양이라 끝에 가까울수록 거의 안 나와요)
+const FX_REVERT = 0.1; // 기준 환율(FX_BASE) 쪽으로 한 시간에 돌아오는 비율(로그)
+const FX_FLOW_K = 0.06; // 달러 수요가 최대일 때 한 시간에 환율을 밀어올리는 크기(로그)
+const FX_FLOW_SCALE = 100_000; // 이만큼(해정) 순환전이 쌓이면 수요가 "꽤 많음"
 export const FX_MIN_KRW = 10; // 해정 → 달러 최소 환전액
 
 const FX_PATH = "config/fxRate";
@@ -4258,12 +4325,18 @@ export async function getFxRate(env) {
 export async function rollFxRate(env) {
   const now = Date.now();
   const prev = await getFxRate(env);
-  let raw = prev.rate * (1 + (Math.random() * 2 - 1) * (FX_STEP_PCT / 100));
+  const flow = await readEconFlow(env);
+  const x = Math.log(prev.rate);
+  const pull = FX_REVERT * (Math.log(FX_BASE) - x); // 기준에서 멀수록 돌아오려는 힘
+  const demand = FX_FLOW_K * Math.tanh(flow.fx / FX_FLOW_SCALE); // 달러를 사는 사람이 많으면 환율 ↑
+  const step = randomBell(-Math.log(1 + FX_STEP_PCT / 100), Math.log(1 + FX_STEP_PCT / 100));
+  let raw = Math.exp(x + pull + demand + step);
   if (raw > FX_MAX) raw = FX_MAX - (raw - FX_MAX); // 범위 밖으로 나가면 안쪽으로 튕겨요 (끝에 달라붙지 않게)
   if (raw < FX_MIN) raw = FX_MIN + (FX_MIN - raw);
   const rate = +Math.min(FX_MAX, Math.max(FX_MIN, raw)).toFixed(2);
   const next = { rate, prev: prev.rate, at: now };
   await setDoc(env, FX_PATH, next);
+  await decayEconFlow(env, flow, ["fx"]);
   fxCache = { at: 0, doc: null };
 
   if (FX_ANNOUNCE && env.ALLOWED_CHANNEL_ID && env.DISCORD_BOT_TOKEN) {
@@ -4324,6 +4397,7 @@ export async function exchangeMoney(env, userId, dir, amount) {
       saveUser(env, userId, user),
       addHistory(env, userId, `환전: ${amount.toLocaleString()}해정 → ${centsText(cents)} (환율 ${rate})`),
     ]);
+    await recordEconFlow(env, "fx", amount);
     return {
       ok: true,
       message: [
@@ -4344,6 +4418,7 @@ export async function exchangeMoney(env, userId, dir, amount) {
     saveUser(env, userId, user),
     addHistory(env, userId, `환전: ${centsText(cents)} → ${krw.toLocaleString()}해정 (환율 ${rate})`),
   ]);
+  await recordEconFlow(env, "fx", -krw);
   return {
     ok: true,
     message: [
@@ -4367,7 +4442,7 @@ export async function exchangeMoney(env, userId, dir, amount) {
 //  - 만기: 잔고 → 예금 순서로 자동 회수. 모자라면 연체, 연체 LIQUIDATE_AFTER_HOURS시간 뒤에는 보유 주식 강제 매도.
 //  - 저장: bank/{유저ID} = { deposit, depositAt, earned, loans: { 번호: 대출 } }
 //    대출 = { principal, unpaid, rate, term, takenAt, due, lastAt, borrowed, warned? }
-export const DEPOSIT_RATE = 0.01; // 예금 일 1% (시장 배율 0.2~2.0배 → 0.2%~2%)
+export const DEPOSIT_RATE = 0.01; // 예금 일 1% (시장 배율 0.1~3.0배 → 0.1%~3%)
 export const LOAN_TERMS = { 1: 0.12, 3: 0.1, 7: 0.08 }; // 기간(일) -> 일 이자율
 export const LOAN_PENALTY_RATE = 0.15; // 연체 시 일 +15%p
 export const LOAN_MIN = 100;
@@ -4380,13 +4455,18 @@ export const REMIND_BEFORE_HOURS = 6; // 만기 이 시간 전에 DM으로 알�
 const BANK_HOUR_MS = 60 * 60 * 1000;
 
 // ---------- 시장 금리 (은행 이자 랜덤화) ----------
-// 매시 정각 크론이 배율(0.2~2.0배)을 하나 뽑아서 예금/대출 기준금리에 함께 곱해요.
+// 매시 정각 크론이 배율(0.1~3.0배, 종 모양)을 하나 뽑아서 예금/대출 기준금리에 함께 곱해요.
 //  - 예금 1% 기준 → 0.2%~2.0% 사이에서 움직여요.
 //  - index: 예금 복리 계산용 누적 지수. 금리가 바뀔 때마다 그 구간만큼 곱해서 쌓아요.
 //    (유저가 오래 안 들어와도 index 비율 하나로 정확히 계산 가능)
 //  - 저장: config/bankRate = { mult, depositRate, loanRates, index, indexAt }
-export const MARKET_RATE_MIN_MULT = 0.2;
-export const MARKET_RATE_MAX_MULT = 2.0;
+export const MARKET_RATE_MIN_MULT = 0.1;
+export const MARKET_RATE_MAX_MULT = 3.0;
+const RATE_REVERT = 0.5; // 직전 배율에서 1.0(기준) 쪽으로 돌아오는 정도 (0이면 매번 1.0에서 새로 뽑아요)
+const RATE_LIQUIDITY_K = 0.6; // 은행에 돈이 최대로 쌓였을 때 배율 중심을 내리는 크기
+const RATE_STRESS_K = 0.5; // 연체·강제매도가 최대일 때 배율 중심을 올리는 크기
+const RATE_LIQUIDITY_SCALE = 200_000; // 이만큼(해정) 순유입/순유출이 쌓이면 "꽤 많음"
+const RATE_STRESS_SCALE = 5; // 연체 1점 · 강제매도 3점
 // 대출 금리 하한(일): 예금이 가장 높을 때(1% × 2.0배 = 2.0%)보다 항상 비싸게 해서
 // "싸게 빌려서 예금" 차익거래를 막아요. 신용등급 배율까지 곱한 뒤에도 이 아래로는 안 내려가요.
 export const LOAN_RATE_FLOOR = +(DEPOSIT_RATE * MARKET_RATE_MAX_MULT * 1.2).toFixed(4); // 일 2.4%
@@ -4409,8 +4489,13 @@ function indexNow(rate, now) {
   return rate.index * (1 + rate.depositRate * days);
 }
 
-function randomMult() {
-  return +(MARKET_RATE_MIN_MULT + Math.random() * (MARKET_RATE_MAX_MULT - MARKET_RATE_MIN_MULT)).toFixed(3);
+// 새 배율: 종 모양으로 뽑되, 중심을 "직전 배율 · 은행 유동성 · 연체"로 옮겨요
+function nextMult(prevMult, flow) {
+  const liquidity = Math.tanh(flow.bank / RATE_LIQUIDITY_SCALE); // 예금이 쌓이면 +
+  const stress = Math.tanh(flow.stress / RATE_STRESS_SCALE);
+  let center = 1 + RATE_REVERT * ((prevMult || 1) - 1) - RATE_LIQUIDITY_K * liquidity + RATE_STRESS_K * stress;
+  center = Math.min(Math.max(center, MARKET_RATE_MIN_MULT + 0.25), MARKET_RATE_MAX_MULT - 0.5);
+  return +Math.min(MARKET_RATE_MAX_MULT, Math.max(MARKET_RATE_MIN_MULT, randomBell(MARKET_RATE_MIN_MULT, MARKET_RATE_MAX_MULT, center))).toFixed(3);
 }
 
 // 매시 1번 호출: 지난 구간 이자를 index에 반영하고 새 배율을 뽑아 저장해요
@@ -4421,7 +4506,9 @@ export async function rollBankRate(env) {
   const elapsedDays = Math.max(0, now - prev.indexAt) / DAY_MS;
   const index = prev.index * (1 + prev.depositRate * elapsedDays);
 
-  const mult = randomMult();
+  const flow = await readEconFlow(env);
+  const mult = nextMult(prev.mult ?? 1, flow);
+  await decayEconFlow(env, flow, ["bank", "stress"]);
   const depositRate = +(DEPOSIT_RATE * mult).toFixed(5);
   const loanRates = Object.fromEntries(
     Object.entries(LOAN_TERMS).map(([term, base]) => [term, +(base * mult).toFixed(5)])
@@ -4715,6 +4802,7 @@ export async function depositMoney(env, userId, amount) {
     await saveUser(env, userId, user).catch(() => {});
     return { ok: false, message: "예금하는 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
   }
+  await recordEconFlow(env, "bank", amount);
   await addHistory(env, userId, `예금: ${amount.toLocaleString()}해정 → 예금 ${depositOf(bank).toLocaleString()}해정`);
 
   return {
@@ -4751,6 +4839,7 @@ export async function withdrawMoney(env, userId, amount) {
     await saveBank(env, userId, bankBefore).catch(() => {});
     return { ok: false, message: "출금하는 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
   }
+  await recordEconFlow(env, "bank", -pay);
   await addHistory(env, userId, `출금: ${pay.toLocaleString()}해정 → 잔고 ${user.balance.toLocaleString()}해정`);
 
   return {
@@ -4815,6 +4904,7 @@ export async function takeLoan(env, userId, amount, termDays) {
     await saveBank(env, userId, bank).catch(() => {});
     return { ok: false, message: "대출 처리 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
   }
+  await recordEconFlow(env, "bank", -(amount - fee));
   await addHistory(env, userId, `대출: ${amount.toLocaleString()}해정 (${termDays}일 · 일 ${pctText(rate)} · 수수료 ${fee.toLocaleString()}) → 잔고 ${user.balance.toLocaleString()}해정`);
 
   const expected = Math.round(amount * rate * termDays);
@@ -4890,6 +4980,7 @@ export async function repayLoans(env, userId, target, amount) {
     await saveUser(env, userId, user).catch(() => {});
     return { ok: false, message: "상환 중 오류가 나서 취소했어요. 잠시 후 다시 시도해 주세요." };
   }
+  await recordEconFlow(env, "bank", total);
   await addHistory(env, userId, `대출 상환: ${total.toLocaleString()}해정 → 잔고 ${user.balance.toLocaleString()}해정`);
 
   return { ok: true, message: [`💳 **상환 완료** -${total.toLocaleString()}해정`, ...lines, ...creditLines, balanceLine(balanceBefore, user.balance)].join("\n") };
@@ -5021,6 +5112,7 @@ export async function processBank(env) {
               user.balance -= pay;
               paid += pay;
               summary.liquidated++;
+              await recordEconFlow(env, "stress", 3);
               const cl = markLiquidated(bank, l);
               if (cl) notes.push(cl);
             }
@@ -5032,6 +5124,7 @@ export async function processBank(env) {
             notes.push(`🏦 **[대출 자동 상환]** \`${id}\` 대출이 만기가 되어 ${paid.toLocaleString()}해정이 자동으로 상환됐어요.${soldLines.length ? `\n보유 주식을 강제로 팔았어요: ${soldLines.join(", ")}` : ""}`);
           } else {
             summary.overdue++;
+            await recordEconFlow(env, "stress", 1);
             const lateCredit = markLate(bank, l);
             notes.push(
               `🚨 **[연체]** \`${id}\` 대출이 만기를 넘겼어요. 남은 빚 ${loanOwed(l).toLocaleString()}해정 (하루 ${pctText(l.rate + LOAN_PENALTY_RATE)}씩 연체 이자)` +

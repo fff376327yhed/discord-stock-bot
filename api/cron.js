@@ -122,8 +122,8 @@ async function runFluctuation(env, range, label) {
   });
 }
 
-// ---------- 1) 평소 변동: -20% ~ +20% (15분마다, cron-job.org: */15 * * * *) ----------
-const NORMAL_RANGE = { minPct: -20, maxPct: 20 }; // 평소에도 시장·업종 충격은 작게 들어가요 (surge 아님)
+// ---------- 1) 평소 변동: -50% ~ +100% (종 모양이라 끝값은 거의 안 나와요) (15분마다, cron-job.org: */15 * * * *) ----------
+const NORMAL_RANGE = { minPct: -50, maxPct: 100 }; // 평소에도 시장·업종 충격은 작게 들어가요 (surge 아님)
 
 async function fluctuateTask(env) {
   // 급등락 시각 직전·직후에는 평소 변동을 쉬어서 겹치지 않게 함
@@ -133,12 +133,12 @@ async function fluctuateTask(env) {
   return runFluctuation(env, NORMAL_RANGE, "평소 변동");
 }
 
-// ---------- 2) 급등락: -80% ~ +120% (+ 종목마다 0.5% 확률로 -100%) ----------
+// ---------- 2) 급등락: -90% ~ +900% (+ 종목마다 0.5% 확률로 -100%) ----------
 // 하루 3번(18시/21시/0시 KST), 슬롯마다 딱 1번만 실행. 실행 기록은 Firebase config/surge 에 남겨요.
 // 슬롯 시각이 아니면 아무것도 읽지 않고 바로 끝내요. (평소 변동은 fluctuate 가 담당)
 // 그래서 cron-job.org에서 5분마다 호출해도 읽기가 거의 늘지 않아요.
 // surge: true -> fluctuatePrices가 시장 충격·업종 충격을 급등락용(크게)으로 뽑아요. (상수는 src/lib.js의 SHOCK_SURGE)
-const SURGE_RANGE = { minPct: -80, maxPct: 120, crashChance: 0.005, crashPct: -100, surge: true };
+const SURGE_RANGE = { minPct: -90, maxPct: 900, crashChance: 0.005, crashPct: -100, surge: true };
 
 async function midnightTask(env) {
   const slot = currentSurgeSlot();
