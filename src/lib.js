@@ -7002,7 +7002,7 @@ function bankHelpText(rate) {
 
 const askCooldown = new Map(); // 유저ID -> 마지막 질문 시각 (서버 인스턴스 기준의 간단한 제한)
 const ASK_COOLDOWN_MS = 10_000;
-const ASK_DAILY_LIMIT = 5; // 유저 한 명이 하루(한국 시간 자정 기준)에 /주식질문을 쓸 수 있는 횟수. 여기 숫자만 바꾸면 돼요. (관리자는 제한 없음)
+const ASK_DAILY_LIMIT = 15; // 유저 한 명이 하루(한국 시간 자정 기준)에 /주식질문을 쓸 수 있는 횟수. 여기 숫자만 바꾸면 돼요. (관리자는 제한 없음)
 
 export const handlers = {
   // 도움말은 글자가 2000자를 넘어서 일반 메시지로는 못 보내요. 임베드(4096자까지)로 보내요.
@@ -7632,7 +7632,7 @@ export const handlers = {
 
   공시목록: async (_interaction, env) => newsListText(env),
 
-  주식질문: async (interaction) => {
+  주식질문: async (interaction, env) => {
     const userId = interaction.member.user.id;
     const now = Date.now();
     const wait = (askCooldown.get(userId) || 0) + ASK_COOLDOWN_MS - now;
