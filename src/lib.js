@@ -1062,6 +1062,7 @@ export async function getUserDetail(env, userId) {
     getRanking(env),
   ]);
   const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
   const extraAsset = await userExtraAsset(env, userId, priceMap); // 예금 + 선물 평가금 - 대출
 
   const holdings = Object.entries(user.holdings)
@@ -1071,7 +1072,12 @@ export async function getUserDetail(env, userId) {
       // 매수 기록이 없던 기존 보유분은 이때 현재가 기준으로 기록해 둠
       if (!Number.isFinite(user.costs[name])) user.costs[name] = cost;
       const value = price * qty;
-      return { name, qty, price, value, cost, avg: Math.round(cost / qty), profit: value - cost };
+      const stock = stockMap[name];
+      return {
+        name, qty, price, value, cost, avg: Math.round(cost / qty), profit: value - cost,
+        foreign: stock ? isForeign(stock) : false,
+        icon: stock ? foreignIcon(stock) : "",
+      };
     })
     .sort((a, b) => compareKo(a.name, b.name));
   const holdingsValue = holdings.reduce((sum, h) => sum + h.value, 0);
@@ -1465,19 +1471,29 @@ export async function setNotify(env, userId, notify) {
 
 // ---------- 전체 유저 보유 종목 (/보유종목 용) ----------
 // 보유 종목이 있는 유저만, 보유 평가액 높은 순으로 돌려줘요. 상장폐지된 종목은 제외.
-// [{ id, username, holdings: [{ name, qty, price, value }], total }]
+// [{ id, username, holdings: [{ name, qty, price, value, foreign, icon }], total }]
 export async function getAllHoldings(env) {
   const [users, stocks] = await Promise.all([
     listCollection(env, "users"),
     listStocks(env),
   ]);
-  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
 
   return users
     .map((u) => {
       const holdings = Object.entries(u.holdings || {})
-        .filter(([name, qty]) => qty > 0 && priceMap[name] !== undefined)
-        .map(([name, qty]) => ({ name, qty, price: priceMap[name], value: priceMap[name] * qty }))
+        .filter(([name, qty]) => qty > 0 && stockMap[name] !== undefined)
+        .map(([name, qty]) => {
+          const stock = stockMap[name];
+          return {
+            name,
+            qty,
+            price: stock.price,
+            value: stock.price * qty,
+            foreign: isForeign(stock),
+            icon: foreignIcon(stock),
+          };
+        })
         .sort((a, b) => compareKo(a.name, b.name));
       return {
         id: u.id,
@@ -6168,10 +6184,16 @@ export const handlers = {
     let shown = 0;
     for (const u of list) {
       const who = u.username || `<@${u.id}>`;
-      const stocksText = u.holdings
+      const domestic = u.holdings.filter((h) => !h.foreign);
+      const foreign = u.holdings.filter((h) => h.foreign);
+      const stocksText = domestic
         .map((h) => `${h.name}${dangerTag(h.price)} ${h.qty.toLocaleString()}주`)
         .join(", ");
-      const line = `• **${who}** — ${stocksText}`.slice(0, 500);
+      const foreignText = foreign
+        .map((h) => `${h.icon} ${h.name}${dangerTag(h.price)} ${h.qty.toLocaleString()}주`)
+        .join(", ");
+      const parts = [stocksText, foreignText].filter(Boolean);
+      const line = `• **${who}** — ${parts.join(" | ")}`.slice(0, 500);
       // 디스코드 메시지 한도(2000자) 보호
       if (text.length + line.length + 1 > 1900) {
         text += `\n…외 ${list.length - shown}명 생략`;
@@ -6198,12 +6220,17 @@ export const handlers = {
     const userId = interaction.member.user.id;
     const detail = await getUserDetail(env, userId);
 
-    const holdingsText = detail.holdings
-      .map(
-        (h) =>
-          `- ${h.name}${dangerTag(h.price)}: ${h.qty}주 (현재가 ${h.price.toLocaleString()} · 평균 매수가 ${h.avg.toLocaleString()} · 평가금 ${h.value.toLocaleString()}해정)\n  ${profitLabel(h.profit, h.cost)}`
-      )
-      .join("\n") || "(보유 종목 없음)";
+    const holdingLine = (h) =>
+      `- ${h.icon ? `${h.icon} ` : ""}${h.name}${dangerTag(h.price)}: ${h.qty}주 (현재가 ${h.price.toLocaleString()} · 평균 매수가 ${h.avg.toLocaleString()} · 평가금 ${h.value.toLocaleString()}해정)\n  ${profitLabel(h.profit, h.cost)}`;
+    const domesticHoldings = detail.holdings.filter((h) => !h.foreign);
+    const foreignHoldings = detail.holdings.filter((h) => h.foreign);
+    const holdingsText =
+      [
+        domesticHoldings.length ? domesticHoldings.map(holdingLine).join("\n") : "",
+        foreignHoldings.length ? `**🌐 외국자산**\n${foreignHoldings.map(holdingLine).join("\n")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n") || "(보유 종목 없음)";
 
     const rankText = detail.rank > 0 ? `${detail.rank}위 / ${detail.totalUsers}명` : "(순위 없음)";
 
@@ -6492,13 +6519,18 @@ export const handlers = {
       return "걸어둔 예약이 없어요. `/예약매수`, `/예약매도`로 가격을 정해 예약해 보세요.";
     }
     const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+    const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
+    const orderLine = (o) => {
+      const now = priceMap[o.stock];
+      const nowText = now === undefined ? "상장폐지" : `현재가 ${now.toLocaleString()}해정`;
+      return `\`${o.id}\` ${orderText(o)} · ${nowText}`;
+    };
+    const domesticOrders = orders.filter((o) => !isForeign(stockMap[o.stock]));
+    const foreignOrders = orders.filter((o) => isForeign(stockMap[o.stock]));
     return [
       `**⏰ 내 예약 (${orders.length}/${MAX_ORDERS_PER_USER}개)**`,
-      ...orders.map((o) => {
-        const now = priceMap[o.stock];
-        const nowText = now === undefined ? "상장폐지" : `현재가 ${now.toLocaleString()}해정`;
-        return `\`${o.id}\` ${orderText(o)} · ${nowText}`;
-      }),
+      ...domesticOrders.map(orderLine),
+      ...(foreignOrders.length ? ["", "**🌐 외국자산**", ...foreignOrders.map(orderLine)] : []),
     ].join("\n");
   },
 
@@ -6534,18 +6566,23 @@ export const handlers = {
     const list = futureList(items);
     if (list.length === 0) return "열어둔 선물이 없어요. `/선물`로 시작하거나 `/선물설명`을 읽어 보세요.";
     const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+    const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
+    const futureLine = (f) => {
+      const price = priceMap[f.stock];
+      if (price === undefined) return `\`${f.id}\` ${futureText(f)}\n  상장폐지`;
+      const equity = futureEquity(f, price);
+      return [
+        `\`${f.id}\` ${futureText(f)}`,
+        `  현재가 ${price.toLocaleString()}해정 · 평가금 ${equity.toLocaleString()}해정 · ${profitLabel(equity - f.margin, f.margin)}`,
+        `  💥 강제청산가 ${futureLiqPrice(f).toLocaleString()}해정 ${f.side === "long" ? "이하" : "이상"}`,
+      ].join("\n");
+    };
+    const domesticFutures = list.filter((f) => !isForeign(stockMap[f.stock]));
+    const foreignFutures = list.filter((f) => isForeign(stockMap[f.stock]));
     return [
       `**📊 내 선물 (${list.length}/${MAX_FUTURES_PER_USER}개)**`,
-      ...list.map((f) => {
-        const price = priceMap[f.stock];
-        if (price === undefined) return `\`${f.id}\` ${futureText(f)}\n  상장폐지`;
-        const equity = futureEquity(f, price);
-        return [
-          `\`${f.id}\` ${futureText(f)}`,
-          `  현재가 ${price.toLocaleString()}해정 · 평가금 ${equity.toLocaleString()}해정 · ${profitLabel(equity - f.margin, f.margin)}`,
-          `  💥 강제청산가 ${futureLiqPrice(f).toLocaleString()}해정 ${f.side === "long" ? "이하" : "이상"}`,
-        ].join("\n");
-      }),
+      ...domesticFutures.map(futureLine),
+      ...(foreignFutures.length ? ["", "**🌐 외국자산**", ...foreignFutures.map(futureLine)] : []),
     ].join("\n");
   },
 
