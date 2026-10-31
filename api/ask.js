@@ -5,7 +5,7 @@
 // 필요한 환경변수(Vercel): GEMINI_API_KEY
 // 선택: GEMINI_MODEL (기본 gemini-2.5-flash)
 //       ALLOWED_ORIGIN (가이드가 올라간 사이트 주소, 기본 https://fff376327yhed.github.io)
-//       GUIDE_URL (가이드 파일 전체 주소, 기본 ALLOWED_ORIGIN + /guide.html)
+//       GUIDE_URL (가이드 파일 전체 주소, 기본 ALLOWED_ORIGIN + /discord-stock-bot/guide.html)
 // 가이드(GitHub Pages)와 이 서버(Vercel)가 서로 다른 주소라서 CORS 허용이 필요해요.
 
 export const config = { maxDuration: 60 };
@@ -105,7 +105,7 @@ export default {
     try {
       // 가이드 주소: 환경변수 GUIDE_URL > 가이드 페이지가 알려준 자기 주소(허용된 사이트만) > 기본값
       const hint = typeof body?.guideUrl === "string" ? body.guideUrl : "";
-      const guideUrl = process.env.GUIDE_URL || (hint.startsWith(ORIGIN + "/") && hint.length < 300 ? hint : `${ORIGIN}/guide.html`);
+      const guideUrl = process.env.GUIDE_URL || (hint.startsWith(ORIGIN + "/") && hint.length < 300 ? hint : `${ORIGIN}/discord-stock-bot/guide.html`);
       guide = await loadGuide(guideUrl);
     } catch (err) {
       console.error("가이드 로드 실패:", err.message);
