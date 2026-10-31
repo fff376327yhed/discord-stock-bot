@@ -1,7 +1,7 @@
 // 통합 라이브러리: env / firebase / listing / economy / actionlog / attendance / mining / chart / crowd / notify / orders / commands
 // (예전 src/*.js 12개를 한 파일로 합쳤어요. 파일 안 순서는 의존 순서예요.)
 // 외국자산(코인·해외주식) 시세/가격 계산은 별도 파일(foreign.js)에 있어요. (이 파일을 가져오지 않는 독립 모듈)
-import { isForeign, fetchCoinQuotes, buildForeignUpdate, isSuspectQuote } from "./foreign.js";
+import { isForeign, foreignIcon, fetchCoinQuotes, fetchUsQuotes, usSymbolOf, buildForeignUpdate, isSuspectQuote } from "./foreign.js";
 
 // ============================================================
 // [env.js]
@@ -19,6 +19,7 @@ export function loadEnv() {
     ADMIN_PANEL_PASSWORD: process.env.ADMIN_PANEL_PASSWORD,
     ALLOWED_CHANNEL_ID: process.env.ALLOWED_CHANNEL_ID,
     COINGECKO_API_KEY: process.env.COINGECKO_API_KEY, // 선택: 코인 시세(CoinGecko) 무료 데모 키
+    FINNHUB_API_KEY: process.env.FINNHUB_API_KEY, // 미국 주식 시세(Finnhub) 무료 키 (미국 주식 종목이 있을 때만 필요)
   };
 }
 
@@ -1213,20 +1214,96 @@ export function getDelistedHistory(d) {
   ];
 }
 
+// ---------- 외국자산 표시 도우미 ----------
+// 종목 이름 앞에 외국자산 아이콘을 붙여요. (코인 ₿ / 해외주식 🌐, 일반 종목은 이름 그대로)
+// stock 자리에는 종목 문서도, 변동 내역(c)도 넣을 수 있어요. (kind 만 보고 판단해요)
+function iconName(stock) {
+  const icon = foreignIcon(stock);
+  return icon ? `${icon} ${stock.name}` : stock.name;
+}
+
+// 시세 지연 중인 외국자산이면 짧은 경고 표시
+function staleTag(stock) {
+  return isForeign(stock) && stock.stale === true ? " ⚠️시세지연" : "";
+}
+
+// 실제 가격(USD) 표시: 1달러 이상은 소수 2자리까지, 1달러 미만은 의미 있는 숫자 4자리까지
+function usdText(n) {
+  if (!Number.isFinite(n) || n <= 0) return "-";
+  if (n >= 1) return `$${n.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+  return `$${Number(n.toPrecision(4))}`;
+}
+
+// 시세 출처 이름
+const SOURCE_LABEL = { coingecko: "CoinGecko", finnhub: "Finnhub" };
+
+// "방금 / 3분 전 / 2시간 전 / 1일 전"
+function agoText(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "방금";
+  const min = Math.floor(ms / 60_000);
+  if (min < 1) return "방금";
+  if (min < 60) return `${min}분 전`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour}시간 전`;
+  return `${Math.floor(hour / 24)}일 전`;
+}
+
+// /종목정보에 들어갈 외국자산 전용 줄들 (배당 줄 자리를 대신해요. 외국자산은 배당이 없어요)
+function foreignInfoLines(stock, now = Date.now()) {
+  const mult = Number.isFinite(stock.mult) && stock.mult > 0 ? stock.mult : 3;
+  const start = Number.isFinite(stock.startPrice) && stock.startPrice > 0 ? stock.startPrice : 1000;
+  const source = SOURCE_LABEL[stock.source] || stock.source || "실제 시세";
+  const lines = [];
+
+  if (stock.lastReal > 0 && stock.baseReal > 0) {
+    const changePct = (stock.lastReal / stock.baseReal - 1) * 100;
+    const sign = changePct > 0 ? "+" : "";
+    const age = Number.isFinite(stock.quoteAt) ? ` · ${agoText(now - stock.quoteAt)} 갱신` : "";
+    lines.push(`🌐 실제 시세: **${stock.symbol} ${usdText(stock.lastReal)}** (${source}${age})`);
+    lines.push(`📐 상장 때 실제가 ${usdText(stock.baseReal)} 대비 **${sign}${changePct.toFixed(2)}%** → 해정 가격은 그 **${mult}배**로 움직여요. (상장가 ${start.toLocaleString()}해정 기준)`);
+  } else {
+    lines.push(`🌐 실제 시세: ${stock.symbol} (${source}) · 첫 시세를 기다리는 중이에요. 다음 시세 변동 때 기준이 정해져요. (배율 ×${mult})`);
+  }
+
+  if (stock.stale === true) {
+    const age = Number.isFinite(stock.quoteAt) ? ` (마지막 시세 ${agoText(now - stock.quoteAt)})` : "";
+    lines.push(`⚠️ 시세 지연: 최근 실제 시세를 못 받아서 가격이 그대로예요.${age}`);
+  }
+  lines.push(`💵 배당: 외국자산(코인·해외주식)은 배당이 없어요. · 🕒 실제 시세를 따라 15분마다 움직여요.${stock.kind === "us" ? " (미국 장이 닫혀 있는 동안은 마지막 가격 그대로예요)" : ""}`);
+  return lines;
+}
+
 // ---------- 외국자산(코인·해외주식) 시세 반영 ----------
 // 외국자산 종목들의 실제 시세를 한 번에 가져와요. 반환: { 심볼: { price, at, stale } }
 // 조회에 실패해도 예외를 던지지 않고 빈 값을 돌려줘요. (시세 변동 전체가 멈추지 않게)
+// 반환: { "crypto:BTC": {price, at, stale}, "us:AAPL": {...} } — 종류를 앞에 붙여서 코인 심볼과 미국 티커가 겹쳐도 섞이지 않아요.
+// 한쪽(코인/미국 주식) 조회가 실패해도 다른 쪽은 그대로 진행해요.
+function quoteKeyOf(stock) {
+  const symbol = stock.kind === "us" ? usSymbolOf(stock.symbol) : String(stock.symbol || "").trim();
+  return `${stock.kind}:${symbol}`;
+}
+
 async function loadForeignQuotes(env, stocks) {
-  const coins = [...new Set(stocks.filter((s) => s.kind === "crypto" && s.symbol).map((s) => String(s.symbol).trim()))];
-  if (coins.length === 0) return {};
-  try {
-    const { quotes, errors } = await fetchCoinQuotes(coins, env);
-    if (errors.length) console.error("외국자산 시세 조회 문제:", errors.join(" / "));
-    return quotes;
-  } catch (err) {
-    console.error("외국자산 시세 조회 실패:", err.message);
-    return {};
-  }
+  const pick = (kind) => [...new Set(stocks.filter((s) => s.kind === kind && s.symbol).map((s) => String(s.symbol).trim()))];
+  const jobs = [
+    { kind: "crypto", symbols: pick("crypto"), fetcher: fetchCoinQuotes, label: "코인" },
+    { kind: "us", symbols: pick("us"), fetcher: fetchUsQuotes, label: "미국 주식" },
+  ].filter((j) => j.symbols.length > 0);
+  if (jobs.length === 0) return {};
+
+  const all = {};
+  await Promise.all(
+    jobs.map(async (job) => {
+      try {
+        const { quotes, errors } = await job.fetcher(job.symbols, env);
+        if (errors.length) console.error(`외국자산(${job.label}) 시세 조회 문제:`, errors.join(" / "));
+        for (const [symbol, q] of Object.entries(quotes)) all[`${job.kind}:${symbol}`] = q;
+      } catch (err) {
+        console.error(`외국자산(${job.label}) 시세 조회 실패:`, err.message);
+      }
+    })
+  );
+  return all;
 }
 
 // 외국자산 한 종목을 실제 시세로 갱신해요. 반환: 일반 종목과 같은 모양의 변동 내역, 또는 null(이번엔 변동 없음/시세 못 받음)
@@ -1234,7 +1311,7 @@ async function loadForeignQuotes(env, stocks) {
 //  - 새 가격이 DELIST_PRICE 이하면 일반 종목처럼 상장폐지돼요.
 async function updateForeignStock(env, stock, quotes) {
   const path = `stocks/${encodeURIComponent(stock.name)}`;
-  let quote = quotes[String(stock.symbol || "").trim()];
+  let quote = quotes[quoteKeyOf(stock)];
 
   if (quote && isSuspectQuote(stock, quote)) {
     console.error(`외국자산 이상 시세 무시 (${stock.name}): 실제가 ${stock.lastReal} → ${quote.price}`);
@@ -1264,12 +1341,12 @@ async function updateForeignStock(env, stock, quotes) {
       history: stock.history,
       listedAt: stock.listedAt,
     });
-    return { name: stock.name, before, after, pct, delisted: true, holders };
+    return { name: stock.name, kind: stock.kind, before, after, pct, delisted: true, holders };
   }
 
   // 가격·시세 기록과 실제 시세 필드(baseReal 등)를 쓰기 한 번으로 저장
   await upsertStock(env, stock.name, after, stock, upd.fields);
-  return { name: stock.name, before, after, pct, delisted: false, holders: [] };
+  return { name: stock.name, kind: stock.kind, before, after, pct, delisted: false, holders: [] };
 }
 
 // ---------- 시세 변동 ----------
@@ -2463,12 +2540,12 @@ function formatLines(list) {
   return list
     .map((c) => {
       if (c.delisted) {
-        return `• 🚫 **${c.name}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 · ${dropText(c)} 하락, 보유 주식 소멸)`;
+        return `• 🚫 **${iconName(c)}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 · ${dropText(c)} 하락, 보유 주식 소멸)`;
       }
       const pct = ((c.after - c.before) / c.before) * 100;
       const sign = pct > 0 ? "+" : "";
       const mark = c.after > c.before ? UP_MARK : c.after < c.before ? DOWN_MARK : "➖";
-      return `• ${mark} **${c.name}**${dangerTag(c.after)}: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${sign}${pct.toFixed(1)}%)`;
+      return `• ${mark} **${iconName(c)}**${dangerTag(c.after)}: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${sign}${pct.toFixed(1)}%)`;
     })
     .join("\n");
 }
@@ -2502,14 +2579,14 @@ export function isWithinNotifyWindow(setting, hour = currentHourKST()) {
 // 폐지 위기 종목은 "(±%)" 뒤에 ⚠️ 표시
 function announceLine(c) {
   if (c.delisted) {
-    return `🚫 **${c.name}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 · ${dropText(c)} 하락)`;
+    return `🚫 **${iconName(c)}**: 상장폐지 (${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 · ${dropText(c)} 하락)`;
   }
   if (c.after === c.before) {
-    return `➖ **${c.name}**: ${c.after.toLocaleString()}해정 (변동 없음)${dangerTag(c.after)}`;
+    return `➖ **${iconName(c)}**: ${c.after.toLocaleString()}해정 (변동 없음)${dangerTag(c.after)}`;
   }
   const up = c.after > c.before;
   const pct = ((c.after - c.before) / c.before) * 100;
-  return `${up ? UP_MARK : DOWN_MARK} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)${dangerTag(c.after)}`;
+  return `${up ? UP_MARK : DOWN_MARK} **${iconName(c)}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)${dangerTag(c.after)}`;
 }
 
 // 시세가 변동될 때마다 주식채널(ALLOWED_CHANNEL_ID)에 변동 내역을 공지합니다.
@@ -5352,7 +5429,7 @@ export async function autocomplete(interaction, env) {
       const w = userId ? await getWatch(env, userId) : { stocks: {}, alerts: {} };
       const items = stocks
         .filter((s) => w.stocks[s.name])
-        .map((s) => ({ label: `${s.name} (${s.price.toLocaleString()}해정)`, value: s.name }));
+        .map((s) => ({ label: `${iconName(s)} (${s.price.toLocaleString()}해정)${staleTag(s)}`, value: s.name }));
       if (items.length > 1) items.push({ label: "전체 삭제", value: "all" });
       return textChoices(items, keyword);
     }
@@ -5366,7 +5443,7 @@ export async function autocomplete(interaction, env) {
             const qty = user.holdings[s.name];
             const cost = costOf(user, s.name, s.price);
             return {
-              label: `${s.name}${dangerTag(s.price, true)} (보유 ${qty}주 · ${s.price.toLocaleString()}해정 · ${profitLabel(s.price * qty - cost, cost, true)})`,
+              label: `${iconName(s)}${dangerTag(s.price, true)} (보유 ${qty}주 · ${s.price.toLocaleString()}해정 · ${profitLabel(s.price * qty - cost, cost, true)})${staleTag(s)}`,
               value: s.name,
             };
           }),
@@ -5407,7 +5484,7 @@ export async function autocomplete(interaction, env) {
       // 매수는 지금 잔고로 최대 몇 주까지 살 수 있는지 함께 표시
       return textChoices(
         stocks.map((s) => ({
-          label: `${s.name}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정 · 최대 ${maxBuyQty(user.balance, s.price).toLocaleString()}주)`,
+          label: `${iconName(s)}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정 · 최대 ${maxBuyQty(user.balance, s.price).toLocaleString()}주)${staleTag(s)}`,
           value: s.name,
         })),
         keyword
@@ -5415,7 +5492,7 @@ export async function autocomplete(interaction, env) {
     }
 
     return textChoices(
-      pickable(stocks.map((s) => ({ label: `${s.name}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정)`, value: s.name }))),
+      pickable(stocks.map((s) => ({ label: `${iconName(s)}${dangerTag(s.price, true)} (${s.price.toLocaleString()}해정)${staleTag(s)}`, value: s.name }))),
       keyword
     );
   }
@@ -5731,12 +5808,12 @@ function stockInfoText(stock, held = 0, divMod = 1, now = Date.now()) {
   }
 
   return [
-    `**🏷️ ${stock.name} 종목정보**`,
+    `**🏷️ ${iconName(stock)} 종목정보**`,
     `${mark(dayPct)} 현재가 **${stock.price.toLocaleString()}해정**${dangerTag(stock.price) ? `${dangerTag(stock.price)} 상장폐지 위기` : ""} · 오늘 ${sgn(dayPct)}% (0시 ${open.toLocaleString()}해정)`,
     `🗓️ 상장일: ${listedText(stock.listedAt)} (한국시간)${days ? ` · 상장 ${days.toLocaleString()}일째` : ""}`,
     `🏆 역대 최고가: **${maxPrice.toLocaleString()}해정** (지금은 최고가의 ${ofMax.toFixed(1)}%)`,
     `📏 오늘 변동폭: 최고 ${hi.toLocaleString()} ~ 최저 ${lo.toLocaleString()}해정 (**${rangePct.toFixed(1)}%**)`,
-    divLine,
+    ...(isForeign(stock) ? foreignInfoLines(stock, now) : [divLine]),
   ].join("\n");
 }
 
@@ -5931,7 +6008,7 @@ export const handlers = {
           pct === 0
             ? "➖ 0.0%"
             : `${pct > 0 ? UP_MARK : DOWN_MARK} ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
-        return `${mark}**${s.name}**${dangerTag(s.price)} — ${s.price.toLocaleString()}해정 (${change})`;
+        return `${mark}**${iconName(s)}**${dangerTag(s.price)} — ${s.price.toLocaleString()}해정 (${change})${staleTag(s)}`;
       }),
     ].join("\n");
   },
@@ -6154,7 +6231,7 @@ export const handlers = {
       const open = pts.length ? priceAtTime(pts, dayStart) : s.price;
       const pct = open > 0 ? ((s.price - open) / open) * 100 : 0;
       const mark = pct > 0 ? UP_MARK : pct < 0 ? DOWN_MARK : "➖";
-      lines.push(`- **${n}**${dangerTag(s.price)} ${s.price.toLocaleString()}해정 ${mark} 오늘 ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`);
+      lines.push(`- **${iconName(s)}**${dangerTag(s.price)} ${s.price.toLocaleString()}해정 ${mark} 오늘 ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%${staleTag(s)}`);
     }
     if (alerts.length) {
       lines.push("", `**🔔 가격 알림 (${alerts.length}/${MAX_PRICE_ALERTS}개)**`);

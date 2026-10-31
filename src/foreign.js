@@ -12,9 +12,9 @@
 //   - 가격이 DELIST_PRICE 이하가 되면 일반 종목처럼 상장폐지돼요. (그 판단은 lib.js 에서)
 //
 // 외국자산 종목 문서에 추가되는 필드:
-//   kind      "crypto" | "us"      종류
+//   kind      "crypto" | "us"      종류 (코인 / 미국 주식)
 //   symbol    "BTC" 등             심볼 (코인은 CoinGecko 아이디를 직접 써도 돼요. 예: "bitcoin")
-//   source    "coingecko" 등       시세 출처
+//   source    "coingecko" | "finnhub"  시세 출처
 //   mult      3                    배율
 //   startPrice 1000                상장가 (안 적으면 1000)
 //   baseReal  실제 가격(USD)        기준 실제가 (첫 시세로 자동 기록)
@@ -31,6 +31,8 @@ export const SUSPECT_WINDOW_MS = 6 * 60 * 60 * 1000; // 마지막 시세가 이 
 const FETCH_TIMEOUT_MS = 8000;
 const CACHE_TTL_MS = 60 * 1000; // 같은 조회를 1분 안에 또 하면 API를 다시 부르지 않아요
 const COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price";
+const FINNHUB_URL = "https://finnhub.io/api/v1/quote";
+export const US_MAX_SYMBOLS = 30; // 한 번의 변동에서 조회할 미국 주식 최대 종목 수 (Finnhub 무료 한도: 분당 60번, 종목당 1번)
 
 // 심볼 -> CoinGecko 코인 아이디 (목록에 없는 코인은 CoinGecko 아이디를 심볼 칸에 그대로 적으면 돼요)
 export const COIN_IDS = {
@@ -75,6 +77,24 @@ export function coinIdOf(symbol) {
   if (COIN_IDS[upper]) return COIN_IDS[upper];
   // 목록에 없으면 CoinGecko 아이디(소문자·숫자·하이픈)를 직접 쓴 것으로 봐요
   return /^[a-z0-9][a-z0-9-]{1,63}$/.test(raw) ? raw : null;
+}
+
+// 미국 주식 심볼(티커) 검사: 영문 대문자로 시작, 숫자·점·하이픈 허용 (예: AAPL, TSLA, BRK.B). 올바르면 대문자로 돌려주고, 아니면 null
+export function usSymbolOf(symbol) {
+  const upper = String(symbol || "").trim().toUpperCase();
+  return /^[A-Z][A-Z0-9.\-]{0,9}$/.test(upper) ? upper : null;
+}
+
+// 종류에 맞는 심볼 검사: 코인이면 CoinGecko 아이디, 미국 주식이면 티커. 올바르지 않으면 null
+export function symbolOfKind(kind, symbol) {
+  if (kind === "crypto") return coinIdOf(symbol);
+  if (kind === "us") return usSymbolOf(symbol);
+  return null;
+}
+
+// 종류별 기본 시세 출처
+export function defaultSourceOf(kind) {
+  return kind === "us" ? "finnhub" : "coingecko";
 }
 
 // ---------- 시세 조회 (코인: CoinGecko) ----------
@@ -135,6 +155,63 @@ export async function fetchCoinQuotes(symbols, env = {}, now = Date.now()) {
 
   // 성공한 결과가 있을 때만 캐시 (전부 실패한 결과는 캐시하지 않고 다음에 바로 다시 시도)
   if (Object.keys(quotes).length > 0) quoteCache = { key, at: now, result: { quotes, errors: fetchErrors } };
+  return { quotes, errors: [...errors, ...fetchErrors] };
+}
+
+// ---------- 시세 조회 (미국 주식: Finnhub) ----------
+// symbols: ["AAPL", "TSLA", ...]   (Finnhub 무료 키가 필요해요: env.FINNHUB_API_KEY)
+// 반환: { quotes: { AAPL: { price(USD), at(밀리초), stale } }, errors: [문장...] }
+// 절대 예외를 던지지 않아요. (실패하면 quotes 에서 빠지고 errors 에 이유가 남아요 → 호출한 쪽은 직전 가격을 유지)
+// - 주의: API 키는 주소에 들어가므로 오류 문장에는 주소를 넣지 않아요.
+// - 장이 닫혀 있으면 Finnhub 는 마지막 거래가를 그대로 줘요. 시세 조회 자체가 성공했으면 "지연(stale)"이 아니에요.
+//   (장이 닫힌 동안 가격이 안 움직이는 건 정상이라서요. 장 시간 처리는 3단계-2에서 다뤄요.)
+let usCache = { key: "", at: 0, result: null };
+
+export function clearUsQuoteCache() {
+  usCache = { key: "", at: 0, result: null };
+}
+
+export async function fetchUsQuotes(symbols, env = {}, now = Date.now()) {
+  const list = [...new Set((symbols || []).map((s) => usSymbolOf(s)).filter(Boolean))];
+  if (list.length === 0) return { quotes: {}, errors: [] };
+  if (!env.FINNHUB_API_KEY) return { quotes: {}, errors: ["FINNHUB_API_KEY 환경변수가 없어요"] };
+
+  const errors = [];
+  let targets = list;
+  if (list.length > US_MAX_SYMBOLS) {
+    targets = list.slice(0, US_MAX_SYMBOLS);
+    errors.push(`미국 주식은 한 번에 ${US_MAX_SYMBOLS}종목까지만 조회해요 (${list.length - US_MAX_SYMBOLS}종목 건너뜀)`);
+  }
+
+  const key = [...targets].sort().join(",");
+  if (usCache.result && usCache.key === key && now - usCache.at < CACHE_TTL_MS) {
+    return { quotes: { ...usCache.result.quotes }, errors: [...errors, ...usCache.result.errors] };
+  }
+
+  const quotes = {};
+  const fetchErrors = [];
+  await Promise.all(
+    targets.map(async (symbol) => {
+      try {
+        const url = `${FINNHUB_URL}?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(env.FINNHUB_API_KEY)}`;
+        const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+        if (!res.ok) throw new Error(`Finnhub 조회 실패 (${res.status})`);
+        const data = await res.json();
+        const price = Number(data?.c);
+        if (!Number.isFinite(price) || price <= 0) {
+          fetchErrors.push(`${symbol}: 시세 없음 (없는 티커이거나 무료로 볼 수 없는 종목)`);
+          return;
+        }
+        const traded = Number(data?.t); // 마지막 거래 시각(초). 없으면 0
+        const at = Number.isFinite(traded) && traded > 0 ? traded * 1000 : now;
+        quotes[symbol] = { price, at, stale: false };
+      } catch (err) {
+        fetchErrors.push(`${symbol}: ${err?.name === "TimeoutError" ? "Finnhub 응답 시간 초과" : err?.message || "Finnhub 조회 실패"}`);
+      }
+    })
+  );
+
+  if (Object.keys(quotes).length > 0) usCache = { key, at: now, result: { quotes, errors: fetchErrors } };
   return { quotes, errors: [...errors, ...fetchErrors] };
 }
 

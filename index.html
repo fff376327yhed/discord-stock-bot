@@ -103,6 +103,29 @@
 </details>
 
 <details>
+  <summary>외국자산(코인·미국 주식) 추가 / 심볼·배율·상장가 수정</summary>
+  <div class="section">
+    <p class="hint">실제 시세를 따라 움직이는 종목이에요. 가격 = 상장가 × (1 + (실제가 변화율) × 배율). 랜덤 변동·급등락은 없어요.<br>
+      코인은 심볼을 BTC, ETH, SOL처럼 적어요. 목록에 없는 코인은 CoinGecko 아이디(예: pepe)를 그대로 적어요.<br>
+      미국 주식은 종류를 "미국 주식"으로 고르고 티커를 적어요. (예: AAPL, TSLA, BRK.B) 시세는 Finnhub에서 받아서, Vercel에 FINNHUB_API_KEY가 있어야 해요.<br>
+      이미 있는 외국자산은 아래 종목 목록의 [수정]을 누르면 여기에 채워져요. 심볼·상장가를 바꾸면 가격이 새 상장가로 되돌아가고, 배율만 바꾸면 다음 변동 때 새 배율로 계산돼요.</p>
+    <div class="form-row">
+      <select id="fgKind">
+        <option value="crypto">코인</option>
+        <option value="us">미국 주식</option>
+      </select>
+      <input id="fgName" placeholder="종목 이름 (예: 비트코인)">
+      <input id="fgSymbol" placeholder="심볼/티커 (예: BTC, AAPL)" style="width:170px;">
+      <input id="fgMult" type="number" min="0.1" max="20" step="0.1" placeholder="배율 (기본 3)">
+      <input id="fgStart" type="number" min="101" placeholder="상장가 (기본 1000)">
+      <button onclick="saveForeign()">저장</button>
+      <button class="ghost" onclick="clearForeignForm()">입력 초기화</button>
+    </div>
+    <p class="hint">삭제는 위 종목 목록의 [삭제]를 쓰세요. (일반 종목과 같아요)</p>
+  </div>
+</details>
+
+<details>
   <summary>상품 생성 / 가격·이름·설명 수정</summary>
   <div class="section">
     <div class="form-row">
@@ -447,15 +470,25 @@ async function reload(silent) {
 
 // ----- 종목 -----
 function renderStocks(stocks) {
-  $("stockTable").innerHTML = stocks.map((s) => `
+  $("stockTable").innerHTML = stocks.map((s) => {
+    const foreign = s.kind === "crypto" || s.kind === "us";
+    const icon = s.kind === "crypto" ? "₿ " : s.kind === "us" ? "🌐 " : "";
+    const tag = foreign
+      ? ` <span class="tag">${esc(s.symbol)} ×${Number(s.mult ?? 3)}${s.stale ? " · 시세 지연" : ""}</span>`
+      : "";
+    const edit = foreign
+      ? `editForeign(${JSON.stringify(s.name)}, ${JSON.stringify(s.kind)}, ${JSON.stringify(s.symbol || "")}, ${Number(s.mult ?? 3)}, ${Number(s.startPrice ?? 1000)})`
+      : `editStock(${JSON.stringify(s.name)}, ${Number(s.price)})`;
+    return `
     <tr>
-      <td>${esc(s.name)}</td>
+      <td>${icon}${esc(s.name)}${tag}</td>
       <td class="num">${Number(s.price).toLocaleString()}</td>
       <td><div class="actions">
-        <button class="ghost" onclick='editStock(${JSON.stringify(s.name)}, ${Number(s.price)})'>수정</button>
+        <button class="ghost" onclick='${edit}'>수정</button>
         <button class="danger" onclick='removeStock(${JSON.stringify(s.name)})'>삭제</button>
       </div></td>
-    </tr>`).join("") || `<tr><td colspan="3" class="muted">등록된 종목이 없습니다.</td></tr>`;
+    </tr>`;
+  }).join("") || `<tr><td colspan="3" class="muted">등록된 종목이 없습니다.</td></tr>`;
 }
 
 function editStock(name, price) {
@@ -481,6 +514,50 @@ function saveStock() {
   }
   return act(() => call("upsertStock", { name: to, price }), `"${to}" 저장 완료`)
     .then(clearStockForm);
+}
+
+// ----- 외국자산(코인) -----
+function editForeign(name, kind, symbol, mult, startPrice) {
+  $("fgKind").value = kind === "us" ? "us" : "crypto";
+  $("fgName").value = name;
+  $("fgName").readOnly = true; // 이름은 바꾸지 않아요 (이름 변경은 일반 종목 [수정]과 달리 여기서는 지원하지 않아요)
+  $("fgSymbol").value = symbol;
+  $("fgMult").value = mult;
+  $("fgStart").value = startPrice;
+  const box = $("fgName").closest("details");
+  if (box) box.open = true;
+  box?.scrollIntoView({ behavior: "smooth", block: "center" });
+  log(`"${name}" 수정 모드입니다. 종류·심볼·배율·상장가를 고친 뒤 저장을 누르세요. (종류·심볼·상장가를 바꾸면 가격이 새 상장가로 되돌아가요)`);
+}
+
+function clearForeignForm() {
+  $("fgName").readOnly = false;
+  $("fgKind").value = "crypto";
+  ["fgName", "fgSymbol", "fgMult", "fgStart"].forEach((id) => { $(id).value = ""; });
+}
+
+async function saveForeign() {
+  const name = $("fgName").value.trim();
+  const body = {
+    name,
+    kind: $("fgKind").value,
+    symbol: $("fgSymbol").value.trim(),
+    mult: $("fgMult").value === "" ? undefined : Number($("fgMult").value),
+    startPrice: $("fgStart").value === "" ? undefined : Number($("fgStart").value),
+  };
+  try {
+    const r = await call("upsertForeign", body);
+    const msg = r.created
+      ? `"${name}" 외국자산을 만들었어요. 다음 15분 변동 때 실제 시세가 들어와요.`
+      : r.rebased
+        ? `"${name}" 저장 완료. 상장가로 되돌리고 기준 시세를 다시 잡아요.`
+        : `"${name}" 저장 완료. 배율은 다음 변동 때 적용돼요.`;
+    log(r.warning ? `${msg}\n⚠️ ${r.warning}` : msg);
+    clearForeignForm();
+    await reload(true);
+  } catch (e) {
+    log("오류: " + e.message);
+  }
 }
 
 function removeStock(name) {

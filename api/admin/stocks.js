@@ -9,7 +9,7 @@ import {
   getAnnounceConfig, setAnnounceConfig,
   getListingConfig, setListingConfig, parseNames, ensureMinimumStocks, LISTING_PRICE,
 } from "../../src/lib.js";
-import { isForeign } from "../../src/Foreign.js";
+import { isForeign, FOREIGN_KINDS, FOREIGN_START_PRICE, DEFAULT_MULT, symbolOfKind, defaultSourceOf } from "../../src/foreign.js";
 
 // 외국자산(코인·해외주식) 종목 문서에만 있는 필드들 (이름을 바꿀 때 새 문서로 그대로 옮겨요)
 const FOREIGN_FIELDS = ["kind", "symbol", "source", "mult", "startPrice", "baseReal", "lastReal", "quoteAt", "stale"];
@@ -22,7 +22,7 @@ const CORS = {
 
 // 관리자 콘솔에서 한 작업(데이터를 바꾸는 것만)을 활동 로그에 남겨요.
 const ADMIN_LABELS = {
-  upsertStock: "종목 저장", removeStock: "종목 삭제", renameStock: "종목 이름 변경", resetStocks: "종목 가격 초기화",
+  upsertStock: "종목 저장", upsertForeign: "외국자산 저장", removeStock: "종목 삭제", renameStock: "종목 이름 변경", resetStocks: "종목 가격 초기화",
   upsertProduct: "상품 저장", removeProduct: "상품 삭제", renameProduct: "상품 이름 변경",
   setBalance: "유저 잔고 수정", setUserItem: "유저 보유 상품 수정",
   resetBalances: "잔고 초기화", resetBots: "봇 초기화", resetItems: "보유 상품 초기화",
@@ -180,6 +180,60 @@ async function handle(request) {
         }
         await upsertStock(env, name, price);
         return json({ ok: true });
+      }
+
+      // 외국자산(코인 / 미국 주식) 추가 · 심볼·배율·상장가 수정
+      // - kind: "crypto"(코인, 기본) 또는 "us"(미국 주식). 출처는 종류에 따라 자동으로 정해져요. (코인 CoinGecko / 미국 주식 Finnhub)
+      // - 새로 만들면: 가격 = 상장가(startPrice)로 시작하고, 첫 시세를 기준 실제가로 삼아요. (기준은 다음 15분 변동 때 자동 기록)
+      // - 이미 있는 외국자산에서 종류·심볼·상장가를 바꾸면: 가격을 새 상장가로 되돌리고 기준 실제가를 다시 잡아요.
+      // - 배율만 바꾸면: 기준은 그대로라서 다음 변동 때 새 배율로 계산한 가격으로 바뀌어요. (가격이 한 번 튈 수 있어요)
+      // - 일반 종목(외국자산이 아닌 종목) 이름으로는 만들 수 없어요. (일반 종목이 바뀌는 사고 방지)
+      case "upsertForeign": {
+        const name = String(body.name || "").trim();
+        const kind = body.kind === undefined || body.kind === "" ? "crypto" : String(body.kind);
+        const rawSymbol = String(body.symbol || "").trim();
+        const mult = body.mult === undefined || body.mult === "" ? DEFAULT_MULT : Number(body.mult);
+        const startPrice = body.startPrice === undefined || body.startPrice === "" ? FOREIGN_START_PRICE : Number(body.startPrice);
+        if (!name) return json({ error: "종목 이름을 입력하세요." }, 400);
+        if (!FOREIGN_KINDS.includes(kind)) return json({ error: "종류는 crypto(코인) 또는 us(미국 주식)여야 합니다." }, 400);
+        // 코인은 입력한 그대로, 미국 주식 티커는 대문자로 저장해요
+        const checked = symbolOfKind(kind, rawSymbol);
+        if (!checked) {
+          return json({
+            error: kind === "us"
+              ? "티커를 확인하세요. (영문 대문자로 시작하는 미국 주식 티커. 예: AAPL, TSLA, BRK.B)"
+              : "심볼을 확인하세요. (예: BTC, ETH, SOL. 목록에 없는 코인은 CoinGecko 아이디를 그대로 적어요. 예: pepe)",
+          }, 400);
+        }
+        const symbol = kind === "us" ? checked : rawSymbol;
+        if (!Number.isFinite(mult) || mult <= 0 || mult > 20) {
+          return json({ error: "배율은 0보다 크고 20 이하인 숫자여야 합니다. (1이면 실제와 똑같이, 3이면 3배로 움직여요)" }, 400);
+        }
+        if (!Number.isInteger(startPrice) || startPrice <= DELIST_PRICE) {
+          return json({ error: `상장가는 ${DELIST_PRICE + 1} 이상의 정수여야 합니다. (${DELIST_PRICE}해정 이하는 바로 상장폐지돼요)` }, 400);
+        }
+
+        const old = await getStock(env, name);
+        if (old && !isForeign(old)) {
+          return json({ error: `"${name}"은(는) 이미 있는 일반 종목이라 외국자산으로 바꿀 수 없어요. 다른 이름을 쓰거나 일반 종목을 먼저 삭제하세요.` }, 400);
+        }
+
+        const sameBase = old && old.kind === kind && String(old.symbol).toUpperCase() === symbol.toUpperCase() && old.startPrice === startPrice;
+        const extra = { kind, symbol, source: defaultSourceOf(kind), mult, startPrice };
+        if (!old) {
+          await upsertStock(env, name, startPrice, undefined, extra);
+        } else if (sameBase) {
+          // 배율만 바뀐 경우: 가격·기준은 그대로 둬요
+          await upsertStock(env, name, old.price, old, extra);
+        } else {
+          // 종류·심볼·상장가가 바뀐 경우: 새 상장가에서 다시 시작
+          await upsertStock(env, name, startPrice, old, { ...extra, baseReal: null, lastReal: null, quoteAt: null, stale: false });
+        }
+        // 미국 주식인데 시세 키가 없으면 알려줘요 (저장은 됐지만 시세를 못 받아요)
+        const warning = kind === "us" && !env.FINNHUB_API_KEY
+          ? "저장은 됐지만 Vercel에 FINNHUB_API_KEY 환경변수가 없어서 아직 시세를 못 받아요."
+          : undefined;
+        return json({ ok: true, created: !old, rebased: !!old && !sameBase, warning });
       }
 
       case "removeStock": {
