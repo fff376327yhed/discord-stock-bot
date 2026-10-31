@@ -7002,6 +7002,7 @@ function bankHelpText(rate) {
 
 const askCooldown = new Map(); // 유저ID -> 마지막 질문 시각 (서버 인스턴스 기준의 간단한 제한)
 const ASK_COOLDOWN_MS = 10_000;
+const ASK_DAILY_LIMIT = 5; // 유저 한 명이 하루(한국 시간 자정 기준)에 /주식질문을 쓸 수 있는 횟수. 여기 숫자만 바꾸면 돼요. (관리자는 제한 없음)
 
 export const handlers = {
   // 도움말은 글자가 2000자를 넘어서 일반 메시지로는 못 보내요. 임베드(4096자까지)로 보내요.
@@ -7640,9 +7641,24 @@ export const handlers = {
     if (askCooldown.size > 2000) askCooldown.clear();
     const question = String(opt(interaction, "질문") ?? "").trim();
     if (!question) return "질문을 입력해 주세요.";
+
+    // 하루 질문 횟수: askQuota/{유저ID} 문서에 { day, n } 으로 저장해요. (날짜가 바뀌면 자동으로 0부터)
+    const unlimited = isAdmin(interaction, env);
+    const day = todayKST();
+    const path = `askQuota/${userId}`;
+    let used = 0;
+    if (!unlimited) {
+      const saved = await getDoc(env, path);
+      used = saved?.day === day ? Number(saved.n) || 0 : 0;
+      if (used >= ASK_DAILY_LIMIT) return `오늘 질문 횟수(${ASK_DAILY_LIMIT}번)를 다 썼어요. 내일 0시(한국 시간)에 다시 물어볼 수 있어요.`;
+      await setDoc(env, path, { day, n: used + 1 }); // 먼저 차감해서 연타로 한도를 넘기지 못하게 해요
+    }
     try {
-      return (await askGuide(question)).slice(0, 1900);
+      const answer = (await askGuide(question)).slice(0, 1800);
+      return unlimited ? answer : `${answer}\n-# 오늘 남은 질문 ${ASK_DAILY_LIMIT - used - 1}/${ASK_DAILY_LIMIT}번`;
     } catch (err) {
+      // AI 쪽 오류면 차감한 횟수를 돌려줘요
+      if (!unlimited) await setDoc(env, path, { day, n: used }).catch(() => {});
       return err.message; // askGuide가 사용자에게 보여줄 문장으로 던져요
     }
   },
