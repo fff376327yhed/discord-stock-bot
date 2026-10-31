@@ -26,7 +26,7 @@ const CORS = {
 };
 
 const hits = new Map();
-let guideCache = { text: "", at: 0 };
+let guideCache = { text: "", at: 0, url: "" };
 
 function json(body, status = 200) {
   return Response.json(body, { status, headers: { "Cache-Control": "no-store", ...CORS } });
@@ -57,12 +57,11 @@ function htmlToText(html) {
     .trim();
 }
 
-async function loadGuide(request) {
-  if (guideCache.text && Date.now() - guideCache.at < GUIDE_TTL_MS) return guideCache.text;
-  const url = process.env.GUIDE_URL || `${ORIGIN}/guide.html`;
+async function loadGuide(url) {
+  if (guideCache.text && guideCache.url === url && Date.now() - guideCache.at < GUIDE_TTL_MS) return guideCache.text;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`가이드를 읽지 못했어요(${res.status})`);
-  guideCache = { text: htmlToText(await res.text()), at: Date.now() };
+  if (!res.ok) throw new Error(`가이드를 읽지 못했어요(${res.status}): ${url}`);
+  guideCache = { text: htmlToText(await res.text()), at: Date.now(), url };
   return guideCache.text;
 }
 
@@ -104,7 +103,10 @@ export default {
     // ---- 가이드 불러오기 ----
     let guide;
     try {
-      guide = await loadGuide(request);
+      // 가이드 주소: 환경변수 GUIDE_URL > 가이드 페이지가 알려준 자기 주소(허용된 사이트만) > 기본값
+      const hint = typeof body?.guideUrl === "string" ? body.guideUrl : "";
+      const guideUrl = process.env.GUIDE_URL || (hint.startsWith(ORIGIN + "/") && hint.length < 300 ? hint : `${ORIGIN}/guide.html`);
+      guide = await loadGuide(guideUrl);
     } catch (err) {
       console.error("가이드 로드 실패:", err.message);
       return json({ error: "가이드 내용을 불러오지 못했어요. 잠시 뒤 다시 시도해 주세요." }, 502);

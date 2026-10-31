@@ -801,7 +801,7 @@ async function send(q){
  var el=add('a','');el.classList.add('wait');var acc='';
  try{
   if(API_URL.indexOf('여기에')>=0)throw new Error('봇 서버 주소가 아직 설정되지 않았어요. (관리자: guide.html의 API_URL을 바꿔주세요)');
-  var res=await fetch(API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:hist.slice(-11)})});
+  var res=await fetch(API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:hist.slice(-11),guideUrl:location.origin+location.pathname})});
   if(!res.ok){var j={};try{j=await res.json()}catch(e){}throw new Error(j.error||('서버 오류('+res.status+')'))}
   var rd=res.body.getReader(),dec=new TextDecoder();
   for(;;){var r=await rd.read();if(r.done)break;acc+=dec.decode(r.value,{stream:true});el.classList.remove('wait');fill(el,acc);msgs.scrollTop=msgs.scrollHeight}
