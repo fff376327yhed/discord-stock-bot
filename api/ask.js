@@ -3,14 +3,14 @@
 // - 답변은 글자가 만들어지는 대로 바로 흘려보내요(스트리밍). 응답은 순수 텍스트예요.
 // AI: Google Gemini API (무료 키: https://aistudio.google.com 에서 발급)
 // 필요한 환경변수(Vercel): GEMINI_API_KEY
-// 선택: GEMINI_MODEL (기본 gemini-2.5-flash)
+// 선택: GEMINI_MODEL (기본 gemini-3.8-flash)
 //       ALLOWED_ORIGIN (가이드가 올라간 사이트 주소, 기본 https://fff376327yhed.github.io)
 //       GUIDE_URL (가이드 파일 전체 주소, 기본 ALLOWED_ORIGIN + /discord-stock-bot/guide.html)
 // 가이드(GitHub Pages)와 이 서버(Vercel)가 서로 다른 주소라서 CORS 허용이 필요해요.
 
 export const config = { maxDuration: 60 };
 
-const MODEL_DEFAULT = "gemini-2.5-flash";
+const MODEL_DEFAULT = "gemini-3.8-flash";
 const MAX_OUTPUT_TOKENS = 8192; // 긴 설명도 안 잘리게 넉넉하게 (모델 내부 생각 토큰도 여기서 나가요)
 const MAX_TURNS = 12; // 대화 기억: 최근 12개 메시지
 const MAX_CHARS = 600; // 질문 한 번의 최대 글자 수
