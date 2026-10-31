@@ -2051,8 +2051,19 @@ export async function renderStockChart(points, up) {
     });
     if (res.ok) {
       const data = await res.json();
-      if (data.success && data.url) return data.url;
-      console.error("QuickChart 짧은 주소 응답 이상:", JSON.stringify(data).slice(0, 200));
+      if (data.success && data.url) {
+        // 받은 주소가 진짜 이미지를 주는지 확인해요. 아니면 긴 주소 방식으로 넘어가요.
+        try {
+          const check = await fetch(data.url, { method: "HEAD", signal: AbortSignal.timeout(3000) });
+          const type = check.headers.get("content-type") || "";
+          if (check.ok && type.startsWith("image/")) return data.url;
+          console.error(`QuickChart 이미지 주소 이상(${check.status}, ${type}):`, data.url);
+        } catch (err) {
+          console.error("QuickChart 이미지 주소 확인 실패:", err.message, data.url);
+        }
+      } else {
+        console.error("QuickChart 짧은 주소 응답 이상:", JSON.stringify(data).slice(0, 200));
+      }
     } else {
       console.error(`QuickChart 짧은 주소 발급 실패(${res.status}):`, (await res.text().catch(() => "")).slice(0, 200));
     }
