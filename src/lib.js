@@ -7002,7 +7002,90 @@ function bankHelpText(rate) {
 
 const askCooldown = new Map(); // 유저ID -> 마지막 질문 시각 (서버 인스턴스 기준의 간단한 제한)
 const ASK_COOLDOWN_MS = 10_000;
-const ASK_DAILY_LIMIT = 15; // 유저 한 명이 하루(한국 시간 자정 기준)에 /주식질문을 쓸 수 있는 횟수. 여기 숫자만 바꾸면 돼요. (관리자는 제한 없음)
+const ASK_DAILY_LIMIT = 5; // 유저 한 명이 하루(한국 시간 자정 기준)에 /주식질문을 쓸 수 있는 횟수. 여기 숫자만 바꾸면 돼요. (관리자는 제한 없음)
+
+// ---------- /주식질문용: 질문한 사람의 "지금" 게임 상황 ----------
+// 읽기만 해요. (getUserDetail은 "지난 조회 대비" 기록을 덮어써서 /내정보에 영향을 주니까 쓰지 않아요.)
+// 내 상황이나 시세를 묻는 질문일 때만 만들어요. 가이드 사용법만 묻는 질문엔 토큰을 아끼려고 건너뛰어요.
+const LIVE_WORDS = /내\s|내가|나의|보유|잔고|자산|수익|손익|순위|현재|지금|오늘|시세|가격|주가|올랐|내렸|떨어|대출|예금|이자|선물|예약|환율|달러|추천|종목|상장|폐지|배당|얼마|몇/;
+const LIVE_MAX_CHARS = 3800;
+
+async function liveSnapshot(env, userId) {
+  const safe = (p) => p.catch((err) => { console.error("스냅샷 일부 실패:", err.message); return null; });
+  const [user, stocks, fx, ranking, futureItems, orders, bank] = await Promise.all([
+    safe(getUser(env, userId)), safe(listStocks(env)), safe(getFxRate(env)), safe(getRanking(env)),
+    safe(getFutureItems(env, userId)), safe(getOrders(env, userId)), safe(bankStatus(env, userId)),
+  ]);
+  if (!user || !stocks) return "";
+  const priceMap = Object.fromEntries(stocks.map((s) => [s.name, s.price]));
+  const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
+  const rate = fx?.rate;
+  const lines = [`기준 시각: ${formatKST(Date.now())}`];
+
+  // 내 자산
+  const holdings = Object.entries(user.holdings || {}).filter(([, q]) => q > 0).sort(([a], [b]) => compareKo(a, b));
+  let holdingsValue = 0;
+  let holdingsCost = 0;
+  const holdLines = holdings.map(([name, qty]) => {
+    const s = stockMap[name];
+    const price = priceMap[name] || 0;
+    const cost = costOf(user, name, price);
+    const mul = s && isForeign(s) && rate ? rate / 100 : 1; // 외국자산은 센트 -> 해정
+    holdingsValue += price * qty * mul;
+    holdingsCost += cost * mul;
+    const pct = cost > 0 ? ((price * qty - cost) / cost) * 100 : 0;
+    const danger = s ? dangerTag(price, true) : "";
+    return `- ${name}${danger}: ${qty.toLocaleString()}주, 현재가 ${s ? moneyOf(s, price) : "상장폐지"}, 평균 매수가 ${s ? moneyOf(s, Math.round(cost / qty)) : "-"}, 손익 ${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+  });
+  const usdValue = rate ? Math.round(((user.usd || 0) * rate) / 100) : 0;
+  const extra = rate ? Math.round(await safe(userExtraAsset(env, userId, priceMap, rate)) || 0) : 0; // 예금 + 선물 평가금 - 대출
+  const total = user.balance + Math.round(holdingsValue) + usdValue + extra;
+  const rank = ranking ? ranking.findIndex((r) => r.id === userId) + 1 : 0;
+  lines.push(
+    "[내 자산]",
+    `현금 ${user.balance.toLocaleString()}해정, 달러 ${centsText(user.usd || 0)}${rate ? ` (환율 1달러=${rate.toLocaleString()}해정 기준 ≈ ${usdValue.toLocaleString()}해정)` : ""}`,
+    `보유 종목 평가액 ${Math.round(holdingsValue).toLocaleString()}해정 (매수 원가 ${Math.round(holdingsCost).toLocaleString()}), 예금·선물 평가금−대출 ${extra.toLocaleString()}해정`,
+    `총 자산 ${total.toLocaleString()}해정${rank > 0 ? `, 순위 ${rank}위/${ranking.length}명` : ""}, 누적 실현 손익 ${(user.realizedProfit || 0).toLocaleString()}해정`,
+    holdLines.length ? "보유 종목:" : "보유 종목 없음",
+    ...holdLines,
+  );
+
+  // 선물 / 예약
+  const futures = futureItems ? futureList(futureItems) : [];
+  if (futures.length) {
+    lines.push("[내 선물]");
+    for (const f of futures) {
+      const price = priceMap[f.stock];
+      const m = (n) => (f.cur === "usd" ? centsText(n) : `${n.toLocaleString()}해정`);
+      lines.push(`- ${f.stock} ${f.side === "long" ? "롱" : "숏"} x${f.lev}, 증거금 ${m(f.margin)}, 진입가 ${m(f.entry)}${price === undefined ? ", 상장폐지" : `, 현재가 ${m(price)}, 평가금 ${m(futureEquity(f, price))}, 강제청산가 ${m(futureLiqPrice(f))}`}`);
+    }
+  }
+  if (orders?.length) {
+    lines.push("[내 예약 주문]");
+    for (const o of orders) lines.push(`- ${orderText(o, stockMap[o.stock]).replace(/\*\*/g, "")}`);
+  }
+  if (bank) lines.push("[내 은행]", bank.replace(/\*\*/g, "").slice(0, 900));
+
+  // 시장 시세: 종목이 많으면 내 보유 종목 + 상승/하락 상위만
+  const changeOf = (s) => {
+    const pts = getPriceHistory(s);
+    const prev = pts.length >= 2 ? pts[pts.length - 2].p : s.price;
+    return prev > 0 ? ((s.price - prev) / prev) * 100 : 0;
+  };
+  const withChange = stocks.map((s) => ({ s, pct: changeOf(s) }));
+  let shown = withChange;
+  if (withChange.length > 50) {
+    const mine = new Set(holdings.map(([n]) => n));
+    const byPct = [...withChange].sort((a, b) => b.pct - a.pct);
+    const keep = new Set([...byPct.slice(0, 12), ...byPct.slice(-12), ...withChange.filter((x) => mine.has(x.s.name))]);
+    shown = withChange.filter((x) => keep.has(x));
+  }
+  lines.push(`[시장 시세] 상장 ${stocks.length}종목${shown.length < stocks.length ? " 중 내 보유·상승·하락 상위만" : ""}. 변동은 직전 시세 대비`);
+  for (const { s, pct } of shown) {
+    lines.push(`- ${s.name}${isForeign(s) ? "(외국자산)" : ` (${sectorOf(s)})`}${dangerTag(s.price, true)}: ${moneyOf(s, s.price)} (${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)`);
+  }
+  return lines.join("\n").slice(0, LIVE_MAX_CHARS);
+}
 
 export const handlers = {
   // 도움말은 글자가 2000자를 넘어서 일반 메시지로는 못 보내요. 임베드(4096자까지)로 보내요.
@@ -7654,7 +7737,16 @@ export const handlers = {
       await setDoc(env, path, { day, n: used + 1 }); // 먼저 차감해서 연타로 한도를 넘기지 못하게 해요
     }
     try {
-      const answer = (await askGuide(question)).slice(0, 1800);
+      // 내 상황·시세를 묻는 질문이면 지금 게임 데이터를 같이 보내요. (실패해도 가이드만으로 답해요)
+      let live = "";
+      if (LIVE_WORDS.test(question)) {
+        try {
+          live = await liveSnapshot(env, userId);
+        } catch (err) {
+          console.error("현재 상황 읽기 실패:", err.message);
+        }
+      }
+      const answer = (await askGuide(question, { live })).slice(0, 1800);
       return unlimited ? answer : `${answer}\n-# 오늘 남은 질문 ${ASK_DAILY_LIMIT - used - 1}/${ASK_DAILY_LIMIT}번`;
     } catch (err) {
       // AI 쪽 오류면 차감한 횟수를 돌려줘요
