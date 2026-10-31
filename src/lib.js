@@ -2658,44 +2658,57 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
     return { sent: false, reason: "가격 변동 공지가 꺼져 있어요" };
   }
 
+  // 미국 주식은 맨 아래에 따로 묶어서 보여줘요. 장이 닫혀 있으면 가격이 그대로라 평소 공지에서는 빼고,
+  // 상장폐지처럼 실제로 일어난 변화만 보여줘요.
+  const usChanges = changes.filter((c) => c.kind === "us");
+  const usOpen = usChanges.length ? (await getUsMarketStatus(env)).open : true;
+  const visibleUs = usOpen ? usChanges : usChanges.filter((c) => c.delisted);
+  const mainChanges = changes.filter((c) => c.kind !== "us");
+
+  if (mainChanges.length === 0 && visibleUs.length === 0) {
+    return { sent: false, reason: "표시할 변동 내역이 없어요 (미국 장마감)" };
+  }
+
   try {
     const header = `📊 **시세 변동** · ${label} · ${formatNowKST()}`;
     const chunks = [];
     let current = header;
 
-    // 변동 후 가격이 높은 순으로 정렬 (같으면 이름순). 낮은 순으로 바꾸려면 b.after - a.after 를 a.after - b.after 로
-    const sorted = [...changes].sort(
-      (a, b) => b.after - a.after || String(a.name).localeCompare(String(b.name), "ko")
-    );
-
-    for (const c of sorted) {
-      const line = announceLine(c);
+    const pushLine = (line) => {
       // 디스코드 메시지 한도(2000자)를 넘지 않게 나눠서 보냄
       if (current.length + line.length + 1 > 1900) {
         chunks.push(current);
         current = "";
       }
       current += (current ? "\n" : "") + line;
-    }
-
-    // 공시 결과 (있을 때만)
-    if (extraLines.length) {
-      const block = ["📰 **공시 결과**", ...extraLines].join("\n");
+    };
+    const pushBlock = (block) => {
       if (current.length + block.length + 2 > 1900) {
         chunks.push(current);
         current = "";
       }
       current += (current ? "\n\n" : "") + block;
+    };
+
+    // 변동 후 가격이 높은 순으로 정렬 (같으면 이름순). 낮은 순으로 바꾸려면 b.after - a.after 를 a.after - b.after 로
+    const sortByPrice = (list) =>
+      [...list].sort((a, b) => b.after - a.after || String(a.name).localeCompare(String(b.name), "ko"));
+
+    for (const c of sortByPrice(mainChanges)) pushLine(announceLine(c));
+
+    // 미국 주식 (있을 때만, 하단에 따로)
+    if (visibleUs.length) {
+      pushBlock(["🌐 **미국 주식**", ...sortByPrice(visibleUs).map(announceLine)].join("\n"));
+    }
+
+    // 공시 결과 (있을 때만)
+    if (extraLines.length) {
+      pushBlock(["📰 **공시 결과**", ...extraLines].join("\n"));
     }
 
     // 안내 문구: 상장폐지 종목이 있을 때만 표시
-    if (changes.some((c) => c.delisted)) {
-      const note = "🚫 상장폐지된 종목은 거래할 수 없고, 보유 중이던 주식은 모두 사라졌어요.";
-      if (current.length + note.length + 2 > 1900) {
-        chunks.push(current);
-        current = "";
-      }
-      current += (current ? "\n\n" : "") + note;
+    if (mainChanges.some((c) => c.delisted) || visibleUs.some((c) => c.delisted)) {
+      pushBlock("🚫 상장폐지된 종목은 거래할 수 없고, 보유 중이던 주식은 모두 사라졌어요.");
     }
     if (current) chunks.push(current);
 
@@ -6207,11 +6220,20 @@ export const handlers = {
 
   잔고: async (interaction, env) => {
     const userId = interaction.member.user.id;
-    const user = await getUser(env, userId);
-    const holdingsText = Object.entries(user.holdings)
-      .sort(([a], [b]) => compareKo(a, b))
-      .map(([name, qty]) => `- ${name}: ${qty}주`)
-      .join("\n") || "(보유 종목 없음)";
+    const [user, stocks] = await Promise.all([getUser(env, userId), listStocks(env)]);
+    const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
+    const entries = Object.entries(user.holdings).sort(([a], [b]) => compareKo(a, b));
+    const domestic = entries.filter(([name]) => !isForeign(stockMap[name]));
+    const foreign = entries.filter(([name]) => isForeign(stockMap[name]));
+    const line = ([name, qty]) => {
+      const icon = foreignIcon(stockMap[name]);
+      return `- ${icon ? `${icon} ` : ""}${name}: ${qty}주`;
+    };
+    const holdingsText =
+      [
+        domestic.length ? domestic.map(line).join("\n") : "",
+        foreign.length ? `**🌐 외국자산**\n${foreign.map(line).join("\n")}` : "",
+      ].filter(Boolean).join("\n") || "(보유 종목 없음)";
     return `잔고: **${user.balance.toLocaleString()}해정**\n${holdingsText}`;
   },
 
