@@ -261,3 +261,113 @@ export function buildForeignUpdate(stock, quote) {
     changed: price !== stock.price,
   };
 }
+
+// ---------- 미국 장 마감 정책 (3단계-2) ----------
+// 미국 주식 종목이 하나라도 있을 때, 장이 열려 있는지 확인해서 매수·매도·선물 시작/정산을 막는 데 써요.
+// - 1차: Finnhub market-status(실시간, 1분 캐시, 요청 1.5초 제한)
+// - 2차(폴백): 뉴욕시간 평일 9:30~16:00 고정 시간표. 이 폴백은 미국 공휴일(추수감사절 등)을 몰라서
+//   그날은 실제로 닫혀 있어도 "열림"으로 잘못 판단할 수 있어요. Finnhub가 정상이면 이 한계는 없어요.
+// 반환: { open: boolean, nextOpenAt: 다음 개장 시각(밀리초, 없으면 null), source: "finnhub" | "schedule" }
+const US_MARKET_TZ = "America/New_York";
+const US_OPEN_H = 9, US_OPEN_M = 30, US_CLOSE_H = 16, US_CLOSE_M = 0;
+const US_STATUS_CACHE_MS = 60 * 1000; // 1분 캐시
+const US_STATUS_TIMEOUT_MS = 1500; // 기본 요청 제한 (자동완성처럼 더 급한 곳은 호출할 때 더 짧게 줄 수 있어요)
+const FINNHUB_STATUS_URL = "https://finnhub.io/api/v1/stock/market-status";
+const US_WEEKDAYS = new Set(["Mon", "Tue", "Wed", "Thu", "Fri"]);
+const WEEK_ORDER = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+let usStatusCache = { at: 0, result: null };
+
+// 테스트용: 시세 지연 표시가 안 꼬이게 캐시를 비워요. 운영에서는 1분마다 자연히 갱신돼요.
+export function clearUsMarketStatusCache() {
+  usStatusCache = { at: 0, result: null };
+}
+
+// "뉴욕시간 y-mo-d h:mi"를 UTC 밀리초로 바꿔요. (Date는 시간대를 못 다뤄서 두 번 변환해 오차를 보정하는 방식)
+function zonedWallToUtc(y, mo, d, h, mi, tz) {
+  const guess = Date.UTC(y, mo - 1, d, h, mi);
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(new Date(guess)).map((p) => [p.type, p.value]));
+  const hour = parts.hour === "24" ? 0 : Number(parts.hour);
+  const asIfUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), hour, Number(parts.minute));
+  return guess - (asIfUtc - guess);
+}
+
+// 지금 이 순간의 뉴욕시간 날짜/시/분/요일
+function nyNowParts(now) {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: US_MARKET_TZ, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", weekday: "short",
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(new Date(now)).map((p) => [p.type, p.value]));
+  return {
+    y: Number(parts.year), mo: Number(parts.month), d: Number(parts.day),
+    h: parts.hour === "24" ? 0 : Number(parts.hour), mi: Number(parts.minute),
+    weekday: parts.weekday,
+  };
+}
+
+// 고정 시간표 폴백 (휴장일은 몰라요)
+function scheduleStatus(now) {
+  const p = nyNowParts(now);
+  const minutesNow = p.h * 60 + p.mi;
+  const openMin = US_OPEN_H * 60 + US_OPEN_M;
+  const closeMin = US_CLOSE_H * 60 + US_CLOSE_M;
+  const isWeekday = US_WEEKDAYS.has(p.weekday);
+  const open = isWeekday && minutesNow >= openMin && minutesNow < closeMin;
+
+  // 다음 개장: 오늘이 평일이고 아직 9:30 전이면 오늘, 아니면 다음 평일(토·일은 건너뜀)
+  let addDays = isWeekday && minutesNow < openMin ? 0 : 1;
+  let idx = (WEEK_ORDER.indexOf(p.weekday) + addDays) % 7;
+  while (!US_WEEKDAYS.has(WEEK_ORDER[idx])) {
+    addDays++;
+    idx = (WEEK_ORDER.indexOf(p.weekday) + addDays) % 7;
+  }
+
+  const base = new Date(Date.UTC(p.y, p.mo - 1, p.d));
+  base.setUTCDate(base.getUTCDate() + addDays);
+  const nextOpenAt = zonedWallToUtc(base.getUTCFullYear(), base.getUTCMonth() + 1, base.getUTCDate(), US_OPEN_H, US_OPEN_M, US_MARKET_TZ);
+  return { open, nextOpenAt, source: "schedule" };
+}
+
+export async function getUsMarketStatus(env = {}, now = Date.now(), timeoutMs = US_STATUS_TIMEOUT_MS) {
+  if (usStatusCache.result && now - usStatusCache.at < US_STATUS_CACHE_MS) {
+    return usStatusCache.result;
+  }
+
+  if (env.FINNHUB_API_KEY) {
+    try {
+      const url = `${FINNHUB_STATUS_URL}?exchange=US&token=${encodeURIComponent(env.FINNHUB_API_KEY)}`;
+      const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(timeoutMs) });
+      if (res.ok) {
+        const data = await res.json();
+        if (typeof data?.isOpen === "boolean") {
+          // Finnhub는 열림 여부는 실시간으로 정확히 주지만 "다음 개장 시각"은 안 줘서,
+          // 닫혀 있을 때 표시할 다음 개장 시각만 시간표로 보완해요. (열림 판단 자체는 Finnhub를 믿어요)
+          const result = data.isOpen
+            ? { open: true, nextOpenAt: null, source: "finnhub" }
+            : { open: false, nextOpenAt: scheduleStatus(now).nextOpenAt, source: "finnhub" };
+          usStatusCache = { at: now, result };
+          return result;
+        }
+      }
+    } catch {
+      // 조회 실패 시 조용히 시간표 폴백으로 넘어가요
+    }
+  }
+
+  const result = scheduleStatus(now);
+  usStatusCache = { at: now, result };
+  return result;
+}
+
+// 장 마감 안내 문구. status는 getUsMarketStatus()의 반환값이에요.
+export function closedMessage(status) {
+  const unix = Number.isFinite(status?.nextOpenAt) ? Math.floor(status.nextOpenAt / 1000) : null;
+  const nextText = unix ? ` 다음 개장: <t:${unix}:f> (<t:${unix}:R>)` : "";
+  return `🌙 미국 장이 닫혀 있어요.${nextText}`;
+}
