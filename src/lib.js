@@ -649,7 +649,6 @@ export function marketIndexText(stocks, now = Date.now()) {
     `최근 24시간 \`${m.spark}\``,
     `종목 ${m.count}개: 🔺 상승 ${m.up} · 🔻 하락 ${m.down} · ➖ 보합 ${m.flat} (종목 평균 ${sgn(m.avgPct, 2)}%)`,
     `🏆 오늘 최고 상승: **${m.best.name}** ${sgn(m.best.todayPct)}% · 💥 최대 하락: **${m.worst.name}** ${sgn(m.worst.todayPct)}%`,
-    "-# 해정지수 = 상장된 모든 종목의 평균 주가예요. (오늘은 한국시간 0시부터)",
   ].join("\n");
 }
 
@@ -840,7 +839,7 @@ export async function buyStock(env, userId, stockName, qty) {
   if (have < cost) {
     return {
       ok: false,
-      message: `${usd ? "달러가" : "잔고가"} 부족해요. (필요: ${moneyOf(stock, cost)} = 주식 ${moneyOf(stock, cost - fee)} + 수수료 ${moneyOf(stock, fee)}, 보유: ${moneyOf(stock, have)})${usd ? "\n💡 `/환전`으로 해정을 달러로 바꿀 수 있어요." : ""}`,
+      message: `${usd ? "달러가" : "잔고가"} 부족해요. (필요: ${moneyOf(stock, cost)} = 주식 ${moneyOf(stock, cost - fee)} + 수수료 ${moneyOf(stock, fee)}, 보유: ${moneyOf(stock, have)})`,
     };
   }
 
@@ -3413,14 +3412,6 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
       pushBlock(["🌐 **미국 주식**", ...sortByPrice(visibleUs).map(announceLine)].join("\n"));
     }
 
-    // 거래 제한 안내: 해당하는 종목이 있을 때만 표시
-    if (mainChanges.some((c) => c.halted || c.resumed || c.limit)) {
-      const notes = [];
-      if (mainChanges.some((c) => c.limit)) notes.push(`🔒 상·하한가: 하루(0시 기준가) ±${DAILY_LIMIT_PCT}%까지만 움직여요.`);
-      if (mainChanges.some((c) => c.halted)) notes.push("⛔ 거래정지 종목은 가격이 멈추고 사고팔 수 없어요. (예약 주문은 재개 후에 체결돼요)");
-      if (mainChanges.some((c) => c.haltReason === "review")) notes.push(`📋 상장폐지 심사 중인 종목은 ${REVIEW_TICKS}번 변동 뒤 결과가 나와요. (상장 유지 확률 ${Math.round(REVIEW_PASS_RATE * 100)}%)`);
-      if (notes.length) pushBlock(notes.map((n) => `-# ${n}`).join("\n"));
-    }
 
     // 공시 결과 (있을 때만)
     if (extraLines.length) {
@@ -3875,7 +3866,6 @@ export async function processPriceAlerts(env) {
             [
               `🔔 **[가격 알림]** **${h.a.stock}**`,
               `현재가 **${moneyOf(sk, h.price)}** — 설정한 ${moneyOf(sk, h.a.price)} ${alertDirText(h.a.dir)}에 도달했어요.`,
-              "(이 알림은 한 번 보내고 자동으로 삭제됐어요.)",
             ].join("\n")
           );
         } catch (err) {
@@ -3996,7 +3986,7 @@ export async function openFuture(env, userId, { stock: stockName, side, margin, 
   if (have < marginAmt) {
     return {
       ok: false,
-      message: `${usd ? "달러가" : "잔고가"} 부족해요. (필요: ${moneyOf(stock, marginAmt)}, 보유: ${moneyOf(stock, have)})${usd ? "\n💡 `/환전`으로 해정을 달러로 바꿀 수 있어요." : ""}`,
+      message: `${usd ? "달러가" : "잔고가"} 부족해요. (필요: ${moneyOf(stock, marginAmt)}, 보유: ${moneyOf(stock, have)})`,
     };
   }
 
@@ -4733,8 +4723,6 @@ export async function depositMoney(env, userId, amount) {
       `🏦 **예금 완료** +${amount.toLocaleString()}해정`,
       balanceLine(balanceBefore, user.balance),
       `🐷 예금 총액: **${depositOf(bank).toLocaleString()}해정** (지금 일 ${pctText(bank.rate.depositRate)} · 이 금리가 이어지면 하루 약 +${Math.floor(bank.deposit * bank.rate.depositRate).toLocaleString()}해정)`,
-      marketRateLine(bank.rate, Date.now()),
-      "- 예금 금리는 매시 정각에 바뀌고, 이자는 바뀐 금리대로 구간마다 쌓여요.",
     ].join("\n"),
   };
 }
@@ -4837,9 +4825,7 @@ export async function takeLoan(env, userId, amount, termDays) {
       balanceLine(balanceBefore, user.balance),
       `- 💰 수수료 ${fee.toLocaleString()}해정(${pctText(LOAN_FEE_RATE)})을 먼저 떼서 **${(amount - fee).toLocaleString()}해정**을 받았어요. 빚은 ${amount.toLocaleString()}해정이에요.`,
       `- 이자: 하루 ${pctText(rate)} (${termDays}일 꽉 채우면 약 ${expected.toLocaleString()}해정, 시간 단위로 계속 쌓여요)`,
-      `- 🏦 신청 시점 시장금리 ×${marketMult} · 💳 신용등급 ${grade.name} ×${grade.rateMul} → 이 이자율은 만기까지 **고정**이에요 (이후 시장금리가 바뀌어도 그대로)`,
       `- 📅 갚을 날: ${dueText(due)}`,
-      `- 일찍 갚으면 그때까지 쌓인 이자만 내요. 만기가 지나면 하루 ${pctText(rate + LOAN_PENALTY_RATE)}로 연체 이자가 붙어요.`,
     ].join("\n"),
   };
 }
@@ -6037,7 +6023,6 @@ async function startEarnings(env, doc, now) {
     [
       `📊 **[실적 시즌 예고]** 약 ${EARNINGS_LEAD_MIN}분 뒤 실적을 발표해요!`,
       `발표 대상 ${targets.length}개: ${shown}${more}`,
-      "-# 실적이 예상보다 좋으면 기업 가치가 크게 오르고, 나쁘면 크게 내려가요. 발표 결과는 다음 시세 변동에 반영돼요.",
     ].join("\n")
   );
   if (!post.sent) {
@@ -7243,15 +7228,13 @@ async function reserveOrder(side, interaction, env) {
   });
   await saveOrderItems(env, userId, next);
 
-  const footer = "시세가 변동될 때(평소 변동, 급등락)마다 확인하고, 체결되면 DM으로 알려드려요. (체결가는 그때의 현재가예요)";
   if (!many) {
     const { id, order, now, stock } = made[0];
-    return [`⏰ 예약했어요. \`${id}\``, orderText(order, stock), `현재가 ${moneyOf(stock, now)} · ${footer}`].join("\n");
+    return [`⏰ 예약했어요. \`${id}\``, orderText(order, stock), `현재가 ${moneyOf(stock, now)}`].join("\n");
   }
   return [
     `⏰ ${made.length}건을 예약했어요.`,
     ...made.map((m) => `- \`${m.id}\` ${orderText(m.order, m.stock)} · 현재가 ${moneyOf(m.stock, m.now)}`),
-    footer,
   ].join("\n");
 }
 
@@ -7878,7 +7861,6 @@ export const handlers = {
       `🔔 알림을 걸었어요. \`${id}\``,
       alertText(w.alerts[id], stock),
       `현재가 ${moneyOf(stock, stock.price)} (목표까지 ${gap > 0 ? "+" : ""}${gap.toFixed(1)}%)${added ? " · 관심종목에도 담았어요." : ""}`,
-      "시세가 변동될 때(평소 변동, 급등락)마다 확인하고, 도달하면 DM으로 한 번 알려드려요. DM을 받을 수 있게 서버 개인 메시지 허용을 켜 두세요.",
     ].join("\n");
   },
 
@@ -7936,7 +7918,7 @@ export const handlers = {
     if (!slots.length) return "종목을 골라 주세요.";
     const { items, merged, error: mergeError } = mergeSlots(slots);
     if (mergeError) return mergeError;
-    const note = merged ? "ℹ️ 같은 종목은 수량을 합쳤어요.\n" : "";
+    const note = "";
     const result = items.length === 1 ? await buyStock(env, userId, items[0].name, items[0].qty) : await buyStocks(env, userId, items);
     return { message: note + result.message, amount: result.ok ? result.amount : undefined };
   },
@@ -7948,7 +7930,7 @@ export const handlers = {
     if (!slots.length) return "종목을 골라 주세요.";
     const { items, merged, error: mergeError } = mergeSlots(slots);
     if (mergeError) return mergeError;
-    const note = merged ? "ℹ️ 같은 종목은 수량을 합쳤어요.\n" : "";
+    const note = "";
     const result = items.length === 1 ? await sellStock(env, userId, items[0].name, items[0].qty) : await sellStocks(env, userId, items);
     return { message: note + result.message, amount: result.ok ? result.amount : undefined };
   },
@@ -8023,8 +8005,6 @@ export const handlers = {
       `🛡️ **${name}** ${qty.toLocaleString()}주에 자동 매도를 걸었어요.`,
       `평균 매수가 ${moneyOf(stock, avg)} · 현재가 ${moneyOf(stock, stock.price)}`,
       ...made.map((m) => `- \`${m.id}\` ${orderText(m.order, stock)} (평균 매수가 ${m.pct})`),
-      made.length > 1 ? "둘 중 하나가 체결되면 나머지는 자동으로 취소돼요." : "",
-      "시세가 변동될 때(평소 변동, 급등락)마다 확인하고, 체결되면 DM으로 알려드려요. 체결가는 그때의 현재가라서, 급락하면 손절가보다 더 낮게 팔릴 수 있어요.",
     ].filter(Boolean).join("\n");
   },
 
@@ -8235,7 +8215,7 @@ export const handlers = {
     if (!slots.length) return "상품을 골라 주세요.";
     const { items, merged, error: mergeError } = mergeSlots(slots);
     if (mergeError) return mergeError;
-    const note = merged ? "ℹ️ 같은 상품은 수량을 합쳤어요.\n" : "";
+    const note = "";
     if (items.length === 1) return note + (await buyProduct(env, userId, items[0].name, items[0].qty)).message;
     return note + (await buyProducts(env, userId, items)).message;
   },
