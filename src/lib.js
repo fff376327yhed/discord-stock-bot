@@ -438,6 +438,14 @@ export function dangerTag(price, plain = false) {
 // 한글 가나다순 비교 (정렬용)
 export const compareKo = (a, b) => String(a).localeCompare(String(b), "ko");
 
+// 외국자산(코인·해외주식)은 맨 아래, 같은 묶음 안에서는 가나다순 (종목 문서용)
+export const compareForeignLast = (a, b) =>
+  Number(isForeign(a)) - Number(isForeign(b)) || compareKo(a.name, b.name);
+
+// 같은 규칙인데, { name, foreign } 모양의 보유 목록용
+export const compareHoldingForeignLast = (a, b) =>
+  Number(!!a.foreign) - Number(!!b.foreign) || compareKo(a.name, b.name);
+
 // ---------- 표시용 헬퍼 ----------
 // 부호 붙은 숫자: +1,000 / -1,000 / 0
 export function fmtSigned(n) {
@@ -548,7 +556,7 @@ export async function listStocks(env) {
   if (stocksCache.list && Date.now() - stocksCache.at < STOCKS_TTL_MS) {
     return stocksCache.list.map((s) => ({ ...s })); // 복사해서 돌려줘요 (호출한 쪽에서 값을 바꿔도 안전)
   }
-  const stocks = (await listCollection(env, "stocks")).sort((a, b) => compareKo(a.name, b.name));
+  const stocks = (await listCollection(env, "stocks")).sort(compareForeignLast);
   stocksCache = { at: Date.now(), list: stocks };
   return stocks.map((s) => ({ ...s }));
 }
@@ -1258,7 +1266,7 @@ export async function getUserDetail(env, userId) {
         icon: stock ? foreignIcon(stock) : "",
       };
     })
-    .sort((a, b) => compareKo(a.name, b.name));
+    .sort(compareHoldingForeignLast);
   const holdingsValue = holdings.reduce((sum, h) => sum + h.valueKrw, 0);
   const holdingsCost = holdings.reduce((sum, h) => sum + h.costKrw, 0);
   const usdValue = Math.round(((user.usd || 0) * fx.rate) / 100);
@@ -2271,7 +2279,7 @@ export async function getAllHoldings(env) {
             icon: foreignIcon(stock),
           };
         })
-        .sort((a, b) => compareKo(a.name, b.name));
+        .sort(compareHoldingForeignLast);
       return {
         id: u.id,
         username: u.username,
