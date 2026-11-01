@@ -442,6 +442,11 @@ export const compareKo = (a, b) => String(a).localeCompare(String(b), "ko");
 export const compareForeignLast = (a, b) =>
   Number(isForeign(a)) - Number(isForeign(b)) || compareKo(a.name, b.name);
 
+// 자동완성용: 외국자산은 맨 아래, 같은 묶음 안에서는 비싼 가격순 (가격이 같으면 가나다순)
+// 비싼 순 대신 싼 순으로 바꾸려면 (b.price - a.price)를 (a.price - b.price)로 바꾸세요.
+export const compareForeignLastByPrice = (a, b) =>
+  Number(isForeign(a)) - Number(isForeign(b)) || (b.price || 0) - (a.price || 0) || compareKo(a.name, b.name);
+
 // 같은 규칙인데, { name, foreign } 모양의 보유 목록용
 export const compareHoldingForeignLast = (a, b) =>
   Number(!!a.foreign) - Number(!!b.foreign) || compareKo(a.name, b.name);
@@ -541,7 +546,7 @@ export async function listStocksForAutocomplete(env) {
   if (acStocksCache.list && Date.now() - acStocksCache.at < AC_STOCKS_TTL_MS) {
     return acStocksCache.list.map((s) => ({ ...s }));
   }
-  const stocks = await listStocks(env);
+  const stocks = (await listStocks(env)).sort(compareForeignLastByPrice); // 가격순 (외국자산은 맨 아래)
   acStocksCache = { at: Date.now(), list: stocks };
   return stocks.map((s) => ({ ...s }));
 }
