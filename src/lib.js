@@ -58,11 +58,13 @@ export function currentSurgeSlot(now = Date.now()) {
   return null;
 }
 
-// 평소 변동(±50%)을 건너뛸지: 급등락 시각 3분 전 ~ 5분 후에는 평소 변동을 쉬어서 겹치지 않게 해요.
+// 평소 변동(±50%)을 건너뛸지: 급등락 시각과 "같은 틱"에만 겹쳐서 쉬어요.
+// (예전엔 -3분~+5분으로 너무 넓어서, 평소 변동 cron이 15분보다 촘촘하면 급등락 직후 틱까지 덩달아 스킵됐어요.
+//  스케줄러가 몇 분 늦게 호출해도 안전하도록 약간의 여유만 남겨둬요.)
 export function isSurgeMoment(now = Date.now()) {
   return SURGE_SLOTS.some((s) => {
     const diff = minutesFromSlot(s.hour, now);
-    return diff >= -3 && diff <= 5;
+    return diff >= -1 && diff <= 1;
   });
 }
 
