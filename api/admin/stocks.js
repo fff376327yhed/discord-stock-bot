@@ -8,7 +8,7 @@ import {
   getAttendanceConfig, setAttendanceConfig,
   getAnnounceConfig, setAnnounceConfig,
   getListingConfig, setListingConfig, parseNames, ensureMinimumStocks, LISTING_PRICE,
-  SECTORS, NO_SECTOR, BETA_MAX, VOL_TIERS,
+  SECTORS, NO_SECTOR, BETA_MAX, VOL_TIERS, todayKST,
 } from "../../src/lib.js";
 import { isForeign, FOREIGN_KINDS, FOREIGN_START_PRICE, DEFAULT_MULT, symbolOfKind, defaultSourceOf } from "../../src/foreign.js";
 
@@ -329,9 +329,10 @@ async function handle(request) {
             maxPrice: price,
             history: { [at]: price },
             updatedAt: new Date(),
+            halt: null, // 거래정지 중이던 종목도 리셋하면 풀어줘요
             ...(isForeign(s)
               ? { startPrice: price, baseReal: Number.isFinite(s.lastReal) && s.lastReal > 0 ? s.lastReal : null }
-              : { fv: price }), // 일반 종목은 기업 가치도 새 가격으로 맞춰요
+              : { fv: price, dayRef: { day: todayKST(), p: price } }), // 기업 가치뿐 아니라 오늘 가격 제한 기준가도 새 가격으로 맞춰요
           })
         );
         invalidateStocksCache();
