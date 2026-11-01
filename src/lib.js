@@ -2189,7 +2189,17 @@ async function recordShareChange(env, items) {
 }
 
 // [lo, hi] 안에서 평균이 0이 되게 뽑은 로그 수익률 (범위가 매번 달라서 중심을 그때그때 맞춰요)
+// 변동률이 범위의 끝(최대 상승/최대 하락) 근처에 닿을 확률이에요. 종 모양만 쓰면 끝은 거의 안 나와서 따로 뽑아요.
+//   EDGE_HIT_CHANCE: 종목 하나가 한 번 변동할 때 끝에 닿을 확률 (0.01 = 1%). 위·아래 끝은 반반이에요.
+//   EDGE_BAND: 끝에서 범위의 몇 %까지를 "끝 근처"로 볼지 (0.08 = 끝에서 8% 안쪽)
+const EDGE_HIT_CHANCE = 0.01;
+const EDGE_BAND = 0.08;
+
 function randomLogWithin(lo, hi, sigma) {
+  if (Math.random() < EDGE_HIT_CHANCE) {
+    const depth = Math.random() * EDGE_BAND * (hi - lo);
+    return Math.random() < 0.5 ? hi - depth : lo + depth;
+  }
   const target = Math.min(Math.max(FLUCT_DRIFT, lo + 1e-6), hi - 1e-6);
   const mu = solveCenter(lo, hi, sigma, target);
   for (let i = 0; i < 100; i++) {
@@ -2241,7 +2251,7 @@ export function nextChange(price, fvIn, { minPct, maxPct, crashChance = 0, crash
 // 거래정지 상태는 종목 문서의 halt = { left: 남은 변동 횟수, reason: "limit" | "market" | "review" | "split", at, from? } 에 저장돼요.
 // 관리자가 /시세설정 으로 가격을 다시 정하면 거래정지와 기준가가 초기화돼요. (정지를 풀고 싶을 때 같은 가격으로 다시 설정하세요)
 //   LIMIT_ENABLED: false면 가격 제한·거래정지를 전부 끄고 예전처럼 동작해요.
-const LIMIT_ENABLED = true;
+const LIMIT_ENABLED = false; // 상·하한가·서킷브레이커·상장폐지 심사 거래정지를 모두 꺼요 (다시 켜려면 true)
 export const DAILY_LIMIT_PCT = 30;
 const CIRCUIT_STOCK_TICKS = 2;
 const MARKET_BREAKER_PCT = -25;
@@ -2282,9 +2292,13 @@ export function limitBand(stock) {
 // /종목정보에 보여줄 가격 제한·거래 상태 줄
 export function limitInfoLine(stock) {
   const b = limitBand(stock);
-  let t = `🔒 오늘 가격 제한(±${DAILY_LIMIT_PCT}%): 하한 **${b.lo.toLocaleString()}** ~ 상한 **${b.hi.toLocaleString()}**해정 (기준가 ${b.ref.toLocaleString()})`;
-  if (isHalted(stock)) t += `\n⛔ **거래정지 중**: ${haltWhy(stock.halt.reason, stock.halt.left)}`;
-  else if (isDelistDanger(stock.price)) t += `\n⚠️ 관리종목: ${DELIST_PRICE.toLocaleString()}해정 이하로 떨어지면 거래정지 후 상장폐지 심사(${REVIEW_TICKS}번 변동)를 받아요.`;
+  let t = LIMIT_ENABLED
+    ? `🔒 오늘 가격 제한(±${DAILY_LIMIT_PCT}%): 하한 **${b.lo.toLocaleString()}** ~ 상한 **${b.hi.toLocaleString()}**해정 (기준가 ${b.ref.toLocaleString()})`
+    : "";
+  if (isHalted(stock)) t += `${t ? "\n" : ""}⛔ **거래정지 중**: ${haltWhy(stock.halt.reason, stock.halt.left)}`;
+  else if (isDelistDanger(stock.price)) {
+    t += `${t ? "\n" : ""}⚠️ 관리종목: ${DELIST_PRICE.toLocaleString()}해정 이하로 떨어지면 ${LIMIT_ENABLED ? `거래정지 후 상장폐지 심사(${REVIEW_TICKS}번 변동)를 받아요.` : "바로 상장폐지돼요."}`;
+  }
   return t;
 }
 
@@ -7732,7 +7746,7 @@ function stockInfoText(stock, held = 0, divMod = 1, now = Date.now(), market = n
   return [
     `**🏷️ ${iconName(stock)} 종목정보**`,
     `${mark(dayPct)} 현재가 **${moneyOf(stock, stock.price)}**${dangerTag(stock.price) ? `${dangerTag(stock.price)} 상장폐지 위기` : ""} · 오늘 ${sgn(dayPct)}% (0시 ${moneyOf(stock, open)})`,
-    ...(isForeign(stock) ? [] : [limitInfoLine(stock)]),
+    ...(isForeign(stock) ? [] : [limitInfoLine(stock)].filter(Boolean)),
     `🗓️ 상장일: ${listedText(stock.listedAt)} (한국시간)${days ? ` · 상장 ${days.toLocaleString()}일째` : ""}`,
     ...(isForeign(stock) ? [] : [`🏢 업종: **${sectorOf(stock)}** · 📊 변동성 등급: **${tierOf(stock)}**`]),
     `🏆 역대 최고가: **${moneyOf(stock, maxPrice)}** (지금은 최고가의 ${ofMax.toFixed(1)}%)`,
