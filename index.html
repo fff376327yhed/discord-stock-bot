@@ -480,6 +480,7 @@ async function reload(silent) {
 
 // ----- 종목 -----
 function renderStocks(stocks) {
+  stocks = [...stocks].sort((a, b) => Number(b.price) - Number(a.price)); // 가격 높은 순
   $("stockTable").innerHTML = stocks.map((s) => {
     const foreign = s.kind === "crypto" || s.kind === "us";
     const icon = s.kind === "crypto" ? "₿ " : s.kind === "us" ? "🌐 " : "";
@@ -589,6 +590,7 @@ function removeStock(name) {
 
 // ----- 상품 -----
 function renderProducts(products) {
+  products = [...products].sort((a, b) => Number(b.price) - Number(a.price)); // 가격 높은 순
   $("productTable").innerHTML = products.map((p) => `
     <tr>
       <td>${esc(p.name)}</td>
@@ -636,6 +638,7 @@ function removeProduct(name) {
 
 // ----- 유저 -----
 function renderUsers(users) {
+  users = [...users].sort((a, b) => (b.balance || 0) - (a.balance || 0)); // 잔고 많은 순
   $("userTable").innerHTML = users.map((u) => {
     const items = Object.entries(u.items || {});
     const itemsText = items.length
