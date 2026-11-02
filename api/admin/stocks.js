@@ -9,6 +9,7 @@ import {
   getAnnounceConfig, setAnnounceConfig,
   getListingConfig, setListingConfig, parseNames, ensureMinimumStocks, LISTING_PRICE,
   SECTORS, NO_SECTOR, BETA_MAX, VOL_TIERS, todayKST,
+  refillAllStamina, adminSetMining, adminResetUser, miningSnapshot, getBans, setBan, clearBan, addHistory,
 } from "../../src/lib.js";
 import { isForeign, FOREIGN_KINDS, FOREIGN_START_PRICE, DEFAULT_MULT, symbolOfKind, defaultSourceOf } from "../../src/foreign.js";
 
@@ -56,6 +57,9 @@ const ADMIN_LABELS = {
   resetBalances: "잔고 초기화", resetUsd: "달러 초기화", resetBots: "봇 초기화", resetItems: "보유 상품 초기화",
   setAttendance: "출석 설정", setAnnounce: "가격 변동 알림 설정", setListing: "자동 상장 설정",
   setPassword: "관리자 비밀번호 변경", clearPassword: "관리자 비밀번호 되돌리기", purgeLogs: "오래된 로그 삭제",
+    setMining: "유저 채굴 수정", refillAllStamina: "전체 체력 회복", adjustBalance: "유저 잔고 지급/차감",
+  setHolding: "유저 보유 종목 수정", resetAttendance: "유저 출석 초기화", resetAskQuota: "유저 질문횟수 초기화",
+  banUser: "유저 차단", unbanUser: "유저 차단 해제", resetUser: "유저 초기화",
 };
 
 async function handler(request) {
@@ -445,10 +449,115 @@ async function handle(request) {
       }
 
       // ----- 유저 (잔고 높은 순) -----
-      case "listUsers": {
+            case "listUsers": {
         const users = await listCollection(env, "users");
         users.sort((a, b) => (b.balance || 0) - (a.balance || 0));
-        return json(users);
+        return json(users.map((u) => ({ ...u, _mining: miningSnapshot(u) })));
+      }
+
+            // ----- 유저 1명 관리 -----
+      // 채굴: level / stamina / count / refill / nextRegenMinutes 중 보낸 것만 바꿔요
+      case "setMining": {
+        const userId = String(body.userId || "");
+        if (!userId) return json({ error: "userId가 없습니다." }, 400);
+        try {
+          const mining = await adminSetMining(env, userId, body);
+          return json({ ok: true, mining });
+        } catch (err) {
+          return json({ error: err.message }, 400); // 숫자 범위 오류 등은 400으로
+        }
+      }
+
+      // 채굴 기록이 있는 모든 유저의 체력을 가득 채워요 (디스코드 /체력회복과 같아요)
+      case "refillAllStamina":
+        return json({ ok: true, ...(await refillAllStamina(env)) });
+
+      // 잔고 지급(+) / 차감(-)
+      case "adjustBalance": {
+        const userId = String(body.userId || "");
+        const delta = Math.round(Number(body.delta));
+        if (!userId) return json({ error: "userId가 없습니다." }, 400);
+        if (!Number.isFinite(delta) || delta === 0) return json({ error: "0이 아닌 숫자를 입력하세요." }, 400);
+        const user = await getUser(env, userId);
+        const next = (user.balance || 0) + delta;
+        if (next < 0) return json({ error: `잔고가 모자라요. (지금 ${(user.balance || 0).toLocaleString()}해정)` }, 400);
+        user.balance = next;
+        await saveUser(env, userId, user);
+        await addHistory(env, userId, `관리자 ${delta > 0 ? "지급" : "차감"}: ${delta > 0 ? "+" : ""}${delta.toLocaleString()}해정 → 잔고 ${next.toLocaleString()}해정`).catch(() => {});
+        return json({ ok: true, balance: next });
+      }
+
+      // 보유 종목 수량 직접 설정 (0이면 제거). 평균 매입가는 그대로 유지해요.
+      case "setHolding": {
+        const userId = String(body.userId || "");
+        const name = String(body.name || "").trim();
+        const qty = Number(body.qty);
+        if (!userId || !name) return json({ error: "userId와 종목 이름이 필요합니다." }, 400);
+        if (!Number.isInteger(qty) || qty < 0) return json({ error: "수량은 0 이상의 정수여야 합니다." }, 400);
+        const stock = await getStock(env, name);
+        if (!stock) return json({ error: `"${name}" 종목이 없어요.` }, 400);
+        const user = await getUser(env, userId);
+        const prev = user.holdings[name] || 0;
+        if (qty === 0) {
+          delete user.holdings[name];
+          delete user.costs[name];
+        } else {
+          const prevCost = user.costs[name];
+          user.holdings[name] = qty;
+          user.costs[name] = prev > 0 && Number.isFinite(prevCost)
+            ? Math.round((prevCost * qty) / prev) // 평균 매입가 유지
+            : qty * stock.price;                  // 새로 생긴 보유분은 지금 시세를 매입가로
+        }
+        await saveUser(env, userId, user);
+        await addHistory(env, userId, `관리자 조정: ${name} ${prev.toLocaleString()}주 → ${qty.toLocaleString()}주`).catch(() => {});
+        return json({ ok: true });
+      }
+
+      // 오늘 출석을 다시 할 수 있게 (누적 횟수는 그대로)
+      case "resetAttendance": {
+        const userId = String(body.userId || "");
+        if (!userId) return json({ error: "userId가 없습니다." }, 400);
+        await setDoc(env, `users/${userId}`, { lastAttendance: "" });
+        return json({ ok: true });
+      }
+
+      // /주식질문 오늘 횟수 초기화
+      case "resetAskQuota": {
+        const userId = String(body.userId || "");
+        if (!userId) return json({ error: "userId가 없습니다." }, 400);
+        await deleteDoc(env, `askQuota/${userId}`);
+        return json({ ok: true });
+      }
+
+      // 차단: 차단된 유저는 모든 명령어가 막혀요 (관리자 본인은 차단 안 돼요)
+      case "listBans":
+        return json(await getBans(env, { fresh: true }));
+
+      case "banUser": {
+        const userId = String(body.userId || "");
+        if (!userId) return json({ error: "userId가 없습니다." }, 400);
+        if (userId === env.ADMIN_DISCORD_ID) return json({ error: "관리자 본인은 차단할 수 없어요." }, 400);
+        await setBan(env, userId, body.reason || "");
+        return json({ ok: true });
+      }
+
+      case "unbanUser": {
+        const userId = String(body.userId || "");
+        if (!userId) return json({ error: "userId가 없습니다." }, 400);
+        await clearBan(env, userId);
+        return json({ ok: true });
+      }
+
+      // 유저 1명 전체 초기화 (balance를 안 보내면 신규 유저 기본 잔고로)
+      case "resetUser": {
+        const userId = String(body.userId || "");
+        if (!userId) return json({ error: "userId가 없습니다." }, 400);
+        const balance = body.balance === undefined || body.balance === "" ? undefined : Number(body.balance);
+        if (balance !== undefined && (!Number.isInteger(balance) || balance < 0)) {
+          return json({ error: "잔고는 0 이상의 정수여야 합니다." }, 400);
+        }
+        await adminResetUser(env, userId, balance);
+        return json({ ok: true });
       }
 
       case "setBalance": {

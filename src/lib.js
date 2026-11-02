@@ -2937,6 +2937,120 @@ export async function refillAllStamina(env) {
   return { total: users.length, refilled: done };
 }
 
+// ---------- 관리자: 채굴 상태 보기용 (회복 반영한 복사본, 저장 안 함) ----------
+export function miningSnapshot(user) {
+  if (!user?.mining) return null;
+  const level = Math.min(user.mining.level || 1, MAX_LEVEL);
+  const m = regenStamina({ ...user.mining, level, staminaAt: user.mining.staminaAt || Date.now() });
+  const max = staminaMaxFor(level);
+  return {
+    level,
+    stamina: m.stamina,
+    max,
+    count: user.mining.count || 0,
+    required: upgradeCountFor(level),
+    nextMinutes: m.stamina >= max ? 0 : minutesUntilNextRegen(m),
+    maxLevel: MAX_LEVEL,
+    regenMinutes: STAMINA_REGEN_MINUTES,
+  };
+}
+
+// ---------- 관리자: 유저 1명 채굴 조정 ----------
+// patch: { level?, stamina?, count?, refill?(true면 체력 가득), nextRegenMinutes?(다음 +1까지 남은 분) }
+// 비어 있는 값은 건드리지 않아요.
+export async function adminSetMining(env, userId, patch = {}) {
+  const user = await getUser(env, userId);
+  const mining = regenStamina(ensureMining(user));
+  const has = (v) => v !== undefined && v !== null && v !== "";
+  const int = (v, label, min, max) => {
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < min || n > max) throw new Error(`${label}은(는) ${min}~${max} 사이의 정수여야 해요.`);
+    return n;
+  };
+
+  const now = Date.now();
+  let resetClock = false;
+
+  if (has(patch.level)) {
+    const next = int(patch.level, "레벨", 1, MAX_LEVEL);
+    if (next !== mining.level) {
+      mining.level = next;
+      mining.count = 0; // 레벨이 바뀌면 진행도는 0부터 (아래에서 진행도를 같이 보냈다면 그 값이 우선)
+    }
+  }
+  if (has(patch.count)) mining.count = int(patch.count, "진행도(채굴 횟수)", 0, 1_000_000);
+
+  const max = staminaMaxFor(mining.level);
+  if (mining.stamina > max) mining.stamina = max; // 레벨을 내리면 최대 체력도 줄어요
+
+  if (patch.refill === true) {
+    mining.stamina = max;
+    resetClock = true;
+  } else if (has(patch.stamina)) {
+    mining.stamina = int(patch.stamina, "체력", 0, max);
+    resetClock = true;
+  }
+  if (resetClock || mining.stamina >= max) mining.staminaAt = now;
+
+  // "다음 체력 +1까지 N분 남게" 만들기 (체력이 가득이면 의미 없어서 무시)
+  if (has(patch.nextRegenMinutes) && mining.stamina < max) {
+    const m = Number(patch.nextRegenMinutes);
+    if (!Number.isFinite(m) || m < 0 || m > STAMINA_REGEN_MINUTES) {
+      throw new Error(`다음 회복까지 남은 시간은 0~${STAMINA_REGEN_MINUTES}분 사이여야 해요.`);
+    }
+    mining.staminaAt = now - (STAMINA_REGEN_MINUTES - m) * 60_000;
+  }
+
+  await setDoc(env, `users/${userId}`, { mining });
+  await addHistory(env, userId, `관리자 조정: 채굴 Lv.${mining.level}, 체력 ${mining.stamina}/${max}, 진행도 ${mining.count}`).catch(() => {});
+  return miningSnapshot({ mining });
+}
+
+// ---------- 관리자: 유저 1명 전체 초기화 ----------
+// 잔고·달러·보유 종목·보유 상품·매입가·채굴·출석 기록을 처음 상태로 돌려요.
+// (은행 예금/대출, 선물, 예약 주문, 가격 알림은 건드리지 않아요)
+export async function adminResetUser(env, userId, balance = STARTING_BALANCE) {
+  await setDoc(env, `users/${userId}`, {
+    balance,
+    usd: 0,
+    holdings: {},
+    items: {},
+    costs: {},
+    mining: { level: 1, stamina: STAMINA_BASE, staminaAt: Date.now(), count: 0 },
+    lastAttendance: "",
+    attendanceCount: 0,
+  });
+}
+
+// ---------- 관리자: 유저 차단 ----------
+// config/bans = { users: { 유저ID: { reason, at } } }
+// 명령어마다 읽으면 비용이 커서, 서버가 30초 동안 기억해요. (차단·해제가 다른 서버에 퍼지기까지 최대 30초)
+const BANS_PATH = "config/bans";
+let bansCache = { at: 0, map: {} };
+
+export async function getBans(env, { fresh = false } = {}) {
+  if (!fresh && Date.now() - bansCache.at < 30_000) return bansCache.map;
+  const doc = await getDoc(env, BANS_PATH);
+  bansCache = { at: Date.now(), map: doc?.users || {} };
+  return bansCache.map;
+}
+
+export async function setBan(env, userId, reason = "") {
+  const map = { ...(await getBans(env, { fresh: true })) };
+  map[userId] = { reason: String(reason).slice(0, 100), at: Date.now() };
+  await setDoc(env, BANS_PATH, { users: map });
+  bansCache = { at: Date.now(), map };
+  return map;
+}
+
+export async function clearBan(env, userId) {
+  const map = { ...(await getBans(env, { fresh: true })) };
+  delete map[userId];
+  await setDoc(env, BANS_PATH, { users: map });
+  bansCache = { at: Date.now(), map };
+  return map;
+}
+
 // ---------- 채굴 1회 ----------
 export async function mineOnce(env, userId) {
   const user = await getUser(env, userId);

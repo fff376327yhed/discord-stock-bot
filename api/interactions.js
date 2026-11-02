@@ -3,6 +3,7 @@ import { waitUntil } from "@vercel/functions";
 import {
   handlers, autocomplete, loadEnv, touchUsername,
   logAction, summarizeOptions, firstLine, VIEW_ONLY, flattenInteraction,
+  getBans, // ← 추가
 } from "../src/lib.js";
 
 // Node.js 런타임으로 동작 (Edge는 discord-interactions가 쓰는 Node crypto를 지원하지 않아 제외)
@@ -180,6 +181,19 @@ async function handler(request) {
 
     if (!handlerFn) {
       return reply("알 수 없는 명령어예요.", "private");
+    }
+
+        // 차단된 유저는 명령어를 쓸 수 없어요. (관리자는 항상 통과, 확인이 실패하면 막지 않고 그냥 진행)
+    const callerId = interaction.member?.user?.id;
+    if (callerId && callerId !== env.ADMIN_DISCORD_ID) {
+      try {
+        const ban = (await getBans(env))[callerId];
+        if (ban) {
+          return reply(`🚫 관리자가 이 계정의 봇 사용을 막았어요.${ban.reason ? `\n사유: ${ban.reason}` : ""}`, "private");
+        }
+      } catch (err) {
+        console.error("차단 목록 확인 실패:", err.message);
+      }
     }
 
     // 닉네임 저장 + 명령어 처리를 하나의 작업으로 묶어요.

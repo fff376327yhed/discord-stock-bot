@@ -70,6 +70,10 @@
   dialog h3 { margin: 0 0 12px; color: #8ea1ff; font-size: 1.05rem; }
   .reset-row { border-top: 1px solid #2f3240; padding-top: 12px; margin-top: 12px; }
   .reset-row:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
+
+    .ud-box { border-top: 1px solid #2f3240; padding-top: 12px; margin-top: 12px; }
+  .ud-box b { color: #8ea1ff; }
+  .tag.ban { background: #7a2a2a; }
 </style>
 </head>
 <body>
@@ -156,6 +160,10 @@
 <details>
   <summary>유저 잔고 / 보유 상품</summary>
   <div class="section">
+        <div class="form-row">
+      <button class="ghost" onclick="refillAll()">⛏️ 모든 유저 체력 가득 채우기</button>
+      <span class="muted">각 유저 줄의 [유저 관리]에서 채굴 레벨·체력·회복 시간, 지급/차감, 보유 종목, 차단 등을 할 수 있어요.</span>
+    </div>
     <table>
       <thead><tr><th>유저</th><th class="num">잔고</th><th>보유 상품</th><th></th></tr></thead>
       <tbody id="userTable"></tbody>
@@ -263,6 +271,82 @@
     </div>
   </div>
 </details>
+
+<dialog id="userDialog" style="width:min(560px, 94vw)">
+  <h3 id="udTitle">유저 관리</h3>
+  <div id="udSummary" class="muted"></div>
+
+  <div class="ud-box">
+    <b>⛏️ 채굴</b> <span id="udMiningNote" class="muted"></span>
+    <div class="form-row" style="margin-top:8px">
+      <label class="muted">레벨</label><input id="udLevel" type="number" min="1" style="width:80px">
+      <label class="muted">체력</label><input id="udStamina" type="number" min="0" style="width:80px">
+      <span id="udStaminaMax" class="muted"></span>
+    </div>
+    <div class="form-row">
+      <label class="muted" title="체력이 +1 되기까지 남은 시간을 이 값으로 맞춰요">다음 +1까지(분)</label>
+      <input id="udRegen" type="number" min="0" step="1" style="width:80px">
+      <label class="muted" title="이번 레벨에서 채굴한 횟수 (노가다 업그레이드 진행도)">진행도(횟수)</label>
+      <input id="udCount" type="number" min="0" style="width:90px">
+    </div>
+    <div class="form-row">
+      <button onclick="udSaveMining()">채굴 저장</button>
+      <button class="ghost" onclick="udRefill()">체력 가득</button>
+    </div>
+    <p class="hint">비워 둔 칸은 바꾸지 않아요. 레벨을 바꾸면 진행도는 0으로 돌아가요(진행도 칸을 같이 적으면 그 값). "다음 +1까지"는 체력이 가득이 아닐 때만 적용돼요.</p>
+  </div>
+
+  <div class="ud-box">
+    <b>💰 잔고</b>
+    <div class="form-row" style="margin-top:8px">
+      <input id="udDelta" type="number" min="1" placeholder="금액" style="width:140px">
+      <button onclick="udBalance(1)">+ 지급</button>
+      <button class="ghost" onclick="udBalance(-1)">− 차감</button>
+      <button class="ghost" onclick="setBalance(udUserId)">직접 입력</button>
+    </div>
+  </div>
+
+  <div class="ud-box">
+    <b>📈 보유 종목</b>
+    <div class="form-row" style="margin-top:8px">
+      <select id="udStock" style="min-width:180px" onchange="udShowHolding()"></select>
+      <input id="udQty" type="number" min="0" value="0" style="width:100px">
+      <button onclick="udSetHolding()">수량 설정</button>
+      <span id="udHolding" class="muted"></span>
+    </div>
+    <p class="hint">0을 넣으면 그 종목이 사라져요. 평균 매입가는 유지돼요. (새로 생긴 보유분은 지금 시세가 매입가)</p>
+  </div>
+
+  <div class="ud-box">
+    <b>🧰 기타</b>
+    <div class="form-row" style="margin-top:8px">
+      <button class="ghost" onclick="udResetAttendance()">출석 초기화 (오늘 다시 출석)</button>
+      <button class="ghost" onclick="udResetAsk()">질문 횟수 초기화</button>
+    </div>
+  </div>
+
+  <div class="ud-box">
+    <b>🚫 차단</b> <span id="udBanNote" class="muted"></span>
+    <div class="form-row" style="margin-top:8px">
+      <input id="udBanReason" placeholder="사유 (선택, 유저에게 보여요)" style="flex:1; min-width:180px">
+      <button class="danger" onclick="udBan()">차단</button>
+      <button class="ghost" onclick="udUnban()">해제</button>
+    </div>
+  </div>
+
+  <div class="ud-box">
+    <b>⚠️ 유저 초기화</b>
+    <div class="form-row" style="margin-top:8px">
+      <input id="udResetBalance" type="number" min="0" placeholder="초기 잔고 (비우면 기본값)" style="width:190px">
+      <button class="danger" onclick="udResetUser()">이 유저 전부 초기화</button>
+    </div>
+    <p class="hint">잔고·달러·보유 종목·상품·채굴·출석 기록이 처음 상태로 돌아가요. 은행/선물/예약 주문은 그대로예요. 되돌릴 수 없어요.</p>
+  </div>
+
+  <div class="form-row" style="justify-content:flex-end; margin:14px 0 0;">
+    <button class="ghost" onclick="$('userDialog').close()">닫기</button>
+  </div>
+</dialog>
 
 <dialog id="itemDialog">
   <h3 id="itemDialogTitle">보유 상품 편집</h3>
@@ -382,6 +466,9 @@ let listingDirty = false;
 // 상품 선택칸과 "현재 몇 개 가졌는지" 표시에 쓰려고 마지막으로 불러온 목록을 기억해요
 let productsCache = [];
 let usersCache = [];
+let stocksCache = [];
+let bansCache = {};
+let udUserId = null;
 let editingUserId = null;
 
 function log(msg) { $("log").textContent = msg; }
@@ -462,6 +549,8 @@ async function reload(silent) {
     connected = true;
     setStatus("접속됨", true);
     renderStocks(stocks);
+    stocksCache = stocks;
+    bansCache = await call("listBans").catch(() => ({}));
     productsCache = products;
     usersCache = users;
     renderProducts(products);
@@ -644,15 +733,19 @@ function renderUsers(users) {
     const itemsText = items.length
       ? items.map(([n, c]) => `${esc(n)} ×${c}`).join("<br>")
       : `<span class="muted">없음</span>`;
-    const userCell = u.username
+    const m = u._mining;
+    const mineText = m ? `<br><span class="muted">⛏️ Lv.${m.level} · 체력 ${m.stamina}/${m.max}</span>` : "";
+    const banTag = bansCache[u.id] ? ` <span class="tag ban">차단</span>` : "";
+    const userCell = (u.username
       ? `${esc(u.username)}<br><span class="muted">${esc(u.id)}</span>`
-      : esc(u.id);
+      : esc(u.id)) + banTag + mineText;
     return `
     <tr>
       <td>${userCell}</td>
       <td class="num">${(u.balance || 0).toLocaleString()}</td>
       <td>${itemsText}</td>
       <td><div class="actions">
+        <button onclick='openUserAdmin(${JSON.stringify(u.id)})'>유저 관리</button>
         <button class="ghost" onclick='setBalance(${JSON.stringify(u.id)})'>잔고 수정</button>
         <button class="ghost" onclick='editItem(${JSON.stringify(u.id)})'>보유 상품 편집</button>
       </div></td>
@@ -711,6 +804,128 @@ function saveItemDialog() {
   const userId = editingUserId;
   $("itemDialog").close();
   act(() => call("setUserItem", { userId, name, count }), `${userId}의 ${name} 수량을 ${count}개로 변경`);
+}
+
+// ----- 유저 관리 창 -----
+const udUser = () => usersCache.find((u) => u.id === udUserId);
+const udName = () => udUser()?.username || udUserId;
+
+function openUserAdmin(userId) {
+  udUserId = userId;
+  $("udDelta").value = "";
+  $("udBanReason").value = "";
+  $("udResetBalance").value = "";
+  fillUserDialog();
+  $("userDialog").showModal();
+}
+
+// 동작이 끝나면 목록을 새로 받아서(act) 창 안의 값도 최신으로 다시 채워요
+async function udRun(fn, okMsg) {
+  await act(fn, okMsg);
+  if ($("userDialog").open) fillUserDialog();
+}
+
+function fillUserDialog() {
+  const u = udUser();
+  if (!u) return;
+  const m = u._mining;
+  $("udTitle").textContent = `유저 관리 — ${u.username || u.id}`;
+  $("udSummary").innerHTML =
+    `ID ${esc(u.id)} · 잔고 ${(u.balance || 0).toLocaleString()}해정 · 달러 ${((u.usd || 0) / 100).toFixed(2)}` +
+    ` · 출석 ${u.attendanceCount || 0}회 (마지막 ${esc(u.lastAttendance || "-")})`;
+
+  // 채굴
+  $("udLevel").value = m ? m.level : "";
+  $("udStamina").value = m ? m.stamina : "";
+  $("udCount").value = m ? m.count : "";
+  $("udRegen").value = "";
+  $("udRegen").placeholder = m ? (m.stamina >= m.max ? "가득" : `지금 ${m.nextMinutes}분`) : "";
+  $("udStaminaMax").textContent = m ? `/ 최대 ${m.max}` : "";
+  $("udMiningNote").textContent = m
+    ? `(Lv.${m.level} · 진행도 ${m.count}/${m.required})`
+    : "(아직 채굴 기록이 없어요. 저장하면 채굴이 시작돼요)";
+
+  // 보유 종목 (고르던 종목은 유지)
+  const prev = $("udStock").value;
+  const holdings = u.holdings || {};
+  $("udStock").innerHTML = stocksCache
+    .map((s) => `<option value="${esc(s.name)}">${esc(s.name)}${holdings[s.name] ? ` (${holdings[s.name]}주 보유)` : ""}</option>`)
+    .join("") || `<option value="">등록된 종목이 없어요</option>`;
+  if (prev && [...$("udStock").options].some((o) => o.value === prev)) $("udStock").value = prev;
+  udShowHolding();
+
+  // 차단
+  const ban = bansCache[u.id];
+  $("udBanNote").textContent = ban ? `(차단 중${ban.reason ? ` · 사유: ${ban.reason}` : ""})` : "";
+}
+
+function udShowHolding() {
+  const have = Number(udUser()?.holdings?.[$("udStock").value] || 0);
+  $("udQty").value = have;
+  $("udHolding").textContent = $("udStock").value ? `(지금 ${have.toLocaleString()}주)` : "";
+}
+
+function udSaveMining() {
+  const body = { userId: udUserId };
+  for (const [key, id] of [["level", "udLevel"], ["stamina", "udStamina"], ["count", "udCount"], ["nextRegenMinutes", "udRegen"]]) {
+    const v = $(id).value.trim();
+    if (v !== "") body[key] = Number(v);
+  }
+  udRun(() => call("setMining", body), `${udName()} 채굴 상태를 저장했어요.`);
+}
+
+function udRefill() {
+  udRun(() => call("setMining", { userId: udUserId, refill: true }), `${udName()} 체력을 가득 채웠어요.`);
+}
+
+function udBalance(sign) {
+  const v = Math.round(Number($("udDelta").value));
+  if (!Number.isFinite(v) || v <= 0) return log("금액은 1 이상의 숫자로 입력해 주세요.");
+  const delta = sign * v;
+  udRun(() => call("adjustBalance", { userId: udUserId, delta }), `${udName()} 잔고 ${delta > 0 ? "+" : ""}${delta.toLocaleString()}해정`);
+  $("udDelta").value = "";
+}
+
+function udSetHolding() {
+  const name = $("udStock").value;
+  const qty = Number($("udQty").value);
+  if (!name) return log("종목을 골라주세요.");
+  if (!Number.isInteger(qty) || qty < 0) return log("수량은 0 이상의 정수로 입력해 주세요.");
+  udRun(() => call("setHolding", { userId: udUserId, name, qty }), `${udName()}의 ${name}을(를) ${qty.toLocaleString()}주로 바꿨어요.`);
+}
+
+function udResetAttendance() {
+  udRun(() => call("resetAttendance", { userId: udUserId }), `${udName()} 출석을 초기화했어요. (오늘 다시 출석할 수 있어요)`);
+}
+
+function udResetAsk() {
+  udRun(() => call("resetAskQuota", { userId: udUserId }), `${udName()}의 오늘 질문 횟수를 초기화했어요.`);
+}
+
+function udBan() {
+  const reason = $("udBanReason").value.trim();
+  if (!confirm(`${udName()} 님을 차단할까요? (모든 명령어가 막혀요)`)) return;
+  udRun(() => call("banUser", { userId: udUserId, reason }), `${udName()} 차단 완료 (다른 서버에 퍼지기까지 최대 30초)`);
+}
+
+function udUnban() {
+  udRun(() => call("unbanUser", { userId: udUserId }), `${udName()} 차단 해제 (최대 30초 안에 반영)`);
+}
+
+function udResetUser() {
+  const raw = $("udResetBalance").value.trim();
+  if (!confirm(`${udName()} 님의 잔고·보유 종목·상품·채굴·출석을 전부 처음 상태로 돌릴까요?\n(되돌릴 수 없어요)`)) return;
+  const body = { userId: udUserId };
+  if (raw !== "") body.balance = Number(raw);
+  udRun(() => call("resetUser", body), `${udName()} 초기화 완료`);
+}
+
+function refillAll() {
+  if (!confirm("채굴 기록이 있는 모든 유저의 체력을 가득 채울까요?")) return;
+  act(async () => {
+    const r = await call("refillAllStamina", {});
+    log(`${r.refilled}명의 체력을 가득 채웠어요. (전체 유저 ${r.total}명)`);
+  });
 }
 
 // ----- 초기화 -----
