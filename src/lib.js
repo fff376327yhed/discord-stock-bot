@@ -59,7 +59,7 @@ export function currentSurgeSlot(now = Date.now()) {
 }
 
 // 평소 변동(±50%)을 건너뛸지: 급등락 시각과 "같은 틱"에만 겹쳐서 쉬어요.
-// (예전엔 -3분~+5분으로 너무 넓어서, 평소 변동 cron이 15분보다 촘촘하면 급등락 직후 틱까지 덩달아 스킵됐어요.
+// (예전엔 -3분~+5분으로 너무 넓어서, 평소 변동 cron이 5분처럼 촘촘하면 급등락 직후 틱까지 덩달아 스킵됐어요.
 //  스케줄러가 몇 분 늦게 호출해도 안전하도록 약간의 여유만 남겨둬요.)
 export function isSurgeMoment(now = Date.now()) {
   return SURGE_SLOTS.some((s) => {
@@ -1773,7 +1773,7 @@ function foreignInfoLines(stock, now = Date.now(), market = null) {
     const age = Number.isFinite(stock.quoteAt) ? ` (마지막 시세 ${agoText(now - stock.quoteAt)})` : "";
     lines.push(`⚠️ 시세 지연: 최근 실제 시세를 못 받아서 가격이 그대로예요.${age}`);
   }
-  lines.push(`💵 배당: 외국자산(코인·해외주식)은 배당이 없어요. · 🕒 실제 시세를 따라 15분마다 움직여요.`);
+  lines.push(`💵 배당: 외국자산(코인·해외주식)은 배당이 없어요. · 🕒 실제 시세를 따라 5분마다 움직여요.`);
   if (stock.kind === "us") {
     if (market && !market.open && US_TRADE_ANYTIME) {
       lines.push(`${closedMessage(market)}\n   장이 닫혀 있는 동안은 가격이 마지막 시세 그대로예요. 그 가격으로 매수·매도·선물은 할 수 있어요.`);
@@ -2032,7 +2032,7 @@ const TRADE_PERMANENT_SHARE = 0.3;
 // 그래서 1단계의 "하락 편향 없음"이 그대로 유지돼요. 전체 변동 폭(minPct~maxPct)도 넘지 않아요.
 //   SECTORS: 업종 목록. 업종이 없거나 목록에 없는 종목("기타")은 시장 충격만 받고 업종 충격은 없어요.
 //   BETA_DEFAULT / BETA_MAX: 종목 beta(시장 민감도) 기본값 / 최대값. beta가 2면 시장 충격을 2배로 받아요.
-//   SHOCK_NORMAL: 평소 변동(15분마다). market/sector = 충격의 표준편차, *Max = 충격의 최대 크기 (개별 충격은 아래 변동성 등급이 정해요)
+//   SHOCK_NORMAL: 평소 변동(5분마다). market/sector = 충격의 표준편차, *Max = 충격의 최대 크기 (개별 충격은 아래 변동성 등급이 정해요)
 //   SHOCK_SURGE : 급등락(18시/21시/0시). 시장·업종 충격이 크게 나오는 이벤트예요. (cron.js의 range.surge === true)
 //   COMMON_LIMIT_RATIO: 시장+업종 충격 합이 변동 범위 한쪽 끝의 몇 %까지만 가도록 제한 (0.95면 95%)
 export const SECTORS = ["IT", "바이오", "에너지", "금융", "소비재", "건설"];
@@ -2273,10 +2273,10 @@ export function nextChange(price, fvIn, { minPct, maxPct, crashChance = 0, crash
 //   LIMIT_ENABLED: false면 가격 제한·거래정지를 전부 끄고 예전처럼 동작해요.
 const LIMIT_ENABLED = false; // 상·하한가·서킷브레이커·상장폐지 심사 거래정지를 모두 꺼요 (다시 켜려면 true)
 export const DAILY_LIMIT_PCT = 30;
-const CIRCUIT_STOCK_TICKS = 2;
+const CIRCUIT_STOCK_TICKS = 6; // 5분 × 6 = 30분 (종목 서킷브레이커)
 const MARKET_BREAKER_PCT = -25;
-const MARKET_BREAKER_TICKS = 3;
-const REVIEW_TICKS = 8;
+const MARKET_BREAKER_TICKS = 9; // 5분 × 9 = 45분 (시장 서킷브레이커)
+const REVIEW_TICKS = 24; // 5분 × 24 = 2시간 (상장폐지 심사)
 const REVIEW_PASS_RATE = 0.25;
 const REVIEW_REBOUND_PRICE = Math.round(DELIST_PRICE * 1.5);
 
@@ -2347,7 +2347,7 @@ const FX_SECTOR_SENS = { IT: 0.1, 바이오: 0.04, 에너지: -0.06, 금융: 0, 
 //   금리가 낮으면(배율<1) 시장 ↑, 높으면 ↓ / 환율이 기준(100)보다 높으면(달러 강세) 시장 ↓, 낮으면 ↑
 const MACRO_LEVEL_RATE_K = 0.01;
 const MACRO_LEVEL_FX_K = 0.02;
-const MACRO_TICKS_PER_HOUR = 4;
+const MACRO_TICKS_PER_HOUR = 12;
 const MACRO_WINDOW_MS = 60 * 60 * 1000;
 const clampUnit = (x) => Math.max(-1, Math.min(1, x));
 
@@ -6058,7 +6058,7 @@ export async function dividendInfo(env, userId) {
 //  - 위기 종목(300해정 이하)에는 큰 악재가 안 나오고, 상장폐지 경고 / 구제 소식만 나와요.
 //  - 배당 확대/무배당 공시는 다음 배당금 지급액에도 반영돼요. (processDividends)
 //  - 루머는 NEWS_RUMOR_TRUE_RATE 확률로만 사실이에요. (헛소문이면 반대로 살짝 움직여요)
-//  - 호출: cron-job.org에서 10,25,40,55분마다 /api/cron?task=news (시세 변동이 0,15,30,45분일 때 5분 전)
+//  - 호출: cron-job.org에서 3,8,13…분마다(3-59/5) /api/cron?task=news (시세 변동이 0,5,10…분일 때 2분 전)
 //  - 저장: config/news = { enabled, perDay, day, target, count, queue, cool, recent, divMods }
 const NEWS_PATH = "config/news";
 export const NEWS_PER_DAY = 4;
@@ -6238,7 +6238,7 @@ async function saveNewsItems(env, doc, items, patch = {}) {
   await setDoc(env, NEWS_PATH, { queue, recent: Object.fromEntries(keep), cool, divMods, ...patch });
 }
 
-// 크론(10,25,40,55분마다): 하루 목표 건수를 하루 동안 고르게 퍼뜨려서 올려요
+// 크론(3,8,13…분마다): 하루 목표 건수를 하루 동안 고르게 퍼뜨려서 올려요
 export async function publishNews(env) {
   const now = Date.now();
   const doc = (await getDoc(env, NEWS_PATH)) || {};
@@ -6258,10 +6258,10 @@ export async function publishNews(env) {
   const remaining = target - count;
   if (remaining <= 0) return { published: 0, reason: "오늘 공시를 다 올렸어요" };
 
-  // 남은 건수 / 남은 호출 횟수(15분 간격) 확률로 올려서 하루 동안 고르게 퍼져요
+  // 남은 건수 / 남은 호출 횟수(5분 간격) 확률로 올려서 하루 동안 고르게 퍼져요
   const kst = new Date(now + 9 * NEWS_HOUR_MS);
   const minutesNow = kst.getUTCHours() * 60 + kst.getUTCMinutes();
-  const callsLeft = Math.max(1, Math.ceil((1440 - minutesNow) / 15));
+  const callsLeft = Math.max(1, Math.ceil((1440 - minutesNow) / 5));
   if (Math.random() >= Math.min(1, remaining / callsLeft)) return { published: 0, reason: "이번엔 공시가 없어요" };
 
   const stocks = await listStocks(env);
@@ -6553,7 +6553,7 @@ export async function finishNews(env, news, changes) {
 //  - 서프라이즈는 0 중심 좌우 대칭이라 호조와 부진이 같은 확률이에요. (한쪽으로 쏠리지 않아요)
 //  - 같은 주기에 두 번 실행되지 않게 Firestore config/earnings 에 기록해요:
 //      { nextAt: 다음 시작 시각(ms), pending: { key, targets(줄바꿈 구분), releaseAt, announcedAt } | null, lastKey, lastAt }
-//  - 호출: cron-job.org에서 5,20,35,50분마다 /api/cron?task=earnings (시세 변동이 0,15,30,45분이라 겹치지 않게 5분 뒤)
+//  - 호출: cron-job.org에서 2,7,12…분마다(2-59/5) /api/cron?task=earnings (시세 변동이 0,5,10…분이라 겹치지 않게 2분 뒤)
 //    (평소엔 문서 1개만 읽고 끝나요. 급등락 시각 근처에는 쉬어요.)
 //    테스트: /api/cron?task=earnings&force=1 → 주기·시각과 상관없이 지금 바로 시작해요. (진행 중이면 무시)
 //  EARNINGS_INTERVAL_DAYS: 실적 시즌 주기(일)    EARNINGS_HOUR_KST: 시작 시각(한국시간 시)
@@ -6580,7 +6580,7 @@ function earningsStartAfter(now, days = 0) {
   return t;
 }
 
-// 크론(5,20,35,50분마다): 시작 / 발표 중 지금 할 일을 해요
+// 크론(2,7,12…분마다): 시작 / 발표 중 지금 할 일을 해요
 export async function runEarnings(env, { force = false } = {}) {
   const now = Date.now();
   if (isSurgeMoment(now)) return { ok: true, skipped: true, reason: "급등락 시각이라 쉬어요" };
@@ -8002,7 +8002,7 @@ function futuresHelpText() {
     "`/선물` 시작 · `/선물목록` 내 손익 보기 · `/선물청산` 정산하고 해정 받기",
     "",
     "**꼭 알아두세요**",
-    "- 시세는 15분마다 크게 움직여요. 배율이 높을수록 한 번에 강제청산되기 쉬워요",
+    "- 시세는 5분마다 크게 움직여요. 배율이 높을수록 한 번에 강제청산되기 쉬워요",
     "- 급등락 시간(18시/21시/0시)에는 변동이 훨씬 커서 더 위험해요",
     "- 강제청산은 시세가 바뀔 때 자동으로 돼요. 시작할 때 강제청산가를 알려줘요",
     "- 상장폐지되면 폐지 가격으로 자동 정산돼요",

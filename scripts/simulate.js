@@ -8,8 +8,8 @@ const STOCKS = Number(process.argv[2]) || 1000;
 const START_PRICE = 10000;
 const NORMAL = { minPct: -20, maxPct: 20 };
 const SURGE = { minPct: -80, maxPct: 120, crashChance: 0.005, crashPct: -100 };
-const TICKS_PER_DAY = 96; // 15분마다
-const SURGES = [18 * 4, 21 * 4, 0]; // 하루 중 급등락이 일어나는 변동 번호(18시, 21시, 0시)
+const TICKS_PER_DAY = 288; // 5분마다
+const SURGES = [18 * 12, 21 * 12, 0]; // 하루 중 급등락이 일어나는 변동 번호(18시, 21시, 0시)
 const DAYS = [1, 3, 7, 14];
 
 // 3단계용: 종목마다 업종을 돌려가며 배정 (마지막 칸은 "기타" = 업종 충격 없음), beta는 모두 1

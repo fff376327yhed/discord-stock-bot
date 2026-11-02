@@ -104,7 +104,7 @@ export function defaultSourceOf(kind) {
 // 절대 예외를 던지지 않아요. (실패하면 quotes 에서 빠지고 errors 에 이유가 남아요 → 호출한 쪽은 직전 가격을 유지)
 let quoteCache = { key: "", at: 0, result: null };
 
-// 시세 캐시 비우기 (테스트용. 운영에서는 변동 간격이 15분이라 따로 부를 일이 없어요)
+// 시세 캐시 비우기 (테스트용. 운영에서는 변동 간격이 5분이라 따로 부를 일이 없어요)
 export function clearQuoteCache() {
   quoteCache = { key: "", at: 0, result: null };
 }

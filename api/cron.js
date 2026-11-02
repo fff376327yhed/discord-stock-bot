@@ -73,10 +73,10 @@ async function runFluctuation(env, range, label) {
   }
 
   // 2-3) 은행: 만기 알림 / 만기 대출 자동 회수 / 연체 처리 (실패해도 시세 변동 결과는 그대로 응답)
-  // 읽기를 아끼려고 정각 근처(0~14분) 변동에서만 돌려요. (1시간에 1번)
+  // 읽기를 아끼려고 정각 근처(0~4분) 변동에서만 돌려요. (1시간에 1번)
   let bank = null;
   try {
-    if (new Date().getMinutes() < 15) bank = await processBank(env);
+    if (new Date().getMinutes() < 5) bank = await processBank(env);
   } catch (err) {
     console.error("은행 처리 실패:", err.message);
   }
@@ -122,7 +122,7 @@ async function runFluctuation(env, range, label) {
   });
 }
 
-// ---------- 1) 평소 변동: -50% ~ +100% (종 모양이라 끝값은 거의 안 나와요) (15분마다, cron-job.org: */15 * * * *) ----------
+// ---------- 1) 평소 변동: -50% ~ +100% (종 모양이라 끝값은 거의 안 나와요) (5분마다, cron-job.org: */5 * * * *) ----------
 const NORMAL_RANGE = { minPct: -50, maxPct: 100 }; // 평소에도 시장·업종 충격은 작게 들어가요 (surge 아님)
 
 async function fluctuateTask(env) {
@@ -190,7 +190,7 @@ async function prealertTask(env) {
 }
 
 // ---------- 진입점 ----------
-// ---------- 4) 공시 (5분 전 공지, cron-job.org: 10,25,40,55 * * * *) ----------
+// ---------- 4) 공시 (변동 2분 전 공지, cron-job.org: 3-59/5 * * * *) ----------
 async function newsTask(env) {
   const result = await publishNews(env);
   return Response.json({ ok: true, ...result });
@@ -208,9 +208,9 @@ async function fxRateTask(env) {
   return Response.json({ ok: true, ...rate });
 }
 
-// ---------- 7) 실적 시즌 (cron-job.org: 5,20,35,50 * * * *, 주소: /api/cron?task=earnings) ----------
+// ---------- 7) 실적 시즌 (cron-job.org: 2-59/5 * * * *, 주소: /api/cron?task=earnings) ----------
 // 주기(기본 7일)마다 대상 종목을 예고하고, 30분쯤 뒤 실적을 발표해요. (상수는 src/lib.js의 EARNINGS_*)
-// 시세 변동(0,15,30,45분)과 겹치지 않게 5분 뒤에 불러요. 평소엔 문서 1개만 읽고 끝나요.
+// 시세 변동(0,5,10…분)과 겹치지 않게 2분 뒤에 불러요. 평소엔 문서 1개만 읽고 끝나요.
 // 테스트: /api/cron?task=earnings&force=1 → 시각과 상관없이 지금 바로 시작해요.
 async function earningsTask(env, url) {
   const result = await runEarnings(env, { force: url?.searchParams.get("force") === "1" });
