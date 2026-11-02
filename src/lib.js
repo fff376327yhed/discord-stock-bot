@@ -4850,7 +4850,7 @@ const BANK_HOUR_MS = 60 * 60 * 1000;
 //    (유저가 오래 안 들어와도 index 비율 하나로 정확히 계산 가능)
 //  - 저장: config/bankRate = { mult, depositRate, loanRates, index, indexAt }
 export const MARKET_RATE_MIN_MULT = 0.1;
-export const MARKET_RATE_MAX_MULT = 3.0;
+export const MARKET_RATE_MAX_MULT = 5.0;
 const RATE_REVERT = 0.5; // 직전 배율에서 1.0(기준) 쪽으로 돌아오는 정도 (0이면 매번 1.0에서 새로 뽑아요)
 const RATE_LIQUIDITY_K = 0.6; // 은행에 돈이 최대로 쌓였을 때 배율 중심을 내리는 크기
 const RATE_STRESS_K = 0.5; // 연체·강제매도가 최대일 때 배율 중심을 올리는 크기
@@ -7171,6 +7171,19 @@ function textChoices(items, keyword) {
     .map((i) => ({ name: i.label.slice(0, 100), value: i.value }));
 }
 
+// 외국자산이 25개 제한에 밀려 안 보이지 않게, 국내 20 + 외국 5 비율로 섞어요 (한쪽이 모자라면 다른 쪽이 채워요)
+function stockChoices(stocks, keyword, toItem, foreignSlots = 5) {
+  const lower = keyword.toLowerCase();
+  const hit = stocks.filter((s) => s.name.toLowerCase().includes(lower));
+  const dom = hit.filter((s) => !isForeign(s));
+  const fo = hit.filter((s) => isForeign(s));
+  const fTake = Math.min(fo.length, Math.max(foreignSlots, 25 - dom.length));
+  const dTake = Math.min(dom.length, 25 - fTake);
+  return [...dom.slice(0, dTake), ...fo.slice(0, fTake)]
+    .map(toItem)
+    .map((i) => ({ name: i.label.slice(0, 100), value: i.value }));
+}
+
 // 숫자 옵션용: suggestions = [{ label, value(정수) }]
 // 숫자를 입력하면 그 숫자를 맨 앞에 보여주고, 같은 숫자로 시작하는 예시만 남겨요.
 function numberChoices(suggestions, keyword, labelFor) {
@@ -7406,19 +7419,17 @@ export async function autocomplete(interaction, env) {
     }
 
     if (command === "매수" || command === "예약매수") {
-      // 매수는 지금 잔고로 최대 몇 주까지 살 수 있는지 함께 표시
-      return textChoices(
-        stocks.map((s) => ({
-          label: `${iconName(s)}${dangerTag(s.price, true)} (${moneyOf(s, s.price)} · 최대 ${maxBuyQty(isForeign(s) ? user.usd || 0 : user.balance, s.price).toLocaleString()}주)${mTag(s)}`,
-          value: s.name,
-        })),
-        keyword
-      );
+      // 매수는 지금 잔고로 최대 몇 주까지 살 수 있는지 함께 표시 (외국자산도 항상 일부 보여줘요)
+      return stockChoices(stocks, keyword, (s) => ({
+        label: `${iconName(s)}${dangerTag(s.price, true)} (${moneyOf(s, s.price)} · 최대 ${maxBuyQty(isForeign(s) ? user.usd || 0 : user.balance, s.price).toLocaleString()}주)${mTag(s)}`,
+        value: s.name,
+      }));
     }
 
-    return textChoices(
-      pickable(stocks.map((s) => ({ label: `${iconName(s)}${dangerTag(s.price, true)} (${moneyOf(s, s.price)})${mTag(s)}`, value: s.name }))),
-      keyword
+    return stockChoices(
+      stocks.filter((s) => !taken.has(s.name)),
+      keyword,
+      (s) => ({ label: `${iconName(s)}${dangerTag(s.price, true)} (${moneyOf(s, s.price)})${mTag(s)}`, value: s.name })
     );
   }
 
