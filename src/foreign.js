@@ -24,7 +24,8 @@
 
 export const FOREIGN_KINDS = ["crypto", "us"];
 export const FOREIGN_START_PRICE = 1000; // 상장가 기본값 (LISTING_PRICE 와 같게 유지)
-export const DEFAULT_MULT = 3; // 기본 배율
+export const DEFAULT_MULT = 5; // 기본 배율 (새 종목·배율이 비어 있는 종목에 쓰여요)
+export const US_TRADE_ANYTIME = true; // true: 미국 장이 닫혀 있어도(= 한국 낮 시간) 마지막 시세 가격으로 매수·매도·선물을 할 수 있어요. false: 예전처럼 장이 열려야만 가능
 export const QUOTE_STALE_MS = 30 * 60 * 1000; // 실제 시세가 이보다 오래되면 "시세 지연"
 export const SUSPECT_RATIO = 2; // 직전 시세보다 이 배수(또는 1/배수)를 넘게 움직이면 API 오류로 의심해요
 export const SUSPECT_WINDOW_MS = 6 * 60 * 60 * 1000; // 마지막 시세가 이 시간 안일 때만 의심해요 (오래 못 받았으면 큰 변화도 진짜일 수 있어요)

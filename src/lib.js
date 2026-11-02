@@ -1,7 +1,7 @@
 // 통합 라이브러리: env / firebase / listing / economy / actionlog / attendance / mining / chart / crowd / notify / orders / commands
 // (예전 src/*.js 12개를 한 파일로 합쳤어요. 파일 안 순서는 의존 순서예요.)
 // 외국자산(코인·해외주식) 시세/가격 계산은 별도 파일(foreign.js)에 있어요. (이 파일을 가져오지 않는 독립 모듈)
-import { isForeign, foreignIcon, fetchCoinQuotes, fetchUsQuotes, usSymbolOf, buildForeignUpdate, isSuspectQuote, getUsMarketStatus, closedMessage } from "./foreign.js";
+import { isForeign, foreignIcon, fetchCoinQuotes, fetchUsQuotes, usSymbolOf, buildForeignUpdate, isSuspectQuote, getUsMarketStatus, closedMessage, US_TRADE_ANYTIME, DEFAULT_MULT } from "./foreign.js";
 import { askGuide } from "./guidebot.js";
 
 // ============================================================
@@ -1109,6 +1109,7 @@ function balanceLine(before, after) {
 // 미국 주식은 장이 닫혀 있으면 사고팔 수 없어요. (코인·일반 종목은 항상 가능)
 // 닫혀 있으면 안내 문장을, 열려 있거나 해당 없으면 null 을 돌려줘요.
 async function usClosedNotice(env, stocks) {
+  if (US_TRADE_ANYTIME) return null; // 장이 닫혀 있어도 마지막 시세 가격으로 거래할 수 있어요 (foreign.js에서 켜고 꺼요)
   if (!stocks.some((s) => s && s.kind === "us")) return null;
   const status = await getUsMarketStatus(env);
   return status.open ? null : closedMessage(status);
@@ -1753,7 +1754,7 @@ function agoText(ms) {
 
 // /종목정보에 들어갈 외국자산 전용 줄들 (배당 줄 자리를 대신해요. 외국자산은 배당이 없어요)
 function foreignInfoLines(stock, now = Date.now(), market = null) {
-  const mult = Number.isFinite(stock.mult) && stock.mult > 0 ? stock.mult : 3;
+  const mult = Number.isFinite(stock.mult) && stock.mult > 0 ? stock.mult : DEFAULT_MULT;
   const start = Number.isFinite(stock.startPrice) && stock.startPrice > 0 ? stock.startPrice : 1000;
   const source = SOURCE_LABEL[stock.source] || stock.source || "실제 시세";
   const lines = [];
@@ -1774,7 +1775,9 @@ function foreignInfoLines(stock, now = Date.now(), market = null) {
   }
   lines.push(`💵 배당: 외국자산(코인·해외주식)은 배당이 없어요. · 🕒 실제 시세를 따라 15분마다 움직여요.`);
   if (stock.kind === "us") {
-    if (market && !market.open) {
+    if (market && !market.open && US_TRADE_ANYTIME) {
+      lines.push(`${closedMessage(market)}\n   장이 닫혀 있는 동안은 가격이 마지막 시세 그대로예요. 그 가격으로 매수·매도·선물은 할 수 있어요.`);
+    } else if (market && !market.open) {
       lines.push(`${closedMessage(market)}\n   장이 닫혀 있는 동안은 가격이 그대로이고, 매수·매도·선물이 막혀요. (예약·손절·익절은 장이 열리면 체결돼요)`);
     } else if (market && market.open) {
       lines.push("🟢 미국 장이 열려 있어요.");
@@ -4138,7 +4141,7 @@ export async function processOrders(env) {
   const usNames = new Set(stocks.filter((s) => s.kind === "us").map((s) => s.name));
   const haltedNames = new Set(stocks.filter(isHalted).map((s) => s.name)); // 거래정지 종목의 예약은 취소하지 않고 재개될 때까지 보류
   // 미국 장이 닫혀 있으면 미국 주식 예약은 취소하지 않고 그대로 두었다가, 장이 열리면 체결해요.
-  const usOpen = usNames.size === 0 ? true : (await getUsMarketStatus(env)).open;
+  const usOpen = usNames.size === 0 || US_TRADE_ANYTIME ? true : (await getUsMarketStatus(env)).open;
   const summary = { filled: 0, cancelled: 0 };
 
   await Promise.all(
@@ -7171,12 +7174,26 @@ function textChoices(items, keyword) {
     .map((i) => ({ name: i.label.slice(0, 100), value: i.value }));
 }
 
-// 외국자산이 25개 제한에 밀려 안 보이지 않게, 국내 20 + 외국 5 비율로 섞어요 (한쪽이 모자라면 다른 쪽이 채워요)
-function stockChoices(stocks, keyword, toItem, foreignSlots = 5) {
+// 외국자산이 25개 제한에 밀려 안 보이지 않게, 국내와 외국을 섞어서 보여줘요 (한쪽이 모자라면 다른 쪽이 채워요)
+// 글자를 안 쳤을 때: 국내 13 + 외국 12 (미국주식·코인이 반반 섞여요)
+// "미국"/"해외주식"/"us" 를 치면 미국주식만, "코인"/"crypto" 를 치면 코인만 모아서 보여줘요. 종목 이름을 쳐도 걸러져요.
+const KIND_WORDS = { us: ["미국", "해외", "us"], crypto: ["코인", "암호", "crypto"] };
+function stockChoices(stocks, keyword, toItem, foreignSlots = 12) {
   const lower = keyword.toLowerCase();
-  const hit = stocks.filter((s) => s.name.toLowerCase().includes(lower));
+  const kindHit = lower && Object.entries(KIND_WORDS).find(([, words]) => words.some((w) => w.startsWith(lower) || lower.startsWith(w)))?.[0];
+  const hit = stocks.filter((s) => s.name.toLowerCase().includes(lower) || (kindHit && s.kind === kindHit));
   const dom = hit.filter((s) => !isForeign(s));
   const fo = hit.filter((s) => isForeign(s));
+  if (fo.length > 1 && !lower) {
+    // 미국주식과 코인이 한쪽으로 몰리지 않게 번갈아 담아요
+    const us = fo.filter((s) => s.kind === "us");
+    const other = fo.filter((s) => s.kind !== "us");
+    fo.length = 0;
+    for (let i = 0; i < Math.max(us.length, other.length); i++) {
+      if (us[i]) fo.push(us[i]);
+      if (other[i]) fo.push(other[i]);
+    }
+  }
   const fTake = Math.min(fo.length, Math.max(foreignSlots, 25 - dom.length));
   const dTake = Math.min(dom.length, 25 - fTake);
   return [...dom.slice(0, dTake), ...fo.slice(0, fTake)]
@@ -7353,7 +7370,7 @@ export async function autocomplete(interaction, env) {
   if (base === "종목" && command !== "종목추가") {
     const stocks = await listStocksForAutocomplete(env); // 이름순 (60초 캐시)
     // 미국 장이 닫혀 있으면 미국 주식 옆에 🌙장마감 표시 (자동완성은 3초 제한이라 확인은 1초까지만 기다려요)
-    const usClosed = stocks.some((s) => s.kind === "us" && ["매수", "예약매수", "매도", "예약매도", "자동매도", "선물"].includes(command))
+    const usClosed = !US_TRADE_ANYTIME && stocks.some((s) => s.kind === "us" && ["매수", "예약매수", "매도", "예약매도", "자동매도", "선물"].includes(command))
       ? !(await getUsMarketStatus(env, Date.now(), 1000)).open
       : false;
     const mTag = (s) => staleTag(s) + (usClosed && s.kind === "us" ? " 🌙장마감" : "");
