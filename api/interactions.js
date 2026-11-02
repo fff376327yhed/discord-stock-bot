@@ -85,7 +85,7 @@ function deferReply(mode) {
 }
 
 // 지연 응답으로 띄운 "처리 중…" 메시지를 결과로 바꿈
-async function editOriginal(interaction, content) {
+async function editOriginal(interaction, content, env) {
   const data = typeof content === "string" ? { content } : { ...content };
   delete data.flags; // 공개 방식은 첫 응답에서 이미 정해졌어요
   data.allowed_mentions = NO_PING;
@@ -98,7 +98,26 @@ async function editOriginal(interaction, content) {
       body: JSON.stringify(data),
     }
   );
-  if (!res.ok) console.error(`지연 응답 수정 실패(${res.status}):`, await res.text());
+  if (res.ok) return;
+
+  const errText = await res.text().catch(() => "");
+  console.error(`지연 응답 수정 실패(${res.status}):`, errText);
+
+  // 404 "Unknown Webhook"은 인터랙션 토큰이 만료(15분 초과)됐거나 원본 메시지가 사라진 경우예요.
+  // 이러면 webhook으로는 더 이상 손쓸 수 없으니, 봇 토큰으로 채널에 새 메시지로라도 보내요.
+  // (나만 보기(ephemeral) 응답이었다면 원래 보이던 사람에게만 보일 수 없어 공개로 나가는 점은 감안해 주세요.)
+  if (res.status === 404 && env?.DISCORD_BOT_TOKEN && interaction.channel_id) {
+    try {
+      const fallbackRes = await fetch(`https://discord.com/api/v10/channels/${interaction.channel_id}/messages`, {
+        method: "POST",
+        headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!fallbackRes.ok) console.error(`지연 응답 채널 전송 실패(${fallbackRes.status}):`, await fallbackRes.text());
+    } catch (err) {
+      console.error("지연 응답 채널 전송 중 오류:", err.message);
+    }
+  }
 }
 
 // 명령어 이름으로 공개 방식을 정해요. 기본값은 "나만 보기"예요.
@@ -215,7 +234,7 @@ async function handler(request) {
     waitUntil(
       work.then(async (result) => {
         try {
-          await editOriginal(interaction, result.content);
+          await editOriginal(interaction, result.content, env);
         } catch (err) {
           console.error("지연 응답 전송 실패:", err.message);
         }

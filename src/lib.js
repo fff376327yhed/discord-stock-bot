@@ -276,19 +276,34 @@ async function incrementFields(env, items) {
   if (!items.length) return true;
   const token = await getAccessToken(env);
   const docRoot = `projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents`;
-  const res = await fetch(`${baseUrl(env)}:commit`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      writes: items.map((it) => ({
-        update: { name: `${docRoot}/${it.path}` },
-        updateMask: { fieldPaths: [] }, // 다른 필드는 건드리지 않아요
-        updateTransforms: [{ fieldPath: it.field, increment: { doubleValue: it.by } }],
-        currentDocument: { exists: true },
-      })),
-    }),
-  });
-  if (!res.ok) throw new Error(`Firestore 증가 실패: ${await res.text()}`);
+
+  // 한 번의 commit에 여러 문서를 같이 보내면 Firestore가 전부 "암시적 트랜잭션"으로 묶어서,
+  // 그중 하나(예: 상장폐지·삭제된 종목)가 "No document to update"로 실패하면 나머지 정상 종목의
+  // 증가분까지 통째로 날아가요. 그래서 문서마다 커밋을 따로 보내 서로 영향받지 않게 해요.
+  const results = await Promise.allSettled(
+    items.map(async (it) => {
+      const res = await fetch(`${baseUrl(env)}:commit`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          writes: [
+            {
+              update: { name: `${docRoot}/${it.path}` },
+              updateMask: { fieldPaths: [] }, // 다른 필드는 건드리지 않아요
+              updateTransforms: [{ fieldPath: it.field, increment: { doubleValue: it.by } }],
+              currentDocument: { exists: true },
+            },
+          ],
+        }),
+      });
+      if (!res.ok) throw new Error(`${it.path} (${it.field}): ${await res.text()}`);
+    })
+  );
+
+  const failed = results.filter((r) => r.status === "rejected");
+  if (failed.length) {
+    throw new Error(`Firestore 증가 실패 (${failed.length}/${items.length}건): ${failed.map((r) => r.reason.message).join(" | ")}`);
+  }
   return true;
 }
 
@@ -3114,7 +3129,9 @@ export async function renderStockChart(points, up) {
       if (data.success && data.url) {
         // 받은 주소가 진짜 이미지를 주는지 확인해요. 아니면 긴 주소 방식으로 넘어가요.
         try {
-          const check = await fetch(data.url, { method: "HEAD", signal: AbortSignal.timeout(3000) });
+          // HEAD는 이 QuickChart 짧은 주소(/chart/render/...)에서 가끔 content-type은 image/png인데
+          // status만 400으로 나오는 경우가 있어서(HEAD를 제대로 지원하지 않는 듯해요), GET으로 확인해요.
+          const check = await fetch(data.url, { method: "GET", signal: AbortSignal.timeout(3000) });
           const type = check.headers.get("content-type") || "";
           if (check.ok && type.startsWith("image/")) return data.url;
           console.error(`QuickChart 이미지 주소 이상(${check.status}, ${type}):`, data.url);
