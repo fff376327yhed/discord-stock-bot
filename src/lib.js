@@ -1997,10 +1997,17 @@ async function decayEconFlow(env, flow, fields) {
 // 종목 문서에 fv(적정 가치)가 있어요. 가격은 fv 주변을 오가고, 너무 벗어나면 서서히 fv 쪽으로 끌려와요.
 // fv는 유저에게 보여주지 않아요. (관리자 API의 종목 목록에만 들어 있어요)
 //   FV_REVERT: 한 번 변동당 끌어당기는 세기(로그 기준). 0이면 끌어당김 없음. 0.02면 가격이 fv에서 벗어난 만큼의 약 2%씩 돌아와요.
-//   FV_DRIFT_SIGMA: fv가 한 번 변동당 제멋대로 움직이는 정도(로그 표준편차). 평균은 0이라 한쪽으로 쏠리지 않아요.
+//   FV_DRIFT_SIGMA: fv가 한 번 변동당 제멋대로 움직이는 정도(로그 표준편차).
+//   FV_DRIFT_MEAN: fv가 한 번 변동당 평균 오르는 정도(로그). 가격이 fv를 따라가서 종목이 서서히 올라요.
+//   MOON_*: 급등락 시각에 아주 드물게 fv가 몇 배~수백 배로 뛰는 "대박" (파레토 분포, 초고가 종목용).
 //   NEWS_FV_FACTOR: 공시 효과 중 fv에 오래 남는 비율. 1이면 공시로 오른 만큼 적정 가치도 그대로 올라요.
 const FV_REVERT = 0.02;
-const FV_DRIFT_SIGMA = 0.004;
+const FV_DRIFT_SIGMA = 0.01; // fv가 한 번 변동당 제멋대로 움직이는 정도 (종목끼리 격차가 벌어져요)
+const FV_DRIFT_MEAN = 0.00014; // fv가 한 번 변동당 평균 오르는 정도(로그). 하루 약 4%, 한 달 약 3.4배
+const MOON_CHANCE = 0.005; // 급등락 시각마다 종목이 "대박"을 터뜨릴 확률 (하루 3번 → 하루 약 1.5%)
+const MOON_MIN = 2; // 대박이면 fv가 최소 이 배수만큼 올라요
+const MOON_ALPHA = 0.8; // 작을수록 초대박이 더 자주 나와요 (파레토 꼬리)
+const MOON_CAP = 1000; // 한 번에 최대 배수
 const NEWS_FV_FACTOR = 0.8;
 
 // ---------- 유저 거래의 가격 영향 (6단계) ----------
@@ -2235,10 +2242,10 @@ function randomLogWithin(lo, hi, sigma) {
 //   newsFvShift: 공시 기울기 중 fv에도 반영할 몫(%p). 안 넘기면 newsShift와 같아요. (실적 발표는 fv를 이미 직접 바꿨으니 0)
 //   common: 시장·업종 공통 충격(로그, commonShockOf 결과). idioSigma: 개별 충격 표준편차(idioSigmaOf 결과, 등급별).
 //           idioSigma를 안 넘기면 예전(2단계)처럼 공통 충격 없이 개별 변동만 써요.
-export function nextChange(price, fvIn, { minPct, maxPct, crashChance = 0, crashPct = -100, impact = 0, newsShift = 0, newsFvShift = newsShift, common = 0, idioSigma, tradeFvShift = 0 }) {
+export function nextChange(price, fvIn, { minPct, maxPct, crashChance = 0, crashPct = -100, impact = 0, newsShift = 0, newsFvShift = newsShift, common = 0, idioSigma, tradeFvShift = 0, moon = false }) {
   const fvBase = Number.isFinite(fvIn) && fvIn > 0 ? fvIn : price;
   // fv는 공시를 따라 움직이고(+ 유저 거래 영향 중 오래 남는 몫), 아주 조금씩 제멋대로 움직여요
-  const fv = Math.max(1, fvBase * (1 + (newsFvShift * NEWS_FV_FACTOR + tradeFvShift) / 100) * Math.exp(FV_DRIFT_SIGMA * randomNormal()));
+  const fv = Math.max(1, fvBase * (1 + (newsFvShift * NEWS_FV_FACTOR + tradeFvShift) / 100) * Math.exp(FV_DRIFT_MEAN + FV_DRIFT_SIGMA * randomNormal()) * (moon && Math.random() < MOON_CHANCE ? Math.min(MOON_CAP, MOON_MIN / Math.pow(1 - Math.random(), 1 / MOON_ALPHA)) : 1));
   if (Math.random() < crashChance) return { pct: crashPct, fv };
   // 끌어당김은 지난번 fv 기준이에요. (공시 효과는 newsShift로 이미 더해지니까 이번 변동에 두 번 세지 않아요)
   const pull = (Math.exp(FV_REVERT * Math.log(fvBase / price)) - 1) * 100;
@@ -2471,6 +2478,7 @@ export async function fluctuatePrices(env, { minPct, maxPct, crashChance = 0, cr
       newsFvShift: newsFv ? newsFv[stock.name] || 0 : undefined, // 실적 발표 공시는 fv를 또 움직이지 않아요
       common: commonShockOf(shocks, stock.sector, stock.beta), // beta × 시장 + 내 업종 (업종 없으면 시장만)
       idioSigma: idioSigmaOf(stock, surge), // 변동성 등급에 따른 개별 충격 크기
+      moon: !!surge, // 급등락 시각에만 "대박" 가능
     });
     let newPrice = Math.max(1, Math.round(stock.price * (1 + pct / 100)));
     // 최고가 기록이 없던 기존 종목은 지금 가격을 최고가로 시작

@@ -138,7 +138,7 @@ async function fluctuateTask(env) {
 // 슬롯 시각이 아니면 아무것도 읽지 않고 바로 끝내요. (평소 변동은 fluctuate 가 담당)
 // 그래서 cron-job.org에서 5분마다 호출해도 읽기가 거의 늘지 않아요.
 // surge: true -> fluctuatePrices가 시장 충격·업종 충격을 급등락용(크게)으로 뽑아요. (상수는 src/lib.js의 SHOCK_SURGE)
-const SURGE_RANGE = { minPct: -90, maxPct: 900, crashChance: 0.005, crashPct: -100, surge: true };
+const SURGE_RANGE = { minPct: -90, maxPct: 900, crashChance: 0.002, crashPct: -100, surge: true };
 
 async function midnightTask(env) {
   const slot = currentSurgeSlot();
