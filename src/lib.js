@@ -2710,6 +2710,7 @@ const CATEGORY = {
   송금: "은행",
   대출: "은행",
   상환: "은행",
+  파산신청: "은행",
   예약매수: "예약",
   예약매도: "예약",
   자동매도: "예약",
@@ -5396,6 +5397,7 @@ async function saveBank(env, userId, bank) {
     earned: bank.earned || 0,
     loans: bank.loans,
     credit: bank.credit || { score: CREDIT_START, onTime: 0, late: 0 },
+    ...(bank.bankrupt ? { bankrupt: bank.bankrupt } : {}),
   });
 }
 
@@ -5604,6 +5606,9 @@ export async function takeLoan(env, userId, amount, termDays) {
   if (Object.values(bank.loans).some((l) => isOverdue(l, now))) {
     return { ok: false, message: "🚨 연체 중인 대출이 있어서 새로 빌릴 수 없어요. `/상환`으로 먼저 갚아 주세요." };
   }
+  if (bank.bankrupt?.at && now < bank.bankrupt.at + BANKRUPT_LOAN_BAN_DAYS * DAY_MS) {
+    return { ok: false, message: `🚫 파산 신청 기록이 있어서 ${dueText(bank.bankrupt.at + BANKRUPT_LOAN_BAN_DAYS * DAY_MS)}까지는 새로 빌릴 수 없어요.` };
+  }
   if (Object.keys(bank.loans).length >= MAX_LOANS_PER_USER) {
     return { ok: false, message: `대출은 최대 ${MAX_LOANS_PER_USER}건까지 가능해요. 먼저 갚아 주세요.` };
   }
@@ -5716,6 +5721,92 @@ export async function repayLoans(env, userId, target, amount) {
   return { ok: true, message: [`💳 **상환 완료** -${total.toLocaleString()}해정`, ...lines, ...creditLines, balanceLine(balanceBefore, user.balance)].join("\n") };
 }
 
+// ---------- /파산신청 : 순자산이 0 이하일 때 빚을 정리하고 처음부터 ----------
+// 모든 자산(잔고·주식·달러·예금·선물·예약)이 채권자에게 넘어가고, 남은 빚은 탕감돼요.
+// 대신 신용점수 0, 대출 금지 BANKRUPT_LOAN_BAN_DAYS일, 재신청 BANKRUPT_COOLDOWN_DAYS일 대기가 붙어요.
+export const BANKRUPT_RESTART_CASH = 1000;
+export const BANKRUPT_COOLDOWN_DAYS = 30;
+export const BANKRUPT_LOAN_BAN_DAYS = 14;
+
+export async function fileBankruptcy(env, userId, { confirm = false } = {}) {
+  const now = Date.now();
+  const [user0, bank0, stocks] = await Promise.all([getUser(env, userId), getBank(env, userId), listStocks(env)]);
+  const bank = accrueBank(structuredClone(bank0), now);
+
+  if (bank.bankrupt?.at && now < bank.bankrupt.at + BANKRUPT_COOLDOWN_DAYS * DAY_MS) {
+    return { ok: false, message: `📄 최근에 파산을 신청한 기록이 있어요. ${dueText(bank.bankrupt.at + BANKRUPT_COOLDOWN_DAYS * DAY_MS)} 이후에 다시 신청할 수 있어요.` };
+  }
+  const debt = Object.values(bank.loans).reduce((sum, l) => sum + loanOwed(l), 0);
+  if (debt <= 0) {
+    return { ok: false, message: "갚을 빚이 없어서 파산을 신청할 수 없어요. (파산은 대출이 있을 때만 가능해요)" };
+  }
+  const { net } = await netWorthOf(env, userId, user0, bank, stocks);
+  if (net > 0) {
+    return { ok: false, message: `순자산이 아직 ${net.toLocaleString()}해정으로 플러스예요. 파산은 **순자산이 0 이하**일 때만 신청할 수 있어요. (자산을 정리해서 \`/상환\`으로 갚아 보세요)` };
+  }
+
+  const assets = net + debt; // 빚을 빼기 전 자산 합계
+  const preview = [
+    "⚠️ **파산 신청 미리보기**",
+    `현재 순자산 **${net.toLocaleString()}해정** (자산 ${Math.max(0, assets).toLocaleString()} − 빚 ${debt.toLocaleString()})`,
+    "",
+    "신청하면:",
+    "• 보유 주식·코인·달러·예금·선물·예약 주문이 **전부 정리돼 채권자에게 넘어가요**",
+    `• 남은 빚은 **전부 탕감**돼요. 그리고 **${BANKRUPT_RESTART_CASH.toLocaleString()}해정**으로 다시 시작해요`,
+    `• 신용점수가 **0점(F등급)**이 되고, **${BANKRUPT_LOAN_BAN_DAYS}일간 대출 금지**예요`,
+    `• **${BANKRUPT_COOLDOWN_DAYS}일 동안** 다시 파산 신청할 수 없어요`,
+    "",
+    "정말 신청하려면 `/파산신청 확인:True` 로 다시 입력하세요. (되돌릴 수 없어요)",
+  ].join("\n");
+  if (!confirm) return { ok: true, message: preview };
+
+  // 1) 유저: 잠금으로 한 번만 처리 (그 사이 순자산이 바뀌었을 수 있어서 한 번 더 확인은 위에서 했고, 여기선 중복 신청만 막아요)
+  const wiped = await updateUserLocked(env, userId, (user) => {
+    if (user.bankruptAt && now < user.bankruptAt + 60 * 1000) return { save: false, result: null }; // 연타 방지
+    const held = { ...user.holdings };
+    user.holdings = {};
+    user.costs = {};
+    user.usd = 0;
+    user.balance = BANKRUPT_RESTART_CASH;
+    user.bankruptAt = now;
+    return { save: true, result: held };
+  });
+  if (!wiped) return { ok: false, message: "이미 파산 신청을 처리했어요." };
+
+  // 2) 선물·예약 정리
+  await Promise.all([saveFutureItems(env, userId, {}), saveOrderItems(env, userId, {})]);
+
+  // 3) 은행: 예금·대출 모두 비우고 신용 0점, 파산 기록 남김
+  bank.deposit = 0;
+  bank.depositAt = now;
+  bank.earned = 0;
+  bank.loans = {};
+  bank.credit = { score: 0, onTime: 0, late: 0 };
+  bank.bankrupt = { at: now, debt, net };
+  await saveBank(env, userId, bank);
+
+  // 4) 종목별 유통 수량·주주수 되돌리기 (외국자산은 집계하지 않아요)
+  const stockMap = Object.fromEntries(stocks.map((s) => [s.name, s]));
+  const shareChanges = Object.entries(wiped)
+    .filter(([name, qty]) => qty > 0 && stockMap[name] && !isForeign(stockMap[name]))
+    .map(([name, qty]) => ({ name, qty: -qty, closedHolder: true }));
+  await Promise.all([
+    recordShareChange(env, shareChanges),
+    addHistory(env, userId, `파산 신청: 빚 ${debt.toLocaleString()}해정 탕감, ${BANKRUPT_RESTART_CASH.toLocaleString()}해정으로 재시작`),
+    recordEconFlow(env, "stress", 3),
+  ]);
+
+  return {
+    ok: true,
+    message: [
+      "📄 **파산 신청이 받아들여졌어요.**",
+      `빚 ${debt.toLocaleString()}해정은 탕감됐고, 모든 자산이 정리됐어요.`,
+      `💰 ${BANKRUPT_RESTART_CASH.toLocaleString()}해정으로 다시 시작해요. 힘내요!`,
+      `🚫 신용점수 0점 · 대출 금지 ${BANKRUPT_LOAN_BAN_DAYS}일 · 재신청 ${BANKRUPT_COOLDOWN_DAYS}일 뒤`,
+    ].join("\n"),
+  };
+}
+
 // ---------- /은행 : 내 현황 (조회하는 순간 기준) ----------
 export async function bankStatus(env, userId) {
   const now = Date.now();
@@ -5744,6 +5835,12 @@ export async function bankStatus(env, userId) {
   }
   lines.push("", `📋 **대출 한도**: 남은 ${limit.available.toLocaleString()}해정 / 전체 ${limit.total.toLocaleString()}해정 (순자산 ${net.toLocaleString()}해정의 ${Math.round(limit.ratio * 100)}%, 최소 ${LOAN_LIMIT_MIN.toLocaleString()})`);
   lines.push(creditLine(bank));
+  if (bank.bankrupt?.at) {
+    const banEnd = bank.bankrupt.at + BANKRUPT_LOAN_BAN_DAYS * DAY_MS;
+    const refileAt = bank.bankrupt.at + BANKRUPT_COOLDOWN_DAYS * DAY_MS;
+    if (now < banEnd) lines.push(`🚫 **파산 기록**: 대출 금지 ${dueText(banEnd)}까지`);
+    else if (now < refileAt) lines.push(`📄 **파산 기록**: 재신청은 ${dueText(refileAt)} 이후 가능`);
+  }
   lines.push(marketRateLine(bank.rate, now, creditGrade(bank.credit).rateMul) + " (내 신용등급 배율 적용)");
   return lines.join("\n");
 }
@@ -7277,6 +7374,11 @@ export const commandDefinitions = [
       { name: "금액", description: "갚을 해정 (안 적으면 전액)", type: 4, required: false, autocomplete: true, min_value: 1 },
     ],
   },
+  {
+    name: "파산신청",
+    description: "순자산이 0 이하일 때 빚을 탕감받고 처음부터 다시 시작해요. (모든 자산 정리, 신용 0점)",
+    options: [{ name: "확인", description: "체크하면 실제로 파산을 신청해요 (안 하면 미리보기)", type: 5, required: false }],
+  },
   { name: "보험", description: "상장폐지 보험 설명과 내가 가입한 보험을 봅니다." },
   {
     name: "보험가입",
@@ -8354,6 +8456,10 @@ function bankHelpText(rate) {
     "예금·대출·상환·송금은 **해정만** 돼요. 달러는 `/환전`으로 바꿔서 써요 (이자는 없어요)",
     "연체돼도 달러와 외국자산은 자동 회수·강제 매도되지 않아요 (잔고 → 예금, 해정 주식 순서)",
     "",
+    "**📄 파산신청**",
+    `\`/파산신청\` — 순자산이 0 이하이고 빚이 있을 때만 가능. 먼저 미리보기가 나오고, \`확인:True\`를 붙이면 실제로 신청돼요`,
+    `모든 자산이 정리되고 빚은 탕감, ${BANKRUPT_RESTART_CASH.toLocaleString()}해정으로 재시작해요. 신용점수 0점, 대출 ${BANKRUPT_LOAN_BAN_DAYS}일 금지, ${BANKRUPT_COOLDOWN_DAYS}일 동안 재신청 불가`,
+    "",
     "`/은행` — 내 예금·대출·이자·한도를 지금 이 순간 기준으로 보기",
   ].join("\n");
 }
@@ -9146,6 +9252,9 @@ export const handlers = {
 
   상환: async (interaction, env) =>
     (await repayLoans(env, interaction.member.user.id, String(opt(interaction, "대출") ?? "").trim(), opt(interaction, "금액"))).message,
+
+  파산신청: async (interaction, env) =>
+    (await fileBankruptcy(env, interaction.member.user.id, { confirm: opt(interaction, "확인") === true })).message,
 
   // 가격 낮은 순 (listProducts가 정렬해서 줌)
   // 모두에게 보이는 무음 응답 (interactions.js의 SILENT_COMMANDS에 "주식상점" 등록)
