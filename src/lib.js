@@ -1044,6 +1044,59 @@ export async function saveUser(env, userId, user) {
   await setDoc(env, `users/${userId}`, user);
 }
 
+// ---------- 동시 요청 방지 (낙관적 잠금) ----------
+// 같은 유저가 명령어를 연타하거나 두 번 눌러도 잔고·체력이 꼬이지 않게 해요.
+// 읽을 때의 문서 수정 시각(updateTime)을 기억해 두고, 저장할 때 "그 사이 아무도 안 바꿨을 때만" 저장해요.
+// 그 사이 바뀌었으면 처음부터 다시 읽고 계산해요. (mutate 안에서는 저장·전송 같은 부수 효과를 만들면 안 돼요)
+async function getDocMeta(env, path) {
+  const token = await getAccessToken(env);
+  const res = await fetch(`${baseUrl(env)}/${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Firestore 조회 실패: ${await res.text()}`);
+  const data = await res.json();
+  return { data: fromFields(data.fields), updateTime: data.updateTime };
+}
+
+// 성공하면 true, 그 사이 다른 요청이 문서를 바꿨으면 false
+async function setDocIfUnchanged(env, path, obj, updateTime) {
+  const token = await getAccessToken(env);
+  const params = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`);
+  params.push(`currentDocument.updateTime=${encodeURIComponent(updateTime)}`);
+  const res = await fetch(`${baseUrl(env)}/${path}?${params.join("&")}`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ fields: toFields(obj) }),
+  });
+  if (res.ok) return true;
+  const text = await res.text();
+  if (res.status === 409 || (res.status === 400 && /FAILED_PRECONDITION|ABORTED/.test(text))) return false;
+  throw new Error(`Firestore 저장 실패: ${text}`);
+}
+
+// mutate(user) -> { save: boolean, result: any }   save가 true면 user를 저장하고, 어느 쪽이든 result를 돌려줘요.
+export async function updateUserLocked(env, userId, mutate, tries = 5) {
+  const path = `users/${userId}`;
+  for (let i = 0; i < tries; i++) {
+    let meta = await getDocMeta(env, path);
+    if (!meta) {
+      await getUser(env, userId); // 신규 유저면 기본값으로 만들어 둬요
+      meta = await getDocMeta(env, path);
+      if (!meta) throw new Error("유저 정보를 만들지 못했어요.");
+    }
+    const user = meta.data;
+    if (!user.holdings) user.holdings = {};
+    if (!user.items) user.items = {};
+    if (!user.costs) user.costs = {};
+    if (!Number.isFinite(user.usd)) user.usd = 0;
+
+    const out = mutate(user);
+    if (!out.save) return out.result;
+    if (await setDocIfUnchanged(env, path, user, meta.updateTime)) return out.result;
+    await new Promise((r) => setTimeout(r, 40 + Math.random() * 80)); // 잠깐 쉬고 다시 시도
+  }
+  throw new Error("지금 요청이 한꺼번에 몰려서 처리하지 못했어요. 잠시 뒤 다시 시도해 주세요.");
+}
+
 // 관리자 패널에 ID와 같이 표시할 닉네임/이름을 최신으로 저장해둠.
 // 명령어를 쓸 때마다 호출하고, 실패해도 명령어 자체는 막지 않음.
 export async function touchUsername(env, userId, username) {
@@ -2638,7 +2691,7 @@ const collectionOf = (day) => `logs_${day}`;
 // 이것도 남기고 싶으면 이름을 이 목록에서 지우세요.
 export const VIEW_ONLY = new Set([
   "도움말", "주식목록", "그래프", "상장폐지종류", "보유종목", "잔고", "내정보",
-  "지수", "종목정보", "관심목록", "봇현황", "랭킹", "내역", "예약목록", "보유상품", "알림확인", "채굴정보", "주식상점",
+  "지수", "종목정보", "관심목록", "봇현황", "랭킹", "내역", "예약목록", "보유상품", "알림확인", "채굴정보", "채굴랭킹", "광물", "주식상점",
   "선물목록", "선물설명", "은행", "은행설명", "배당", "공시목록", "보험", "환율", "주식질문",
 ]);
 
@@ -2665,6 +2718,7 @@ const CATEGORY = {
   출석체크: "출석",
   채굴: "채굴",
   채굴업그레이드: "채굴",
+  광물판매: "채굴",
   종목생성: "종목생성",
   알림설정: "알림",
   종목추가: "관리자",
@@ -2867,6 +2921,50 @@ const UPGRADE_COST_SOFT_LEVEL = 15;    // 이 레벨부터 완만한 배율 적�
 const UPGRADE_BASE_COUNT = 30;    // 노가다로 무료 업그레이드하려면 필요한 채굴 횟수(Lv1 기준)
 const UPGRADE_COUNT_GROWTH = 10;  // 레벨마다 필요 횟수 증가량
 
+// ---------- 대박 · 연속 채굴 보너스 · 광물 ----------
+const JACKPOT_CHANCE = 0.02;      // 채굴할 때마다 이 확률로 "대박" (2%)
+const JACKPOT_MULT = 3;           // 대박이면 보상 ×3
+
+const STREAK_BONUS_PER_DAY = 0.03; // 연속 채굴 하루마다 보상 +3%
+const STREAK_BONUS_MAX_DAYS = 10;  // 최대 10일치까지만 쌓여요 (= 최대 +30%)
+const STREAK_MILESTONES = { 7: 500, 14: 1500, 30: 5000 }; // 연속 N일을 채운 날 한 번 주는 보너스(해정)
+
+// 채굴할 때마다 광물이 나올 수 있어요. 한 번에 최대 1개, 위에서부터 확률을 차례로 따져요.
+// price는 Lv1 기준 판매가예요. (평균으로 따지면 채굴 1회당 보상의 약 20% 정도가 광물로 더해져요) 채굴 레벨이 오르면 평균 보상이 오르는 만큼 같이 올라가요.
+const MINERALS = [
+  { name: "구리", icon: "🟤", chance: 0.1, price: 15 },
+  { name: "은", icon: "⚪", chance: 0.04, price: 60 },
+  { name: "금", icon: "🟡", chance: 0.012, price: 250 },
+  { name: "다이아몬드", icon: "💎", chance: 0.003, price: 2000 },
+];
+
+function rollMineral() {
+  let r = Math.random();
+  for (const m of MINERALS) {
+    if (r < m.chance) return m;
+    r -= m.chance;
+  }
+  return null;
+}
+
+// 현재 채굴 레벨 기준 광물 1개 판매가
+function mineralPriceFor(mineral, level) {
+  const mid = (r) => (r.min + r.max) / 2;
+  const scale = mid(rewardRangeFor(level)) / mid(rewardRangeFor(1));
+  return Math.max(1, Math.round(mineral.price * scale));
+}
+
+// 한국 날짜 기준 N일 전의 YYYY-MM-DD
+function kstDayAgo(days) {
+  return new Date(Date.now() + 9 * 60 * 60 * 1000 - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+// 지금 유효한 연속 일수 (오늘이나 어제 채굴했을 때만 이어져요)
+function activeStreak(mining) {
+  if (!mining?.streak) return 0;
+  return mining.lastDay === kstDayAgo(0) || mining.lastDay === kstDayAgo(1) ? mining.streak : 0;
+}
+
 function staminaMaxFor(level) {
   return STAMINA_BASE + (level - 1) * STAMINA_PER_LEVEL;
 }
@@ -3025,6 +3123,7 @@ export async function adminResetUser(env, userId, balance = STARTING_BALANCE) {
     items: {},
     costs: {},
     mining: { level: 1, stamina: STAMINA_BASE, staminaAt: Date.now(), count: 0 },
+    minerals: {},
     lastAttendance: "",
     attendanceCount: 0,
   });
@@ -3060,112 +3159,142 @@ export async function clearBan(env, userId) {
 }
 
 // ---------- 채굴 1회 ----------
+// 한 번의 읽기-계산-저장을 잠금(updateUserLocked)으로 감싸서, 연타해도 체력이 두 번 깎이거나 보상이 사라지지 않아요.
 export async function mineOnce(env, userId) {
-  const user = await getUser(env, userId);
-  const mining = regenStamina(ensureMining(user));
-  const max = staminaMaxFor(mining.level);
+  const out = await updateUserLocked(env, userId, (user) => {
+    const mining = regenStamina(ensureMining(user));
+    const max = staminaMaxFor(mining.level);
 
-  if (mining.stamina < 1) {
-    await saveUser(env, userId, user); // 회복된 staminaAt은 반영
-    return {
-      ok: false,
-      message: `⛏️ 체력이 없어요. (${mining.stamina}/${max})\n약 ${minutesUntilNextRegen(mining)}분 후 체력이 1 회복돼요.`,
-    };
-  }
+    if (mining.stamina < 1) {
+      // 회복된 staminaAt은 반영해서 저장해요
+      return {
+        save: true,
+        result: {
+          ok: false,
+          message: `⛏️ 체력이 없어요. (${mining.stamina}/${max})\n약 ${minutesUntilNextRegen(mining)}분 후 체력이 1 회복돼요.`,
+        },
+      };
+    }
 
-  const { min, max: rewardMax } = rewardRangeFor(mining.level);
-  // 보상: 평균은 그대로, 범위는 3배로 넓히고 종 모양으로 뽑아요 (끝값은 거의 안 나와요)
-  const half = ((rewardMax - min) / 2) * 3;
-  const mid = (min + rewardMax) / 2;
-  const reward = Math.max(1, Math.round(randomBell(mid - half, mid + half)));
-  const balanceBefore = user.balance;
+    // 연속 채굴: 어제도 채굴했으면 +1, 아니면 1일부터 다시. (하루 첫 채굴 때만 계산해요)
+    const today = todayKST();
+    let milestoneBonus = 0;
+    if (mining.lastDay !== today) {
+      mining.streak = mining.lastDay === kstDayAgo(1) ? (mining.streak || 0) + 1 : 1;
+      mining.lastDay = today;
+      if (mining.streak > (mining.bestStreak || 0)) mining.bestStreak = mining.streak;
+      milestoneBonus = STREAK_MILESTONES[mining.streak] || 0;
+    }
+    const streak = mining.streak || 1;
+    const streakPct = Math.min(streak - 1, STREAK_BONUS_MAX_DAYS) * STREAK_BONUS_PER_DAY;
 
-  mining.stamina -= 1;
-  mining.count += 1;
-  user.balance += reward;
+    const { min, max: rewardMax } = rewardRangeFor(mining.level);
+    // 기본 보상: 평균은 그대로, 범위는 3배로 넓히고 종 모양으로 뽑아요 (끝값은 거의 안 나와요)
+    const half = ((rewardMax - min) / 2) * 3;
+    const mid = (min + rewardMax) / 2;
+    const base = Math.max(1, Math.round(randomBell(mid - half, mid + half)));
+    const jackpot = Math.random() < JACKPOT_CHANCE;
+    const reward = Math.max(1, Math.round(base * (jackpot ? JACKPOT_MULT : 1) * (1 + streakPct)));
+    const mineral = rollMineral();
+    const balanceBefore = user.balance;
 
-  await Promise.all([
-    saveUser(env, userId, user),
-    addHistory(env, userId, `채굴: +${reward.toLocaleString()}해정 (Lv.${mining.level}, 체력 ${mining.stamina}/${max})`),
-  ]);
+    mining.stamina -= 1;
+    mining.count += 1;
+    if (!Number.isFinite(mining.total)) mining.total = mining.count - 1; // 예전 유저는 지금 진행도부터 누적을 시작해요
+    mining.total += 1;
+    user.balance += reward + milestoneBonus;
+    if (mineral) {
+      if (!user.minerals) user.minerals = {};
+      user.minerals[mineral.name] = (user.minerals[mineral.name] || 0) + 1;
+    }
 
-  const required = upgradeCountFor(mining.level);
-  return {
-    ok: true,
-    message: [
+    const required = upgradeCountFor(mining.level);
+    const lines = [
       `⛏️ 채굴 완료! +${reward.toLocaleString()}해정`,
+      ...(jackpot ? [`💥 **대박!** 보상이 ${JACKPOT_MULT}배로 터졌어요!`] : []),
+      ...(streak >= 2 ? [`🔥 ${streak}일 연속 채굴 (보상 +${Math.round(streakPct * 100)}%)`] : []),
+      ...(milestoneBonus ? [`🎁 연속 ${streak}일 달성 보너스 +${milestoneBonus.toLocaleString()}해정!`] : []),
+      ...(mineral ? [`${mineral.icon} 광물 획득: **${mineral.name}** ×1 (\`/광물\`에서 확인, \`/광물판매\`로 판매)`] : []),
       `💰 잔고: ${balanceBefore.toLocaleString()} → **${user.balance.toLocaleString()}해정**`,
       `🔋 체력: ${mining.stamina}/${max}`,
       mining.level >= MAX_LEVEL
         ? `🏆 Lv.${mining.level} (최고 레벨)`
         : `📈 Lv.${mining.level} 진행도: ${mining.count}/${required}회 (채우면 무료 업그레이드 가능)`,
-    ].join("\n"),
-  };
+    ];
+    const history =
+      `채굴: +${(reward + milestoneBonus).toLocaleString()}해정 (Lv.${mining.level}, 체력 ${mining.stamina}/${max}` +
+      `${jackpot ? ", 대박" : ""}${streak >= 2 ? `, ${streak}일 연속` : ""}${mineral ? `, ${mineral.name}` : ""})`;
+    return { save: true, result: { ok: true, message: lines.join("\n"), history } };
+  });
+
+  if (out.history) await addHistory(env, userId, out.history);
+  return out;
 }
 
 // ---------- 업그레이드 ----------
 export async function upgradeMining(env, userId) {
-  const user = await getUser(env, userId);
-  const mining = regenStamina(ensureMining(user));
-  const cost = upgradeCostFor(mining.level);
-  const required = upgradeCountFor(mining.level);
+  const out = await updateUserLocked(env, userId, (user) => {
+    const mining = regenStamina(ensureMining(user));
+    const cost = upgradeCostFor(mining.level);
+    const required = upgradeCountFor(mining.level);
 
-  if (mining.level >= MAX_LEVEL) {
-    await saveUser(env, userId, user);
-    return { ok: false, message: `🏆 채굴장이 이미 최고 레벨(Lv.${MAX_LEVEL})이에요!` };
-  }
+    if (mining.level >= MAX_LEVEL) {
+      return { save: true, result: { ok: false, message: `🏆 채굴장이 이미 최고 레벨(Lv.${MAX_LEVEL})이에요!` } };
+    }
 
-  const canGrind = mining.count >= required;
-  const canPay = user.balance >= cost;
+    const canGrind = mining.count >= required;
+    const canPay = user.balance >= cost;
 
-  if (!canGrind && !canPay) {
-    await saveUser(env, userId, user);
+    if (!canGrind && !canPay) {
+      return {
+        save: true,
+        result: {
+          ok: false,
+          message: [
+            `⛏️ Lv.${mining.level} → Lv.${mining.level + 1} 업그레이드 조건이 부족해요.`,
+            `- 해정으로: ${cost.toLocaleString()}해정 필요 (보유 ${user.balance.toLocaleString()}해정)`,
+            `- 노가다로: 이번 레벨에서 ${required}회 채굴 필요 (현재 ${mining.count}/${required})`,
+          ].join("\n"),
+        },
+      };
+    }
+
+    // 조건을 둘 다 채웠으면 노가다(무료) 쪽을 우선 적용
+    const paidWithMoney = !canGrind && canPay;
+    if (paidWithMoney) user.balance -= cost;
+
+    const fromLevel = mining.level;
+    mining.level += 1;
+    mining.count = 0;
+
     return {
-      ok: false,
-      message: [
-        `⛏️ Lv.${mining.level} → Lv.${mining.level + 1} 업그레이드 조건이 부족해요.`,
-        `- 해정으로: ${cost.toLocaleString()}해정 필요 (보유 ${user.balance.toLocaleString()}해정)`,
-        `- 노가다로: 이번 레벨에서 ${required}회 채굴 필요 (현재 ${mining.count}/${required})`,
-      ].join("\n"),
+      save: true,
+      result: {
+        ok: true,
+        history: paidWithMoney
+          ? `채굴장 업그레이드: Lv.${fromLevel} → Lv.${mining.level} (-${cost.toLocaleString()}해정)`
+          : `채굴장 업그레이드: Lv.${fromLevel} → Lv.${mining.level} (노가다 달성, 무료)`,
+        message: [
+          `🎉 채굴장을 Lv.${mining.level}로 업그레이드했어요!${paidWithMoney ? ` (-${cost.toLocaleString()}해정)` : " (노가다 조건 달성, 무료)"}`,
+          `🔋 최대 체력: ${staminaMaxFor(mining.level)}`,
+        ].join("\n"),
+      },
     };
-  }
+  });
 
-  // 조건을 둘 다 채웠으면 노가다(무료) 쪽을 우선 적용
-  const paidWithMoney = !canGrind && canPay;
-  if (paidWithMoney) user.balance -= cost;
-
-  const fromLevel = mining.level;
-  mining.level += 1;
-  mining.count = 0;
-
-  await Promise.all([
-    saveUser(env, userId, user),
-    addHistory(
-      env,
-      userId,
-      paidWithMoney
-        ? `채굴장 업그레이드: Lv.${fromLevel} → Lv.${mining.level} (-${cost.toLocaleString()}해정)`
-        : `채굴장 업그레이드: Lv.${fromLevel} → Lv.${mining.level} (노가다 달성, 무료)`
-    ),
-  ]);
-
-  return {
-    ok: true,
-    message: [
-      `🎉 채굴장을 Lv.${mining.level}로 업그레이드했어요!${paidWithMoney ? ` (-${cost.toLocaleString()}해정)` : " (노가다 조건 달성, 무료)"}`,
-      `🔋 최대 체력: ${staminaMaxFor(mining.level)}`,
-    ].join("\n"),
-  };
+  if (out.history) await addHistory(env, userId, out.history);
+  return out;
 }
 
 // ---------- 정보 조회 ----------
 export async function getMiningInfo(env, userId) {
   const user = await getUser(env, userId);
-  const mining = regenStamina(ensureMining(user));
-  await saveUser(env, userId, user); // 회복된 staminaAt 반영
+  const mining = regenStamina(ensureMining(user)); // 보기만 해요. (저장하지 않아서 쓰기도 아끼고, 다른 요청과 겹쳐 덮어쓰지도 않아요)
 
   const max = staminaMaxFor(mining.level);
   const { min, max: rewardMax } = rewardRangeFor(mining.level);
+  const streak = activeStreak(mining);
+  const streakPct = Math.round(Math.min(Math.max(streak - 1, 0), STREAK_BONUS_MAX_DAYS) * STREAK_BONUS_PER_DAY * 100);
   const cost = upgradeCostFor(mining.level);
   const required = upgradeCountFor(mining.level);
   const nextIn = mining.stamina >= max ? "가득 참" : `약 ${minutesUntilNextRegen(mining)}분 후 +1`;
@@ -3173,7 +3302,10 @@ export async function getMiningInfo(env, userId) {
   return [
     `**⛏️ 채굴장 정보 (Lv.${mining.level})**`,
     `체력: ${mining.stamina}/${max} (${nextIn})`,
-    `1회 채굴 보상: ${min.toLocaleString()} ~ ${rewardMax.toLocaleString()}해정`,
+    `1회 채굴 보상: ${min.toLocaleString()} ~ ${rewardMax.toLocaleString()}해정 (대박 ${Math.round(JACKPOT_CHANCE * 100)}% · ×${JACKPOT_MULT})`,
+    streak >= 1
+      ? `🔥 연속 채굴 ${streak}일째 (보상 +${streakPct}%) · 누적 ${(mining.total ?? mining.count).toLocaleString()}회`
+      : `🔥 오늘 채굴하면 연속 채굴이 시작돼요. (하루 쌓일 때마다 보상 +${Math.round(STREAK_BONUS_PER_DAY * 100)}%, 최대 +${Math.round(STREAK_BONUS_PER_DAY * STREAK_BONUS_MAX_DAYS * 100)}%)`,
     ...(mining.level >= MAX_LEVEL
       ? [`🏆 최고 레벨이에요! (Lv.${MAX_LEVEL})`]
       : [
@@ -3182,6 +3314,99 @@ export async function getMiningInfo(env, userId) {
           `- 노가다로: ${required}회 채굴 (현재 ${mining.count}/${required})`,
         ]),
   ].join("\n");
+}
+
+// ---------- 광물 보기 ----------
+export async function mineralInfo(env, userId) {
+  const user = await getUser(env, userId);
+  const level = ensureMining(user).level;
+  const owned = MINERALS.filter((m) => (user.minerals?.[m.name] || 0) > 0);
+  const lines = ["**⛏️ 내 광물**"];
+  let total = 0;
+  if (owned.length === 0) {
+    lines.push("아직 광물이 없어요. `/채굴`을 하면 가끔 나와요!");
+  } else {
+    for (const m of owned) {
+      const qty = user.minerals[m.name];
+      const price = mineralPriceFor(m, level);
+      total += qty * price;
+      lines.push(`${m.icon} **${m.name}** ×${qty.toLocaleString()} — 개당 ${price.toLocaleString()}해정`);
+    }
+    lines.push(`💰 전부 팔면 **${total.toLocaleString()}해정** (\`/광물판매\`)`);
+  }
+  lines.push("", "**나올 확률 / 판매가 (내 채굴 레벨 기준)**");
+  for (const m of MINERALS) {
+    lines.push(`- ${m.icon} ${m.name}: ${(m.chance * 100).toFixed(1)}% · ${mineralPriceFor(m, level).toLocaleString()}해정`);
+  }
+  return lines.join("\n");
+}
+
+// ---------- 광물 판매 ----------
+// which: "전부"(기본) 또는 광물 이름
+export async function sellMinerals(env, userId, which = "전부") {
+  const targets = which === "전부" ? MINERALS : MINERALS.filter((m) => m.name === which);
+  if (targets.length === 0) return { ok: false, message: `"${which}"(은)는 없는 광물이에요.` };
+
+  const out = await updateUserLocked(env, userId, (user) => {
+    const level = ensureMining(user).level;
+    const sold = [];
+    let gain = 0;
+    for (const m of targets) {
+      const qty = user.minerals?.[m.name] || 0;
+      if (qty <= 0) continue;
+      const price = mineralPriceFor(m, level);
+      gain += qty * price;
+      sold.push(`${m.icon} ${m.name} ×${qty.toLocaleString()} (개당 ${price.toLocaleString()})`);
+      delete user.minerals[m.name];
+    }
+    if (sold.length === 0) {
+      return { save: false, result: { ok: false, message: which === "전부" ? "팔 광물이 없어요. `/채굴`로 모아 보세요!" : `${which}이(가) 없어요.` } };
+    }
+    const before = user.balance;
+    user.balance += gain;
+    return {
+      save: true,
+      result: {
+        ok: true,
+        gain,
+        history: `광물 판매: +${gain.toLocaleString()}해정 (${sold.length}종)`,
+        message: [`💰 광물을 팔았어요! +${gain.toLocaleString()}해정`, ...sold.map((x) => `- ${x}`), `잔고: ${before.toLocaleString()} → **${user.balance.toLocaleString()}해정**`].join("\n"),
+      },
+    };
+  });
+
+  if (out.history) await addHistory(env, userId, out.history);
+  return out;
+}
+
+// ---------- 채굴 랭킹 ----------
+// 채굴장 레벨이 높은 순, 같으면 누적 채굴 횟수가 많은 순. 유저 전체를 읽기 때문에 30초 동안 기억해요.
+let miningRankCache = { at: 0, list: [] };
+export async function getMiningRanking(env) {
+  if (Date.now() - miningRankCache.at < 30_000) return miningRankCache.list;
+  const users = await listCollection(env, "users");
+  const list = users
+    .filter((u) => u.mining)
+    .map((u) => ({
+      id: u.id,
+      level: Math.min(u.mining.level || 1, MAX_LEVEL),
+      total: Number.isFinite(u.mining.total) ? u.mining.total : u.mining.count || 0,
+      streak: activeStreak(u.mining),
+    }))
+    .sort((a, b) => b.level - a.level || b.total - a.total);
+  miningRankCache = { at: Date.now(), list };
+  return list;
+}
+
+export async function miningRankingText(env, userId) {
+  const list = await getMiningRanking(env);
+  if (list.length === 0) return "아직 채굴한 사람이 없어요.";
+  const lines = list
+    .slice(0, 10)
+    .map((r, i) => `${i + 1}위 — <@${r.id}> Lv.${r.level} · 누적 ${r.total.toLocaleString()}회${r.streak >= 2 ? ` · 🔥${r.streak}일` : ""}`);
+  const mine = list.findIndex((r) => r.id === userId);
+  if (mine >= 10) lines.push("…", `내 순위: ${mine + 1}위 (Lv.${list[mine].level} · 누적 ${list[mine].total.toLocaleString()}회)`);
+  return ["**⛏️ 채굴 랭킹** (레벨 → 누적 채굴 횟수 순)", ...lines].join("\n");
 }
 
 // ============================================================
@@ -5944,6 +6169,59 @@ export const DIVIDEND_TAX_RATE = 0.154;
 
 export const dividendOf = (price, qty) => (price > DANGER_PRICE ? Math.floor(price * qty * DIVIDEND_RATE * (1 - DIVIDEND_TAX_RATE)) : 0);
 
+// ---------- 오늘의 시장 요약 ----------
+// 매일 한국시간 23:50~23:59 사이 첫 시세 변동 때 한 번, 주식채널에 무음으로 올려요.
+// 그 시간이 아니면 아무것도 읽지 않고 바로 끝나서 읽기가 늘지 않아요. (cron.js의 시세 변동 끝에서 불러요)
+const DAILY_SUMMARY_PATH = "config/dailySummary";
+const SUMMARY_HOUR_KST = 23;
+const SUMMARY_FROM_MIN = 50;
+
+export async function processDailySummary(env) {
+  const kst = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  if (kst.getUTCHours() !== SUMMARY_HOUR_KST || kst.getUTCMinutes() < SUMMARY_FROM_MIN) return { ran: false, reason: "아직 요약 시각이 아니에요" };
+  if (!env.ALLOWED_CHANNEL_ID || !env.DISCORD_BOT_TOKEN) return { ran: false, reason: "채널 또는 봇 토큰이 없어요" };
+
+  const day = todayKST();
+  const state = await getDoc(env, DAILY_SUMMARY_PATH);
+  if (state?.lastDay === day) return { ran: false, reason: "오늘은 이미 올렸어요" };
+  // 보내기 전에 먼저 기록해서 크론이 겹쳐도 두 번 올리지 않게 해요
+  await setDoc(env, DAILY_SUMMARY_PATH, { lastDay: day });
+
+  const stocks = (await listStocks(env)).filter((s) => !isForeign(s)); // 해정지수와 같게 외국자산은 빼요
+  const m = marketIndex(stocks);
+  if (!m) return { ran: false, reason: "종목이 없어요" };
+
+  const now = Date.now();
+  const dayStart = Math.floor((now + IDX_KST_MS) / IDX_DAY_MS) * IDX_DAY_MS - IDX_KST_MS;
+  const rows = stocks.map((s) => {
+    const pts = getPriceHistory(s);
+    const open = pts.length ? priceAtTime(pts, dayStart) : s.price;
+    return { s, pct: open > 0 ? ((s.price - open) / open) * 100 : 0 };
+  });
+  const sgn = (n) => `${n > 0 ? "+" : ""}${n.toFixed(1)}%`;
+  const line = (r, i) => `${i + 1}. **${iconName(r.s)}** ${r.s.price.toLocaleString()}해정 (${sgn(r.pct)})`;
+  const gainers = rows.filter((r) => r.pct > 0).sort((a, b) => b.pct - a.pct).slice(0, 3);
+  const losers = rows.filter((r) => r.pct < 0).sort((a, b) => a.pct - b.pct).slice(0, 3);
+  const priciest = [...rows].sort((a, b) => b.s.price - a.s.price)[0];
+  const arrow = m.pct > 0.05 ? "🔺" : m.pct < -0.05 ? "🔻" : "➖";
+
+  const content = [
+    `🌙 **오늘의 시장 요약** · ${day.slice(5).replace("-", "/")}`,
+    `📊 해정지수 **${(Math.round(m.level * 10) / 10).toLocaleString()}** ${arrow} ${sgn(m.pct)} · 오른 종목 ${m.up}개 / 내린 종목 ${m.down}개 / 보합 ${m.flat}개`,
+    ...(gainers.length ? ["", "🔺 **오늘 많이 오른 종목**", ...gainers.map(line)] : []),
+    ...(losers.length ? ["", "🔻 **오늘 많이 내린 종목**", ...losers.map(line)] : []),
+    ...(priciest ? ["", `👑 가장 비싼 종목: **${iconName(priciest.s)}** ${priciest.s.price.toLocaleString()}해정`] : []),
+  ].join("\n");
+
+  try {
+    await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, { content: content.slice(0, 1900), flags: 4096, allowed_mentions: { parse: [] } });
+  } catch (err) {
+    console.error("시장 요약 공지 실패:", err.message);
+    return { ran: false, reason: err.message };
+  }
+  return { ran: true, day };
+}
+
 export async function processDividends(env) {
   if (currentHourKST() < DIVIDEND_HOUR) return { ran: false, reason: "아직 배당 시각이 아니에요" };
   const day = todayKST();
@@ -6765,8 +7043,23 @@ function multi(base, count = MAX_SLOTS) {
 export const commandDefinitions = [
   { name: "도움말", description: "사용할 수 있는 명령어 목록을 봅니다." },
   { name: "출석체크", description: "오늘 출석하고 해정을 받습니다. 하루 1회." },
-  { name: "채굴", description: "채굴장에서 노가다로 해정을 법니다. (체력 소모, 출석보다 훨씬 효율이 좋아요)" },
-  { name: "채굴정보", description: "내 채굴 레벨, 체력, 다음 업그레이드 조건을 봅니다." },
+  { name: "채굴", description: "채굴장에서 노가다로 해정을 법니다. (체력 소모, 연속 채굴 보너스·대박·광물이 있어요)" },
+  { name: "채굴정보", description: "내 채굴 레벨, 체력, 연속 채굴, 다음 업그레이드 조건을 봅니다." },
+  { name: "채굴랭킹", description: "채굴장 레벨과 누적 채굴 횟수 기준 랭킹을 봅니다." },
+  { name: "광물", description: "내가 모은 광물과 판매 가격, 나올 확률을 봅니다." },
+  {
+    name: "광물판매",
+    description: "모은 광물을 해정으로 바꿉니다. (기본: 전부)",
+    options: [
+      {
+        name: "광물",
+        description: "팔 광물 (비우면 전부)",
+        type: 3,
+        required: false,
+        choices: [{ name: "전부", value: "전부" }, ...MINERALS.map((m) => ({ name: m.name, value: m.name }))],
+      },
+    ],
+  },
   { name: "채굴업그레이드", description: "채굴 장비를 업그레이드합니다. (해정 지불 또는 노가다 조건 달성)" },
   {
     name: "주식목록",
@@ -8175,6 +8468,16 @@ export const handlers = {
     const userId = interaction.member.user.id;
     const result = await mineOnce(env, userId);
     return result.message;
+  },
+
+  채굴랭킹: async (interaction, env) => miningRankingText(env, interaction.member.user.id),
+
+  광물: async (interaction, env) => mineralInfo(env, interaction.member.user.id),
+
+  // 판 금액을 { message, amount }로 돌려주면 로그에 거래 금액이 남아요
+  광물판매: async (interaction, env) => {
+    const result = await sellMinerals(env, interaction.member.user.id, opt(interaction, "광물") ?? "전부");
+    return result.ok ? { message: result.message, amount: result.gain } : result.message;
   },
 
   채굴정보: async (interaction, env) => {

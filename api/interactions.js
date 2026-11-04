@@ -43,7 +43,7 @@ const PRIVATE_COMMANDS = new Set([]);
 const PUBLIC_COMMANDS = new Set([]);
 
 // 기본값은 "나만 보기"예요. 여기에 적은 명령어만 채널에 모두에게 보이게(무음) 보내요.
-const SILENT_COMMANDS = new Set(["도움말", "랭킹", "지수", "종목정보", "그래프", "봇현황", "매수", "매도", "상장폐지종류", "보유종목", "주식상점", "선물", "선물목록", "선물청산", "선물설명", "은행설명", "예금", "출금", "대출", "상환", "환율", "환전", "주식질문"]);
+const SILENT_COMMANDS = new Set(["도움말", "랭킹", "채굴랭킹", "지수", "종목정보", "그래프", "봇현황", "매수", "매도", "상장폐지종류", "보유종목", "주식상점", "선물", "선물목록", "선물청산", "선물설명", "은행설명", "예금", "출금", "대출", "상환", "환율", "환전", "주식질문"]);
 
 // 이 시간(ms) 안에 처리가 끝나면 바로 응답하고, 넘기면 "처리 중…"(지연 응답)으로 먼저 답한 뒤
 // 끝나는 대로 결과를 채워요. (디스코드는 3초 안에 첫 응답이 없으면 "응답하지 않았어요"를 띄워요)
@@ -108,6 +108,32 @@ async function editOriginal(interaction, content, env, mode) {
   // 이러면 webhook으로는 더 이상 손쓸 수 없으니, 봇 토큰으로 채널에 새 메시지로라도 보내요.
   // (나만 보기(ephemeral) 응답이었다면 원래 보이던 사람에게만 보일 수 없어 공개로 나가는 점은 감안해 주세요.)
   // 나만 보기(private) 응답은 공개로 새어 나가면 안 되니까 폴백하지 않아요.
+  // 나만 보기(private) 응답은 채널에 올리면 안 되니, 대신 그 유저에게 DM으로 보내요. (DM이 막혀 있으면 포기)
+  if (res.status === 404 && mode === "private") {
+    const uid = interaction.member?.user?.id;
+    if (uid && env?.DISCORD_BOT_TOKEN) {
+      try {
+        const headers = { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, "Content-Type": "application/json" };
+        const dmRes = await fetch("https://discord.com/api/v10/users/@me/channels", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ recipient_id: uid }),
+        });
+        if (dmRes.ok) {
+          const dm = await dmRes.json();
+          const dmData = { ...data, content: `⏳ 응답이 늦어서 DM으로 보내요.\n${data.content || ""}`.slice(0, 2000) };
+          const sent = await fetch(`https://discord.com/api/v10/channels/${dm.id}/messages`, { method: "POST", headers, body: JSON.stringify(dmData) });
+          if (!sent.ok) console.error(`DM 전송 실패(${sent.status}):`, await sent.text());
+        } else {
+          console.error(`DM 채널 열기 실패(${dmRes.status}):`, await dmRes.text());
+        }
+      } catch (err) {
+        console.error("DM 전송 중 오류:", err.message);
+      }
+    }
+    return;
+  }
+
   if (res.status === 404 && mode !== "private" && env?.DISCORD_BOT_TOKEN && interaction.channel_id) {
     try {
       const fallbackRes = await fetch(`https://discord.com/api/v10/channels/${interaction.channel_id}/messages`, {

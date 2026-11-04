@@ -1,7 +1,7 @@
 import {
   loadEnv, isAuthorizedCron, currentSurgeSlot, surgeSlotKey, isSurgeMoment,
   fluctuatePrices, announcePriceChanges, notifyPriceChanges, announcePreAlert,
-  processOrders, processPriceAlerts, processFutures, processBank, processDividends, takeNews, finishNews, publishNews, runEarnings, prepareCrowd, finishCrowd, getDoc, setDoc,
+  processOrders, processPriceAlerts, processFutures, processBank, processDividends, processDailySummary, takeNews, finishNews, publishNews, runEarnings, prepareCrowd, finishCrowd, getDoc, setDoc,
   rollBankRate, rollFxRate, logTradePressure,
 } from "../src/lib.js";
 
@@ -89,6 +89,14 @@ async function runFluctuation(env, range, label) {
     console.error("배당금 처리 실패:", err.message);
   }
 
+  // 2-5) 오늘의 시장 요약: 23:50~23:59 사이 하루 한 번 (그 시간이 아니면 아무것도 읽지 않고 끝나요)
+  let summary = null;
+  try {
+    summary = await processDailySummary(env);
+  } catch (err) {
+    console.error("시장 요약 처리 실패:", err.message);
+  }
+
   // 3) 알림을 켠 유저에게 DM
   await notifyPriceChanges(env, changes);
 
@@ -108,6 +116,7 @@ async function runFluctuation(env, range, label) {
     futures,
     bank,
     dividends,
+    summary,
     news: newsResult.count,
     crowd: crowd?.summary,
     logPressure,
