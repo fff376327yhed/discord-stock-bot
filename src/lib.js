@@ -2948,11 +2948,56 @@ function rollMineral() {
   return null;
 }
 
-// 현재 채굴 레벨 기준 광물 1개 판매가
-function mineralPriceFor(mineral, level) {
+// 현재 채굴 레벨 + 광물 시세 배율 기준 광물 1개 판매가
+function mineralPriceFor(mineral, level, mult = 1) {
   const mid = (r) => (r.min + r.max) / 2;
   const scale = mid(rewardRangeFor(level)) / mid(rewardRangeFor(1));
-  return Math.max(1, Math.round(mineral.price * scale));
+  return Math.max(1, Math.round(mineral.price * scale * mult));
+}
+
+// ---------- 광물 시세 (채굴로 얻는 광물을 파는 가격이, 주식처럼 시세 변동마다 조금씩 움직여요) ----------
+// 종목처럼 수요·공급을 따지진 않고, 기준가(MINERALS[].price, Lv.1 기준) 둘레에서 배율이 오르내려요.
+// 실제 판매가는 이 배율 × 채굴 레벨 보정(mineralPriceFor)으로 정해져요.
+export const MINERAL_MARKET_PATH = "config/mineralMarket";
+const MINERAL_STEP_PCT = 8;        // 평소 변동마다 직전 배율에서 최대 ±8%
+const MINERAL_SURGE_STEP_PCT = 25; // 급등락 시각엔 최대 ±25%
+const MINERAL_REVERT = 0.08;       // 배율 1(기준가) 쪽으로 돌아오려는 힘(로그, 변동 1번당)
+const MINERAL_MIN_MULT = 0.5;      // 기준가의 50% 밑으로는 안 내려가요
+const MINERAL_MAX_MULT = 2.5;      // 기준가의 250% 위로는 안 올라가요
+
+// 저장된 배율 문서를 읽어요. 없거나 광물 종류가 바뀌었으면 전부 배율 1로 새로 만들어요.
+async function getMineralMarket(env) {
+  const doc = await getDoc(env, MINERAL_MARKET_PATH);
+  if (doc && MINERALS.every((m) => Number.isFinite(doc[m.name]))) return doc;
+  const fresh = Object.fromEntries(MINERALS.map((m) => [m.name, 1]));
+  await setDoc(env, MINERAL_MARKET_PATH, fresh);
+  return fresh;
+}
+
+// 시세 변동(평소 5분 / 급등락)마다 한 번 호출: 광물 배율을 움직이고 저장한 뒤,
+// 공지에 쓸 변동 내역(Lv.1 기준가 기준)을 돌려줘요. 주식 시세 변동과는 별도로 집계돼요.
+export async function rollMineralMarket(env, surge = false) {
+  const market = await getMineralMarket(env);
+  const stepPct = surge ? MINERAL_SURGE_STEP_PCT : MINERAL_STEP_PCT;
+  const next = {};
+  const changes = [];
+  for (const m of MINERALS) {
+    const prevMult = market[m.name] ?? 1;
+    const x = Math.log(prevMult);
+    const pull = MINERAL_REVERT * -x; // 배율 1(로그 0) 쪽으로 돌아오려는 힘
+    const step = randomBell(-Math.log(1 + stepPct / 100), Math.log(1 + stepPct / 100));
+    const raw = Math.exp(x + pull + step);
+    next[m.name] = +Math.min(MINERAL_MAX_MULT, Math.max(MINERAL_MIN_MULT, raw)).toFixed(4);
+    changes.push({
+      name: m.name,
+      icon: m.icon,
+      kind: "mineral",
+      before: Math.max(1, Math.round(m.price * prevMult)),
+      after: Math.max(1, Math.round(m.price * next[m.name])),
+    });
+  }
+  await setDoc(env, MINERAL_MARKET_PATH, next);
+  return changes;
 }
 
 // 한국 날짜 기준 N일 전의 YYYY-MM-DD
@@ -3319,7 +3364,7 @@ export async function getMiningInfo(env, userId) {
 
 // ---------- 광물 보기 ----------
 export async function mineralInfo(env, userId) {
-  const user = await getUser(env, userId);
+  const [user, market] = await Promise.all([getUser(env, userId), getMineralMarket(env)]);
   const level = ensureMining(user).level;
   const owned = MINERALS.filter((m) => (user.minerals?.[m.name] || 0) > 0);
   const lines = ["**⛏️ 내 광물**"];
@@ -3329,13 +3374,13 @@ export async function mineralInfo(env, userId) {
   } else {
     for (const m of owned) {
       const qty = user.minerals[m.name];
-      const price = mineralPriceFor(m, level);
+      const price = mineralPriceFor(m, level, market[m.name]);
       total += qty * price;
       lines.push(`${m.icon} **${m.name}** ×${qty.toLocaleString()} — 개당 ${price.toLocaleString()}해정`);
     }
     lines.push(`💰 전부 팔면 **${total.toLocaleString()}해정**`);
   }
-  lines.push("", `시세: ${MINERALS.map((m) => `${m.icon}${mineralPriceFor(m, level).toLocaleString()}`).join(" · ")}`);
+  lines.push("", `시세: ${MINERALS.map((m) => `${m.icon}${mineralPriceFor(m, level, market[m.name]).toLocaleString()}`).join(" · ")} (5분마다 바뀌어요)`);
   return lines.join("\n");
 }
 
@@ -3345,6 +3390,7 @@ export async function sellMinerals(env, userId, which = "전부") {
   const targets = which === "전부" ? MINERALS : MINERALS.filter((m) => m.name === which);
   if (targets.length === 0) return { ok: false, message: `"${which}"(은)는 없는 광물이에요.` };
 
+  const market = await getMineralMarket(env);
   const out = await updateUserLocked(env, userId, (user) => {
     const level = ensureMining(user).level;
     const sold = [];
@@ -3352,7 +3398,7 @@ export async function sellMinerals(env, userId, which = "전부") {
     for (const m of targets) {
       const qty = user.minerals?.[m.name] || 0;
       if (qty <= 0) continue;
-      const price = mineralPriceFor(m, level);
+      const price = mineralPriceFor(m, level, market[m.name]);
       gain += qty * price;
       sold.push(`${m.icon} ${m.name} ×${qty.toLocaleString()} (개당 ${price.toLocaleString()})`);
       delete user.minerals[m.name];
@@ -4132,6 +4178,14 @@ export function isWithinNotifyWindow(setting, hour = currentHourKST()) {
   return hour >= start || hour < end;
 }
 
+// 공지용 광물 시세 한 줄 (Lv.1 기준가 기준이에요. 실제 판매가는 채굴 레벨만큼 더 높아요)
+function mineralAnnounceLine(c) {
+  if (c.after === c.before) return `➖ ${c.icon} **${c.name}**: ${c.after.toLocaleString()}해정 (변동 없음)`;
+  const up = c.after > c.before;
+  const pct = ((c.after - c.before) / c.before) * 100;
+  return `${up ? UP_MARK : DOWN_MARK} ${c.icon} **${c.name}**: ${c.before.toLocaleString()} → ${c.after.toLocaleString()}해정 (${up ? "+" : ""}${pct.toFixed(1)}%)`;
+}
+
 // 공지용 한 줄: 📈 상승 / 📉 하락 / ➖ 변동 없음 / 🚫 상장폐지
 // 폐지 위기 종목은 "(±%)" 뒤에 ⚠️ 표시
 function announceLine(c) {
@@ -4150,14 +4204,14 @@ function announceLine(c) {
 // 유저의 알림 설정과 상관없이 올라가요. (관리자 콘솔의 '가격 변동 알림' 체크를 끄면 올라가지 않음) 실패해도 시세 변동 자체는 막지 않습니다.
 // 상장폐지된 종목이 있으면 공지 맨 아래에 안내 문구가 추가돼요.
 // 반환값: { sent: true, messages: 보낸 메시지 수 } 또는 { sent: false, reason: "이유" }
-export async function announcePriceChanges(env, changes, label = "시세 변동", extraLines = []) {
+export async function announcePriceChanges(env, changes, label = "시세 변동", extraLines = [], mineralChanges = []) {
   if (!env.DISCORD_BOT_TOKEN) {
     return { sent: false, reason: "DISCORD_BOT_TOKEN 환경변수가 없어요" };
   }
   if (!env.ALLOWED_CHANNEL_ID) {
     return { sent: false, reason: "ALLOWED_CHANNEL_ID 환경변수가 없어요" };
   }
-  if (changes.length === 0) {
+  if (changes.length === 0 && mineralChanges.length === 0) {
     return { sent: false, reason: "변동 내역이 없어요" };
   }
 
@@ -4213,6 +4267,10 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
       pushBlock(["🌐 **미국 주식**", ...sortByPrice(visibleUs).map(announceLine)].join("\n"));
     }
 
+    // 광물 시세 (있을 때만, 하단에 따로 — 주식과 섞이지 않게 구분)
+    if (mineralChanges.length) {
+      pushBlock(["⛏️ **광물 시세**", ...sortByPrice(mineralChanges).map(mineralAnnounceLine)].join("\n"));
+    }
 
     // 공시 결과 (있을 때만)
     if (extraLines.length) {

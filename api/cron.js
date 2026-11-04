@@ -2,7 +2,7 @@ import {
   loadEnv, isAuthorizedCron, currentSurgeSlot, surgeSlotKey, isSurgeMoment,
   fluctuatePrices, announcePriceChanges, notifyPriceChanges, announcePreAlert,
   processOrders, processPriceAlerts, processFutures, processBank, processDividends, processDailySummary, takeNews, finishNews, publishNews, runEarnings, prepareCrowd, finishCrowd, getDoc, setDoc,
-  rollBankRate, rollFxRate, logTradePressure,
+  rollBankRate, rollFxRate, logTradePressure, rollMineralMarket,
 } from "../src/lib.js";
 
 // 크론 엔드포인트 3개(fluctuate / midnight / prealert)를 한 함수로 합친 파일이에요.
@@ -30,6 +30,14 @@ async function runFluctuation(env, range, label) {
 
   const changes = await fluctuatePrices(env, { ...range, impact: crowd?.impact, news: news?.shifts, newsFv: news?.fvShifts });
 
+  // 광물 시세도 같이 움직여요 (주식과는 별도 집계라 실패해도 시세 변동은 그대로 진행)
+  let mineralChanges = [];
+  try {
+    mineralChanges = await rollMineralMarket(env, !!range.surge);
+  } catch (err) {
+    console.error("광물 시세 변동 실패:", err.message);
+  }
+
   // 상장폐지 종목을 봇 보유분에서 지우고 봇 저장
   try {
     if (crowd) await finishCrowd(env, crowd, changes);
@@ -46,7 +54,7 @@ async function runFluctuation(env, range, label) {
     console.error("공시 결과 처리 실패:", err.message);
   }
 
-  const announce = await announcePriceChanges(env, changes, label, newsResult.lines);
+  const announce = await announcePriceChanges(env, changes, label, newsResult.lines, mineralChanges);
 
   // 2) 예약 매수/매도 체결 (실패해도 시세 변동 결과는 그대로 응답)
   let orders = null;
@@ -117,6 +125,7 @@ async function runFluctuation(env, range, label) {
     bank,
     dividends,
     summary,
+    minerals: mineralChanges,
     news: newsResult.count,
     crowd: crowd?.summary,
     logPressure,
