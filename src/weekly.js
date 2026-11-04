@@ -4,7 +4,7 @@
 // - 기록은 유저 문서의 xfer 칸에 "시각_랜덤: 금액" 모양으로 쌓고, 7일이 지난 기록은 저장할 때 알아서 지워요.
 
 export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-export const WEEK_LIMIT = 숫자; // 7일 동안 보내거나 거래할 수 있는 합계 (해정). 숫자만 바꾸면 돼요.
+export const WEEK_LIMIT = 200_000; // 7일 동안 보내거나 거래할 수 있는 합계 (해정). 숫자만 바꾸면 돼요.
 
 const timeOf = (key) => Number(String(key).split("_")[0]);
 
