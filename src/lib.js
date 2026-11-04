@@ -226,9 +226,14 @@ async function getDoc(env, path) {
   return fromFields(data.fields);
 }
 
+// Firestore updateMask의 필드 경로는 영문·숫자·밑줄만 그대로 쓸 수 있어요. 한글 등은 백틱(`)으로 감싸야 해요.
+function maskPath(k) {
+  return /^[a-zA-Z_][a-zA-Z_0-9]*$/.test(k) ? k : "`" + k.replace(/\\/g, "\\\\").replace(/`/g, "\\`") + "`";
+}
+
 async function setDoc(env, path, obj) {
   const token = await getAccessToken(env);
-  const fieldPaths = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join("&");
+  const fieldPaths = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(maskPath(k))}`).join("&");
   const res = await fetch(`${baseUrl(env)}/${path}?${fieldPaths}`, {
     method: "PATCH",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -1060,7 +1065,7 @@ async function getDocMeta(env, path) {
 // 성공하면 true, 그 사이 다른 요청이 문서를 바꿨으면 false
 async function setDocIfUnchanged(env, path, obj, updateTime) {
   const token = await getAccessToken(env);
-  const params = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`);
+  const params = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(maskPath(k))}`);
   params.push(`currentDocument.updateTime=${encodeURIComponent(updateTime)}`);
   const res = await fetch(`${baseUrl(env)}/${path}?${params.join("&")}`, {
     method: "PATCH",
@@ -7199,10 +7204,10 @@ export const commandDefinitions = [
     options: [
       {
         name: "광물",
-        description: "팔 광물 (비우면 전부)",
+        description: "팔 광물 (목록에서 선택, 비우면 전부)",
         type: 3,
         required: false,
-        choices: [{ name: "전부", value: "전부" }, ...MINERALS.map((m) => ({ name: m.name, value: m.name }))],
+        autocomplete: true,
       },
     ],
   },
@@ -7915,6 +7920,25 @@ export async function autocomplete(interaction, env) {
     }
   }
   const pickable = (items) => items.filter((i) => !taken.has(i.value));
+
+  // ----- 광물판매: 내가 가진 광물 (보유 개수 · 개당 판매가), 맨 위에 "전부" -----
+  if (base === "광물" && command === "광물판매") {
+    const userId = interaction.member?.user?.id;
+    const [user, market] = await Promise.all([userId ? getUser(env, userId) : { minerals: {} }, getMineralMarket(env)]);
+    const level = ensureMining(user).level;
+    const items = [];
+    let total = 0;
+    for (const m of MINERALS) {
+      const qty = user.minerals?.[m.name] || 0;
+      if (qty <= 0) continue;
+      const price = mineralPriceFor(m, level, market[m.name]);
+      total += qty * price;
+      items.push({ label: `${m.icon} ${m.name} (보유 ${qty.toLocaleString()}개 · 개당 ${price.toLocaleString()}해정 · 합계 ${(qty * price).toLocaleString()}해정)`, value: m.name });
+    }
+    if (items.length === 0) return [{ name: "팔 광물이 없어요 (채굴하면 나와요)", value: "전부" }];
+    items.unshift({ label: `전부 (${items.length}종 · 합계 ${total.toLocaleString()}해정)`, value: "전부" });
+    return textChoices(items, keyword);
+  }
 
   // ----- 상장폐지종류: 폐지된 종목 이름 (최신 폐지순, 같은 이름은 가장 최근 것만) -----
   if (base === "종목" && command === "상장폐지종류") {
