@@ -47,7 +47,7 @@ const SILENT_COMMANDS = new Set(["도움말", "랭킹", "지수", "종목정보"
 
 // 이 시간(ms) 안에 처리가 끝나면 바로 응답하고, 넘기면 "처리 중…"(지연 응답)으로 먼저 답한 뒤
 // 끝나는 대로 결과를 채워요. (디스코드는 3초 안에 첫 응답이 없으면 "응답하지 않았어요"를 띄워요)
-const DEFER_AFTER_MS = 2000;
+const DEFER_AFTER_MS = 1200; // 콜드 스타트 여유를 두려고 줄였어요
 
 export const config = { maxDuration: 60 };
 
@@ -86,7 +86,7 @@ function deferReply(mode) {
 }
 
 // 지연 응답으로 띄운 "처리 중…" 메시지를 결과로 바꿈
-async function editOriginal(interaction, content, env) {
+async function editOriginal(interaction, content, env, mode) {
   const data = typeof content === "string" ? { content } : { ...content };
   delete data.flags; // 공개 방식은 첫 응답에서 이미 정해졌어요
   data.allowed_mentions = NO_PING;
@@ -107,7 +107,8 @@ async function editOriginal(interaction, content, env) {
   // 404 "Unknown Webhook"은 인터랙션 토큰이 만료(15분 초과)됐거나 원본 메시지가 사라진 경우예요.
   // 이러면 webhook으로는 더 이상 손쓸 수 없으니, 봇 토큰으로 채널에 새 메시지로라도 보내요.
   // (나만 보기(ephemeral) 응답이었다면 원래 보이던 사람에게만 보일 수 없어 공개로 나가는 점은 감안해 주세요.)
-  if (res.status === 404 && env?.DISCORD_BOT_TOKEN && interaction.channel_id) {
+  // 나만 보기(private) 응답은 공개로 새어 나가면 안 되니까 폴백하지 않아요.
+  if (res.status === 404 && mode !== "private" && env?.DISCORD_BOT_TOKEN && interaction.channel_id) {
     try {
       const fallbackRes = await fetch(`https://discord.com/api/v10/channels/${interaction.channel_id}/messages`, {
         method: "POST",
@@ -129,6 +130,7 @@ function modeOf(commandName) {
 }
 
 async function handler(request) {
+  const t0 = Date.now(); // 요청이 들어온 시각 (타이머를 여기서부터 재요)
   if (request.method !== "POST") {
     return new Response("이 엔드포인트는 Discord Interactions 전용입니다.", { status: 405 });
   }
@@ -183,27 +185,23 @@ async function handler(request) {
       return reply("알 수 없는 명령어예요.", "private");
     }
 
-        // 차단된 유저는 명령어를 쓸 수 없어요. (관리자는 항상 통과, 확인이 실패하면 막지 않고 그냥 진행)
-    const callerId = interaction.member?.user?.id;
-    if (callerId && callerId !== env.ADMIN_DISCORD_ID) {
-      try {
-        const ban = (await getBans(env))[callerId];
-        if (ban) {
-          return reply(`🚫 관리자가 이 계정의 봇 사용을 막았어요.${ban.reason ? `\n사유: ${ban.reason}` : ""}`, "private");
-        }
-      } catch (err) {
-        console.error("차단 목록 확인 실패:", err.message);
-      }
-    }
-
-    // 닉네임 저장 + 명령어 처리를 하나의 작업으로 묶어요.
-    // (닉네임 저장이 먼저 끝나야 신규 유저 문서가 겹쳐 쓰이지 않아서 순서는 그대로 유지)
     const userId = interaction.member?.user?.id;
     const displayName =
       interaction.member?.nick || interaction.member?.user?.global_name || interaction.member?.user?.username;
 
     const work = (async () => {
       try {
+        // 차단된 유저는 명령어를 쓸 수 없어요. (관리자는 통과, 확인이 실패하면 막지 않고 진행)
+        if (userId && userId !== env.ADMIN_DISCORD_ID) {
+          try {
+            const ban = (await getBans(env))[userId];
+            if (ban) {
+              return { content: `🚫 관리자가 이 계정의 봇 사용을 막았어요.${ban.reason ? `\n사유: ${ban.reason}` : ""}`, mode: "private" };
+            }
+          } catch (err) {
+            console.error("차단 목록 확인 실패:", err.message);
+          }
+        }
         if (userId) await touchUsername(env, userId, displayName);
         const { content, amount } = splitAmount(await handlerFn(interaction, env));
         // 활동 로그 (응답을 늦추지 않게 뒤에서 저장)
@@ -239,7 +237,8 @@ async function handler(request) {
     })();
 
     // 2초 안에 끝나면 평소처럼 바로 응답
-    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), DEFER_AFTER_MS));
+    const wait = Math.max(0, DEFER_AFTER_MS - (Date.now() - t0));
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), wait));
     const quick = await Promise.race([work, timeout]);
     if (quick) return reply(quick.content, quick.mode);
 
@@ -248,7 +247,7 @@ async function handler(request) {
     waitUntil(
       work.then(async (result) => {
         try {
-          await editOriginal(interaction, result.content, env);
+          await editOriginal(interaction, result.content, env, result.mode);
         } catch (err) {
           console.error("지연 응답 전송 실패:", err.message);
         }
