@@ -1374,7 +1374,7 @@ export async function buyStocks(env, userId, items) {
   if (user.balance < totalKrw || haveUsd < totalUsd) {
     const short = [];
     if (user.balance < totalKrw) short.push(`해정이 부족해요. (합계 필요: ${fmt(totalKrw)}해정, 보유: ${fmt(user.balance)}해정, 부족: ${fmt(totalKrw - user.balance)}해정)`);
-    if (haveUsd < totalUsd) short.push(`달러가 부족해요. (합계 필요: ${centsText(totalUsd)}, 보유: ${centsText(haveUsd)}, 부족: ${centsText(totalUsd - haveUsd)}) · \`/환전\`으로 바꿀 수 있어요.`);
+    if (haveUsd < totalUsd) short.push(`달러가 부족해요. (합계 필요: ${centsText(totalUsd)}, 보유: ${centsText(haveUsd)}, 부족: ${centsText(totalUsd - haveUsd)})`);
     return {
       ok: false,
       message: [
@@ -2443,7 +2443,7 @@ function macroHintLine(kind, delta) {
   const parts = [];
   if (up.length) parts.push(`📈 ${up.join("·")}`);
   if (down.length) parts.push(`📉 ${down.join("·")}`);
-  return parts.length ? `\n-# 업종 영향(앞으로 1시간 동안 시세에 조금씩 반영): ${parts.join(" / ")}` : "";
+  return parts.length ? `\n-# ${parts.join(" · ")}` : "";
 }
 
 // ---------- 시세 변동 ----------
@@ -3211,15 +3211,15 @@ export async function mineOnce(env, userId) {
     const required = upgradeCountFor(mining.level);
     const lines = [
       `⛏️ 채굴 완료! +${reward.toLocaleString()}해정`,
-      ...(jackpot ? [`💥 **대박!** 보상이 ${JACKPOT_MULT}배로 터졌어요!`] : []),
+      ...(jackpot ? [`💥 **대박!** ×${JACKPOT_MULT}`] : []),
       ...(streak >= 2 ? [`🔥 ${streak}일 연속 채굴 (보상 +${Math.round(streakPct * 100)}%)`] : []),
-      ...(milestoneBonus ? [`🎁 연속 ${streak}일 달성 보너스 +${milestoneBonus.toLocaleString()}해정!`] : []),
-      ...(mineral ? [`${mineral.icon} 광물 획득: **${mineral.name}** ×1 (\`/광물\`에서 확인, \`/광물판매\`로 판매)`] : []),
+      ...(milestoneBonus ? [`🎁 연속 ${streak}일 보너스 +${milestoneBonus.toLocaleString()}해정`] : []),
+      ...(mineral ? [`${mineral.icon} 광물 획득: **${mineral.name}** ×1`] : []),
       `💰 잔고: ${balanceBefore.toLocaleString()} → **${user.balance.toLocaleString()}해정**`,
       `🔋 체력: ${mining.stamina}/${max}`,
       mining.level >= MAX_LEVEL
         ? `🏆 Lv.${mining.level} (최고 레벨)`
-        : `📈 Lv.${mining.level} 진행도: ${mining.count}/${required}회 (채우면 무료 업그레이드 가능)`,
+        : `📈 Lv.${mining.level} 진행도: ${mining.count}/${required}회`,
     ];
     const history =
       `채굴: +${(reward + milestoneBonus).toLocaleString()}해정 (Lv.${mining.level}, 체력 ${mining.stamina}/${max}` +
@@ -3302,10 +3302,10 @@ export async function getMiningInfo(env, userId) {
   return [
     `**⛏️ 채굴장 정보 (Lv.${mining.level})**`,
     `체력: ${mining.stamina}/${max} (${nextIn})`,
-    `1회 채굴 보상: ${min.toLocaleString()} ~ ${rewardMax.toLocaleString()}해정 (대박 ${Math.round(JACKPOT_CHANCE * 100)}% · ×${JACKPOT_MULT})`,
+    `1회 채굴 보상: ${min.toLocaleString()} ~ ${rewardMax.toLocaleString()}해정`,
     streak >= 1
       ? `🔥 연속 채굴 ${streak}일째 (보상 +${streakPct}%) · 누적 ${(mining.total ?? mining.count).toLocaleString()}회`
-      : `🔥 오늘 채굴하면 연속 채굴이 시작돼요. (하루 쌓일 때마다 보상 +${Math.round(STREAK_BONUS_PER_DAY * 100)}%, 최대 +${Math.round(STREAK_BONUS_PER_DAY * STREAK_BONUS_MAX_DAYS * 100)}%)`,
+      : `🔥 연속 채굴 0일`,
     ...(mining.level >= MAX_LEVEL
       ? [`🏆 최고 레벨이에요! (Lv.${MAX_LEVEL})`]
       : [
@@ -3324,7 +3324,7 @@ export async function mineralInfo(env, userId) {
   const lines = ["**⛏️ 내 광물**"];
   let total = 0;
   if (owned.length === 0) {
-    lines.push("아직 광물이 없어요. `/채굴`을 하면 가끔 나와요!");
+    lines.push("아직 광물이 없어요.");
   } else {
     for (const m of owned) {
       const qty = user.minerals[m.name];
@@ -3332,12 +3332,9 @@ export async function mineralInfo(env, userId) {
       total += qty * price;
       lines.push(`${m.icon} **${m.name}** ×${qty.toLocaleString()} — 개당 ${price.toLocaleString()}해정`);
     }
-    lines.push(`💰 전부 팔면 **${total.toLocaleString()}해정** (\`/광물판매\`)`);
+    lines.push(`💰 전부 팔면 **${total.toLocaleString()}해정**`);
   }
-  lines.push("", "**나올 확률 / 판매가 (내 채굴 레벨 기준)**");
-  for (const m of MINERALS) {
-    lines.push(`- ${m.icon} ${m.name}: ${(m.chance * 100).toFixed(1)}% · ${mineralPriceFor(m, level).toLocaleString()}해정`);
-  }
+  lines.push("", `시세: ${MINERALS.map((m) => `${m.icon}${mineralPriceFor(m, level).toLocaleString()}`).join(" · ")}`);
   return lines.join("\n");
 }
 
@@ -3360,7 +3357,7 @@ export async function sellMinerals(env, userId, which = "전부") {
       delete user.minerals[m.name];
     }
     if (sold.length === 0) {
-      return { save: false, result: { ok: false, message: which === "전부" ? "팔 광물이 없어요. `/채굴`로 모아 보세요!" : `${which}이(가) 없어요.` } };
+      return { save: false, result: { ok: false, message: which === "전부" ? "팔 광물이 없어요." : `${which}이(가) 없어요.` } };
     }
     const before = user.balance;
     user.balance += gain;
@@ -4221,10 +4218,6 @@ export async function announcePriceChanges(env, changes, label = "시세 변동"
       pushBlock(["📰 **공시 결과**", ...extraLines].join("\n"));
     }
 
-    // 안내 문구: 상장폐지 종목이 있을 때만 표시
-    if (mainChanges.some((c) => c.delisted) || visibleUs.some((c) => c.delisted)) {
-      pushBlock("🚫 상장폐지된 종목은 거래할 수 없고, 보유 중이던 주식은 모두 사라졌어요.");
-    }
     if (current) chunks.push(current);
 
     // 이전 공지는 지우고 새 메시지를 올림 (항상 채널 맨 아래에 최신 공지만 남음)
@@ -4781,7 +4774,7 @@ export async function openFuture(env, userId, { stock: stockName, side, margin, 
 
   const items = await getFutureItems(env, userId);
   if (Object.keys(items).length >= MAX_FUTURES_PER_USER) {
-    return { ok: false, message: `선물은 최대 ${MAX_FUTURES_PER_USER}개까지 열 수 있어요. \`/선물청산\`으로 먼저 정산해 주세요.` };
+    return { ok: false, message: `선물은 최대 ${MAX_FUTURES_PER_USER}개까지 열 수 있어요.` };
   }
 
   const user = await getUser(env, userId);
@@ -5087,9 +5080,8 @@ export async function rollFxRate(env) {
           await discordRequest(env, "DELETE", `/channels/${env.ALLOWED_CHANNEL_ID}/messages/${old.messageId}`).catch(() => {});
         }
       }
-      const nextUnix = Math.floor((Math.ceil((now + 1) / FX_HOUR_MS) * FX_HOUR_MS) / 1000);
       const posted = await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, {
-        content: `💵 **환율 변경** ${arrow} ${prev.rate}해정 → **${rate}해정** (1달러 기준)\n다음 변경: <t:${nextUnix}:t> (<t:${nextUnix}:R>)${macroHintLine("fx", rate - prev.rate)}`,
+        content: `💵 **환율** ${arrow} ${prev.rate} → **${rate}해정**${macroHintLine("fx", rate - prev.rate)}`,
         flags: 4096,
         allowed_mentions: { parse: [] },
       });
@@ -5270,8 +5262,7 @@ export async function rollBankRate(env) {
       }
       const posted = await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, {
         content:
-          `🏦 **은행 금리 변경** ${arrow} 시장금리 ×${prev.mult ?? 1} → ×${mult}\n` +
-          `예금 일 ${pctText(depositRate)} · 대출 ${loanRatesText(next)} (신용등급 B 기준)` +
+          `🏦 **금리** ${arrow} ×${prev.mult ?? 1} → **×${mult}** · 예금 일 ${pctText(depositRate)} · 대출 ${loanRatesText(next).split(" / ")[0]}` +
           macroHintLine("rate", mult - (prev.mult ?? 1)),
         flags: 4096,
         allowed_mentions: { parse: [] },
@@ -6280,7 +6271,7 @@ export async function processDividends(env) {
   if (paid > 0 && env.ALLOWED_CHANNEL_ID) {
     try {
       await discordPost(env, `/channels/${env.ALLOWED_CHANNEL_ID}/messages`, {
-        content: `💰 **오늘의 배당금 지급!** ${paid.toLocaleString()}명에게 총 ${total.toLocaleString()}해정을 나눠줬어요. (자세한 내용은 \`/배당\`)`,
+        content: `💰 **오늘의 배당금 지급!** ${paid.toLocaleString()}명에게 총 ${total.toLocaleString()}해정을 나눠줬어요.`,
         flags: 4096,
         allowed_mentions: { parse: [] },
       });
@@ -8119,7 +8110,7 @@ async function reserveOrder(side, interaction, env) {
   const current = Object.keys(items).length;
   if (current + slots.length > MAX_ORDERS_PER_USER) {
     errors.push(
-      `예약은 최대 ${MAX_ORDERS_PER_USER}개까지 걸 수 있어요. (지금 ${current}개 + 이번 ${slots.length}개) \`/예약취소\`로 정리한 뒤 다시 시도해 주세요.`
+      `예약은 최대 ${MAX_ORDERS_PER_USER}개까지 걸 수 있어요. (지금 ${current}개 + 이번 ${slots.length}개)`
     );
   }
 
@@ -8131,13 +8122,13 @@ async function reserveOrder(side, interaction, env) {
     if (!stock) return;
     if (side === "buy") {
       if (stock.price <= s.price) {
-        errors.push(`${tag(s)}현재가(${moneyOf(stock, stock.price)})가 이미 예약가 이하예요. 바로 \`/매수\`를 쓰거나, 더 낮은 가격으로 예약해 주세요.`);
+        errors.push(`${tag(s)}현재가(${moneyOf(stock, stock.price)})가 이미 예약가 이하예요.`);
       } else if ((isForeign(stock) ? user.usd || 0 : user.balance) < s.price * s.qty + tradeFee(s.price * s.qty)) {
         errors.push(`${tag(s)}${isForeign(stock) ? "달러가" : "잔고가"} 부족해요. (예약가 기준 필요: ${moneyOf(stock, s.price * s.qty + tradeFee(s.price * s.qty))}(수수료 포함), 보유: ${moneyOf(stock, isForeign(stock) ? user.usd || 0 : user.balance)})`);
       }
     } else {
       if (stock.price >= s.price) {
-        errors.push(`${tag(s)}현재가(${moneyOf(stock, stock.price)})가 이미 예약가 이상이에요. 바로 \`/매도\`를 쓰거나, 더 높은 가격으로 예약해 주세요.`);
+        errors.push(`${tag(s)}현재가(${moneyOf(stock, stock.price)})가 이미 예약가 이상이에요.`);
         return;
       }
       const held = user.holdings[s.name] || 0;
@@ -8600,7 +8591,7 @@ export const handlers = {
     );
 
     // 디스코드 메시지 한도(2000자) 보호
-    let text = `**🪦 상장폐지된 종목 (${list.length}건, 최신순)**\n그래프는 \`/상장폐지종류 종목:이름\`으로 볼 수 있어요.`;
+    let text = `**🪦 상장폐지된 종목 (${list.length}건, 최신순)**`;
     for (const line of lines) {
       if (text.length + line.length + 1 > 1900) {
         text += "\n…(이하 생략 · `개수`를 줄여 보세요)";
@@ -8722,9 +8713,9 @@ export const handlers = {
     const name = String(opt(interaction, "종목") ?? "").trim();
     const [stock, w] = await Promise.all([getStock(env, name), getWatch(env, userId)]);
     if (!stock) return `"${name}" 종목을 찾을 수 없어요.`;
-    if (w.stocks[name]) return `**${name}**은(는) 이미 관심종목이에요. \`/관심목록\`으로 확인해 보세요.`;
+    if (w.stocks[name]) return `**${name}**은(는) 이미 관심종목이에요.`;
     const count = Object.keys(w.stocks).length;
-    if (count >= MAX_WATCH_STOCKS) return `관심종목은 최대 ${MAX_WATCH_STOCKS}개까지 담을 수 있어요. \`/관심삭제\`로 정리한 뒤 다시 시도해 주세요.`;
+    if (count >= MAX_WATCH_STOCKS) return `관심종목은 최대 ${MAX_WATCH_STOCKS}개까지 담을 수 있어요.`;
     w.stocks[name] = Date.now();
     await saveWatch(env, userId, w);
     return [
@@ -8804,7 +8795,7 @@ export const handlers = {
 
     const dir = price > stock.price ? "up" : "down";
     if (Object.keys(w.alerts).length >= MAX_PRICE_ALERTS) {
-      return `가격 알림은 최대 ${MAX_PRICE_ALERTS}개까지 걸 수 있어요. \`/알림취소\`로 정리한 뒤 다시 시도해 주세요.`;
+      return `가격 알림은 최대 ${MAX_PRICE_ALERTS}개까지 걸 수 있어요.`;
     }
     if (Object.values(w.alerts).some((a) => a.stock === name && a.price === price && a.dir === dir)) {
       return "같은 알림이 이미 걸려 있어요. `/관심목록`으로 확인해 보세요.";
@@ -8841,7 +8832,7 @@ export const handlers = {
     const userId = interaction.member.user.id;
     const name = String(opt(interaction, "종목") ?? "").trim();
     const [stock, user, newsDoc] = await Promise.all([getStock(env, name), getUser(env, userId), getDoc(env, NEWS_PATH).catch(() => null)]);
-    if (!stock) return `"${name}" 종목을 찾을 수 없어요. (상장폐지된 종목은 \`/상장폐지종류\`에서 볼 수 있어요)`;
+    if (!stock) return `"${name}" 종목을 찾을 수 없어요.`;
     const market = stock.kind === "us" ? await getUsMarketStatus(env) : null;
     const base = stockInfoText(stock, user.holdings[name] || 0, (newsDoc?.divMods || {})[name] ?? 1, Date.now(), market);
     return isForeign(stock) ? base : `${base}\n${await floatLine(env, stock)}`;
@@ -8929,7 +8920,7 @@ export const handlers = {
     const need = (hasStop ? 1 : 0) + (hasTake ? 1 : 0);
     const current = Object.keys(items).length;
     if (current + need > MAX_ORDERS_PER_USER) {
-      return `예약은 최대 ${MAX_ORDERS_PER_USER}개까지 걸 수 있어요. (지금 ${current}개 + 이번 ${need}개) \`/예약취소\`로 정리한 뒤 다시 시도해 주세요.`;
+      return `예약은 최대 ${MAX_ORDERS_PER_USER}개까지 걸 수 있어요. (지금 ${current}개 + 이번 ${need}개)`;
     }
 
     // 기준은 내 평균 매수가
@@ -8939,10 +8930,10 @@ export const handlers = {
 
     const errors = [];
     if (hasStop && stock.price <= stopPrice) {
-      errors.push(`현재가(${moneyOf(stock, stock.price)})가 이미 손절가(${moneyOf(stock, stopPrice)}) 이하예요. 바로 \`/매도\`를 쓰거나 손절 %를 줄여 주세요.`);
+      errors.push(`현재가(${moneyOf(stock, stock.price)})가 이미 손절가(${moneyOf(stock, stopPrice)}) 이하예요.`);
     }
     if (hasTake && stock.price >= takePrice) {
-      errors.push(`현재가(${moneyOf(stock, stock.price)})가 이미 익절가(${moneyOf(stock, takePrice)}) 이상이에요. 바로 \`/매도\`를 쓰거나 익절 %를 높여 주세요.`);
+      errors.push(`현재가(${moneyOf(stock, stock.price)})가 이미 익절가(${moneyOf(stock, takePrice)}) 이상이에요.`);
     }
     if (errors.length) return errors.join("\n");
 
