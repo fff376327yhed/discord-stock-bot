@@ -1018,6 +1018,8 @@ main{max-width:none;margin:0;padding:0}
 (function(){
 var $=function(i){return document.getElementById(i)};
 function mk(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
+// 패치노트 글의 <b>·<code> 태그만 안전하게 서식으로 바꿔요 (나머지는 그냥 글자로 보여요)
+function rich(t){var d=mk('div','tx');String(t).split(/(<b>.*?<\/b>|<code>.*?<\/code>)/g).forEach(function(p){if(!p)return;var m=p.match(/^<(b|code)>(.*)<\/\1>$/);d.append(m?mk(m[1],'',m[2]):document.createTextNode(p))});return d}
 var TABS=[['patch','🆕','패치노트'],['start','🌱','시작'],['sum','📋','한눈 요약'],['faq','❓','자주 묻는 질문'],['price','🎢','가격변동'],['surge','⚡','급등락'],['delist','💀','상장폐지'],['trade','🛒','사고팔기'],['order','⏰','예약·알림'],['futures','🎯','선물'],['fx','💵','달러·외국자산'],['bank','🏦','은행'],['market','🏪','장터'],['ins','🛡️','보험·배당'],['news','📰','공시·실적'],['bot','🤖','AI 봇'],['earn','⛏️','돈벌기'],['cmd','⌨️','명령어']];
 
 // ── 패치노트: 새 소식은 맨 위에 추가하세요 (종류: '' 개선 · 'new' 신규 · 'fix' 수정) ──
@@ -1060,7 +1062,7 @@ LOG.forEach(function(u,i){
  var d=mk('details','upd'+(i===0?' latest':''));if(i===0)d.open=true;
  var s=mk('summary'),dt=mk('div','dt');dt.append(mk('span','',u.date));if(i===0)dt.append(mk('span','badge','NEW'));
  s.append(dt,mk('div','ut',u.title));d.append(s);
- u.groups.forEach(function(g){g[2].forEach(function(t){var r=mk('div','ui');r.append(mk('span','tag '+g[0],g[1]),mk('div','tx',t));d.append(r)})});
+ u.groups.forEach(function(g){g[2].forEach(function(t){var r=mk('div','ui');r.append(mk('span','tag '+g[0],g[1]),rich(t));d.append(r)})});
  $('log').append(d);
 });
 
