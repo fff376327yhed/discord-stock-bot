@@ -339,6 +339,7 @@ async function queryByTime(env, collection, since, until) {
 }
 
 export { getDoc, setDoc, deleteDoc, listCollection };
+export { getDocMeta, setDocIfUnchanged, recordShareChange, discordPost };
 
 // ============================================================
 // [listing.js]
@@ -2964,11 +2965,11 @@ function mineralPriceFor(mineral, level, mult = 1) {
 // 종목처럼 수요·공급을 따지진 않고, 기준가(MINERALS[].price, Lv.1 기준) 둘레에서 배율이 오르내려요.
 // 실제 판매가는 이 배율 × 채굴 레벨 보정(mineralPriceFor)으로 정해져요.
 export const MINERAL_MARKET_PATH = "config/mineralMarket";
-const MINERAL_STEP_PCT = 8;        // 평소 변동마다 직전 배율에서 최대 ±8%
-const MINERAL_SURGE_STEP_PCT = 25; // 급등락 시각엔 최대 ±25%
-const MINERAL_REVERT = 0.08;       // 배율 1(기준가) 쪽으로 돌아오려는 힘(로그, 변동 1번당)
-const MINERAL_MIN_MULT = 0.5;      // 기준가의 50% 밑으로는 안 내려가요
-const MINERAL_MAX_MULT = 2.5;      // 기준가의 250% 위로는 안 올라가요
+const MINERAL_STEP_PCT = 35;       // 평소 변동마다 직전 배율에서 최대 ±35%
+const MINERAL_SURGE_STEP_PCT = 100; // 급등락 시각엔 최대 ±100%
+const MINERAL_REVERT = 0.04;       // 배율 1(기준가) 쪽으로 돌아오려는 힘(로그, 변동 1번당)
+const MINERAL_MIN_MULT = 0.2;      // 기준가의 20% 밑으로는 안 내려가요
+const MINERAL_MAX_MULT = 10;       // 기준가의 1000% 위로는 안 올라가요
 
 // 저장된 배율 문서를 읽어요. 없거나 광물 종류가 바뀌었으면 전부 배율 1로 새로 만들어요.
 async function getMineralMarket(env) {

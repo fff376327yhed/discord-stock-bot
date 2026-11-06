@@ -4,6 +4,7 @@ import {
   processOrders, processPriceAlerts, processFutures, processBank, processDividends, processDailySummary, takeNews, finishNews, publishNews, runEarnings, prepareCrowd, finishCrowd, getDoc, setDoc,
   rollBankRate, rollFxRate, logTradePressure, rollMineralMarket,
 } from "../src/lib.js";
+import { processMarket } from "../src/market.js";
 
 // 크론 엔드포인트 3개(fluctuate / midnight / prealert)를 한 함수로 합친 파일이에요.
 // 호출: /api/cron?task=fluctuate | midnight | prealert | news | bankRate | fxRate | earnings
@@ -89,6 +90,14 @@ async function runFluctuation(env, range, label) {
     console.error("은행 처리 실패:", err.message);
   }
 
+  // 2-3b) 장터: 기간이 끝난 경매/거래 제안 정리
+  let market = null;
+  try {
+    market = await processMarket(env);
+  } catch (err) {
+    console.error("장터 정리 실패:", err.message);
+  }
+
   // 2-4) 배당금: 하루 한 번 (매일 오전 9시 이후 첫 변동 때, 이미 줬으면 알아서 건너뜀)
   let dividends = null;
   try {
@@ -123,6 +132,7 @@ async function runFluctuation(env, range, label) {
     alerts,
     futures,
     bank,
+    market,
     dividends,
     summary,
     minerals: mineralChanges,

@@ -1,3 +1,8 @@
+import {
+  marketHandlers, marketAutocomplete, marketCommandDefinitions,
+  MARKET_VIEW_ONLY, MARKET_SILENT, processMarket, marketStake,
+} from "../src/market.js";
+
 import { verifyKey } from "discord-interactions";
 import { waitUntil } from "@vercel/functions";
 import {
@@ -151,7 +156,7 @@ async function editOriginal(interaction, content, env, mode) {
 // 명령어 이름으로 공개 방식을 정해요. 기본값은 "나만 보기"예요.
 function modeOf(commandName) {
   if (PUBLIC_COMMANDS.has(commandName)) return "public"; // 모두에게 공개 + 알림도 평소처럼
-  if (SILENT_COMMANDS.has(commandName)) return "silent"; // 모두에게 공개, 무음
+  if (SILENT_COMMANDS.has(commandName) || MARKET_SILENT.has(commandName)) return "silent"; // 모두에게 공개, 무음
   return "private"; // 나머지는 나에게만 보임
 }
 
@@ -186,7 +191,7 @@ async function handler(request) {
     let choices = [];
     try {
       const allowed = !env.ALLOWED_CHANNEL_ID || interaction.channel_id === env.ALLOWED_CHANNEL_ID;
-      if (allowed) choices = await autocomplete(interaction, env);
+      if (allowed) choices = (await marketAutocomplete(interaction, env)) ?? (await autocomplete(interaction, env));
     } catch (err) {
       console.error("자동완성 오류:", err.message);
     }
@@ -204,7 +209,7 @@ async function handler(request) {
     }
 
     const commandName = interaction.data.name;
-    const handlerFn = handlers[commandName];
+    const handlerFn = handlers[commandName] || marketHandlers[commandName];
     const mode = modeOf(commandName);
 
     if (!handlerFn) {
@@ -229,9 +234,20 @@ async function handler(request) {
           }
         }
         if (userId) await touchUsername(env, userId, displayName);
+        // 장터에 맡겨 둔 주식·입찰금은 순자산에 안 잡혀서, 파산으로 빚만 지우고 되찾는 꼼수를 막아요
+        if (commandName === "파산신청" && userId) {
+          const stake = await marketStake(env, userId);
+          if (stake) {
+            const list = stake.slice(0, 5).map((i) => `\`#${i.id}\``).join(" ");
+            return {
+              content: `🚫 장터에 올려 둔 물건이나 입찰 중인 경매가 있어서 파산을 신청할 수 없어요. (${list}${stake.length > 5 ? " 외" : ""})\n\`/거래취소\` \`/경매취소\`로 정리하거나 끝날 때까지 기다린 뒤 다시 신청해 주세요.`,
+              mode: "private",
+            };
+          }
+        }
         const { content, amount } = splitAmount(await handlerFn(interaction, env));
         // 활동 로그 (응답을 늦추지 않게 뒤에서 저장)
-        if (userId && !VIEW_ONLY.has(commandName)) {
+        if (userId && !VIEW_ONLY.has(commandName) && !MARKET_VIEW_ONLY.has(commandName)) {
           waitUntil(
             logAction(env, {
               u: userId,
