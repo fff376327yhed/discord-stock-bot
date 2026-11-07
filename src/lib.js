@@ -3613,6 +3613,32 @@ function buildAllStocksConfig(samples, series) {
   };
 }
 
+// 종목마다 따로따로, 한 번에 모아서 (관리자 콘솔용) — 겹쳐 그리는 대신 각자 작은 그래프로
+// 반환: [{ name, url, up }], 그릴 종목이 없으면 빈 배열
+export async function renderAllStocksCharts(env) {
+  const stocks = await listStocks(env);
+  const rows = stocks
+    .filter((s) => !isForeign(s))
+    .map((s) => ({ name: s.name, pts: getPriceHistory(s) }))
+    .filter((r) => r.pts.length >= 2)
+    .sort((a, b) => a.name.localeCompare(b.name, "ko"));
+
+  return (
+    await Promise.all(
+      rows.map(async (r) => {
+        const up = r.pts[r.pts.length - 1].p - r.pts[0].p >= 0;
+        try {
+          const url = await renderStockChart(r.pts, up);
+          return url ? { name: r.name, url, up } : null;
+        } catch (err) {
+          console.error(`${r.name} 그래프 생성 실패:`, err.message);
+          return null;
+        }
+      })
+    )
+  ).filter(Boolean);
+}
+
 // 반환: 이미지 주소(URL), 그릴 종목이 없으면 null
 export async function renderAllStocksChart(env) {
   const stocks = await listStocks(env);

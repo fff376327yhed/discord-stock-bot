@@ -455,12 +455,14 @@
 <details>
   <summary>📈 전체 종목 그래프 (한 장에 겹쳐 보기)</summary>
   <div class="section">
-    <p class="hint">일반 종목(코인·미국주식은 배율 때문에 제외)의 "상장 시점 대비 등락률(%)"을 한 차트에 겹쳐서 보여줘요. 누를 때마다 QuickChart에서 새로 그려요.</p>
+    <p class="hint">일반 종목(코인·미국주식은 배율 때문에 제외)의 그래프예요. 누를 때마다 QuickChart에서 새로 그려요.</p>
     <div class="form-row">
-      <button onclick="loadAllStocksChart()">그래프 그리기</button>
+      <button onclick="loadAllStocksChart()">한 장에 겹쳐서</button>
+      <button class="ghost" onclick="loadAllStocksCharts()">종목별로 따로따로</button>
       <span id="allChartStatus" class="muted"></span>
     </div>
     <div id="allChartWrap"></div>
+    <div id="allChartGrid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:14px;"></div>
   </div>
 </details>
 
@@ -553,12 +555,37 @@ function refreshAll() {
 
 async function loadAllStocksChart() {
   $("allChartStatus").textContent = "그리는 중... (몇 초 걸릴 수 있어요)";
+  $("allChartGrid").innerHTML = "";
   $("allChartWrap").innerHTML = "";
   try {
     const { url } = await call("allStocksChart");
     $("allChartWrap").innerHTML = `<img src="${esc(url)}" style="max-width:100%; border-radius:8px; background:#fff;">`;
     $("allChartStatus").textContent = "";
     log("전체 종목 그래프를 그렸어요.");
+  } catch (e) {
+    $("allChartStatus").textContent = "";
+    log("오류: " + e.message);
+  }
+}
+
+async function loadAllStocksCharts() {
+  $("allChartStatus").textContent = "그리는 중... (종목이 많으면 시간이 좀 걸려요)";
+  $("allChartWrap").innerHTML = "";
+  $("allChartGrid").innerHTML = "";
+  try {
+    const { charts } = await call("allStocksCharts");
+    if (!charts.length) {
+      $("allChartGrid").innerHTML = `<span class="muted">그릴 만한 시세 기록이 있는 종목이 없어요.</span>`;
+    } else {
+      $("allChartGrid").innerHTML = charts.map((c) => `
+        <div style="background:#1b1d26; border-radius:8px; padding:8px;">
+          <div style="font-weight:bold; margin-bottom:6px; color:${c.up ? "#e5736f" : "#6fa8e5"}">${esc(c.name)}</div>
+          <img src="${esc(c.url)}" style="max-width:100%; border-radius:6px; background:#fff;">
+        </div>
+      `).join("");
+    }
+    $("allChartStatus").textContent = "";
+    log(`종목 ${charts.length}개 그래프를 그렸어요.`);
   } catch (e) {
     $("allChartStatus").textContent = "";
     log("오류: " + e.message);
