@@ -2,6 +2,7 @@ import {
   marketHandlers, marketAutocomplete, marketCommandDefinitions,
   MARKET_VIEW_ONLY, MARKET_SILENT, processMarket, marketStake,
 } from "../src/market.js";
+import { lotteryHandlers, LOTTERY_VIEW_ONLY } from "../src/lottery.js";
 
 import { verifyKey } from "discord-interactions";
 import { waitUntil } from "@vercel/functions";
@@ -209,7 +210,7 @@ async function handler(request) {
     }
 
     const commandName = interaction.data.name;
-    const handlerFn = handlers[commandName] || marketHandlers[commandName];
+    const handlerFn = handlers[commandName] || marketHandlers[commandName] || lotteryHandlers[commandName];
     const mode = modeOf(commandName);
 
     if (!handlerFn) {
@@ -247,7 +248,7 @@ async function handler(request) {
         }
         const { content, amount } = splitAmount(await handlerFn(interaction, env));
         // 활동 로그 (응답을 늦추지 않게 뒤에서 저장)
-        if (userId && !VIEW_ONLY.has(commandName) && !MARKET_VIEW_ONLY.has(commandName)) {
+        if (userId && !VIEW_ONLY.has(commandName) && !MARKET_VIEW_ONLY.has(commandName) && !LOTTERY_VIEW_ONLY.has(commandName)) {
           waitUntil(
             logAction(env, {
               u: userId,

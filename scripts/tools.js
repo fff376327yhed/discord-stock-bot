@@ -11,6 +11,7 @@
 
 import { buildRegisterPayload, ROOT_COMMAND } from "../src/lib.js";
 import { marketCommandDefinitions } from "../src/market.js";
+import { lotteryCommandDefinitions } from "../src/lottery.js";
 
 const API = "https://discord.com/api/v10";
 const appId = process.env.DISCORD_APPLICATION_ID;
@@ -42,7 +43,7 @@ async function put(url, body, label) {
 
 async function register() {
   need("DISCORD_APPLICATION_ID", "DISCORD_BOT_TOKEN");
-  const commandDefinitions = [...buildRegisterPayload(), ...marketCommandDefinitions]; // /주식 + 장터 명령어
+  const commandDefinitions = [...buildRegisterPayload(), ...marketCommandDefinitions, ...lotteryCommandDefinitions]; // /주식 + 장터 + 복권
   if (commandDefinitions.length > 100) {
     console.error(`커맨드가 ${commandDefinitions.length}개라 한도(100개)를 넘어요.`);
     process.exit(1);

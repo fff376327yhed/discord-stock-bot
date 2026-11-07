@@ -5,6 +5,7 @@ import {
   rollBankRate, rollFxRate, logTradePressure, rollMineralMarket,
 } from "../src/lib.js";
 import { processMarket } from "../src/market.js";
+import { runLottery } from "../src/lottery.js";
 
 // 크론 엔드포인트 3개(fluctuate / midnight / prealert)를 한 함수로 합친 파일이에요.
 // 호출: /api/cron?task=fluctuate | midnight | prealert | news | bankRate | fxRate | earnings
@@ -245,7 +246,13 @@ async function earningsTask(env, url) {
   return Response.json(result);
 }
 
-const TASKS = { fluctuate: fluctuateTask, midnight: midnightTask, prealert: prealertTask, news: newsTask, bankRate: bankRateTask, fxRate: fxRateTask, earnings: earningsTask };
+// ---------- 8) 복권 추첨 (cron-job.org: 4-59/5 * * * *, 주소: /api/cron?task=lottery) ----------
+// 토요일 20:45가 지난 뒤 첫 호출에서 한 번만 추첨해요. 평소엔 문서 1개만 읽고 끝나요.
+async function lotteryTask(env) {
+  return Response.json({ ok: true, ...(await runLottery(env)) });
+}
+
+const TASKS = { lottery: lotteryTask, fluctuate: fluctuateTask, midnight: midnightTask, prealert: prealertTask, news: newsTask, bankRate: bankRateTask, fxRate: fxRateTask, earnings: earningsTask };
 
 export default {
   fetch: async function handler(request) {
