@@ -213,6 +213,13 @@ function fromValue(v) {
   return null;
 }
 
+// Firestore의 updateMask.fieldPaths는 영문자/숫자/밑줄([a-zA-Z_][a-zA-Z_0-9]*)만 따옴표 없이 쓸 수 있어요.
+// 한글 등 그 외 문자가 섞인 필드명(예: 광물 이름 "구리")은 백틱(`)으로 감싸야 Firestore가 받아들여요.
+function quoteFieldPath(key) {
+  if (/^[a-zA-Z_][a-zA-Z_0-9]*$/.test(key)) return key;
+  return "`" + String(key).replace(/[`\\]/g, "\\$&") + "`";
+}
+
 // ---- 공개 함수: 문서 단위 CRUD ----
 
 async function getDoc(env, path) {
@@ -228,7 +235,7 @@ async function getDoc(env, path) {
 
 async function setDoc(env, path, obj) {
   const token = await getAccessToken(env);
-  const fieldPaths = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join("&");
+  const fieldPaths = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(quoteFieldPath(k))}`).join("&");
   const res = await fetch(`${baseUrl(env)}/${path}?${fieldPaths}`, {
     method: "PATCH",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -1060,7 +1067,7 @@ export async function getDocMeta(env, path) {
 // 성공하면 true, 그 사이 다른 요청이 문서를 바꿨으면 false
 export async function setDocIfUnchanged(env, path, obj, updateTime) {
   const token = await getAccessToken(env);
-  const params = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`);
+  const params = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(quoteFieldPath(k))}`);
   params.push(`currentDocument.updateTime=${encodeURIComponent(updateTime)}`);
   const res = await fetch(`${baseUrl(env)}/${path}?${params.join("&")}`, {
     method: "PATCH",
