@@ -2944,6 +2944,7 @@ const MINERALS = [
   { name: "은", icon: "⚪", chance: 0.04, price: 60 },
   { name: "금", icon: "🟡", chance: 0.012, price: 250 },
   { name: "다이아몬드", icon: "💎", chance: 0.003, price: 2000 },
+  { name: "운석", icon: "☄️", chance: 0.0005, price: 12000 }, // 최상급: 다이아몬드보다 6배 희귀하지만 가격도 6배라 평균 기여도는 비슷해요
 ];
 
 function rollMineral() {
@@ -2972,13 +2973,20 @@ const MINERAL_REVERT = 0.08;       // 배율 1(기준가) 쪽으로 돌아오려
 const MINERAL_MIN_MULT = 0.5;      // 기준가의 50% 밑으로는 안 내려가요
 const MINERAL_MAX_MULT = 2.5;      // 기준가의 250% 위로는 안 올라가요
 
-// 저장된 배율 문서를 읽어요. 없거나 광물 종류가 바뀌었으면 전부 배율 1로 새로 만들어요.
+// 저장된 배율 문서를 읽어요. 문서가 아예 없으면 전부 배율 1로 새로 만들고,
+// 광물 종류가 늘어나서 일부만 없으면 그 광물만 배율 1로 채워요. (기존 광물의 배율은 그대로 둬요)
 async function getMineralMarket(env) {
   const doc = await getDoc(env, MINERAL_MARKET_PATH);
-  if (doc && MINERALS.every((m) => Number.isFinite(doc[m.name]))) return doc;
-  const fresh = Object.fromEntries(MINERALS.map((m) => [m.name, 1]));
-  await setDoc(env, MINERAL_MARKET_PATH, fresh);
-  return fresh;
+  if (!doc) {
+    const fresh = Object.fromEntries(MINERALS.map((m) => [m.name, 1]));
+    await setDoc(env, MINERAL_MARKET_PATH, fresh);
+    return fresh;
+  }
+  const missing = MINERALS.filter((m) => !Number.isFinite(doc[m.name]));
+  if (!missing.length) return doc;
+  const patch = Object.fromEntries(missing.map((m) => [m.name, 1]));
+  await setDoc(env, MINERAL_MARKET_PATH, patch);
+  return { ...doc, ...patch };
 }
 
 // 시세 변동(평소 5분 / 급등락)마다 한 번 호출: 광물 배율을 움직이고 저장한 뒤,
