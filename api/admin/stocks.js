@@ -3,7 +3,7 @@ import {
   listStocks, upsertStock, removeStock, getStock, getUser, saveUser, invalidateStocksCache,
   listProducts, upsertProduct, removeProduct, getProduct, setUserItem, DELIST_PRICE,
   listCollection, setDoc, getDoc, deleteDoc,
-  resetBots,
+  resetBots, renderAllStocksChart,
   logAction, listLogs, purgeLogs, getTradePressureState,
   getAttendanceConfig, setAttendanceConfig,
   getAnnounceConfig, setAnnounceConfig,
@@ -193,6 +193,13 @@ async function handle(request) {
       // 로그 기반 거래 압력: 마지막 집계 결과만 읽어요 (커서를 건드리지 않아서 cron 쪽과 안 겹쳐요)
       case "tradePressure":
         return json(await getTradePressureState(env));
+
+      // 전체 종목 시세를 한 장에 (QuickChart 이미지 주소만 돌려줘요. <img src="..."> 로 바로 보여줄 수 있어요)
+      case "allStocksChart": {
+        const url = await renderAllStocksChart(env);
+        if (!url) return json({ error: "그래프를 그릴 만한 시세 기록이 있는 종목이 없어요." }, 400);
+        return json({ url });
+      }
 
       // keepDays일보다 오래된 로그 삭제
       case "purgeLogs": {

@@ -226,14 +226,9 @@ async function getDoc(env, path) {
   return fromFields(data.fields);
 }
 
-// Firestore updateMask의 필드 경로는 영문·숫자·밑줄만 그대로 쓸 수 있어요. 한글 등은 백틱(`)으로 감싸야 해요.
-function maskPath(k) {
-  return /^[a-zA-Z_][a-zA-Z_0-9]*$/.test(k) ? k : "`" + k.replace(/\\/g, "\\\\").replace(/`/g, "\\`") + "`";
-}
-
 async function setDoc(env, path, obj) {
   const token = await getAccessToken(env);
-  const fieldPaths = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(maskPath(k))}`).join("&");
+  const fieldPaths = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join("&");
   const res = await fetch(`${baseUrl(env)}/${path}?${fieldPaths}`, {
     method: "PATCH",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -339,7 +334,6 @@ async function queryByTime(env, collection, since, until) {
 }
 
 export { getDoc, setDoc, deleteDoc, listCollection };
-export { getDocMeta, setDocIfUnchanged, recordShareChange, discordPost };
 
 // ============================================================
 // [listing.js]
@@ -1066,7 +1060,7 @@ async function getDocMeta(env, path) {
 // 성공하면 true, 그 사이 다른 요청이 문서를 바꿨으면 false
 async function setDocIfUnchanged(env, path, obj, updateTime) {
   const token = await getAccessToken(env);
-  const params = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(maskPath(k))}`);
+  const params = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`);
   params.push(`currentDocument.updateTime=${encodeURIComponent(updateTime)}`);
   const res = await fetch(`${baseUrl(env)}/${path}?${params.join("&")}`, {
     method: "PATCH",
@@ -2965,11 +2959,11 @@ function mineralPriceFor(mineral, level, mult = 1) {
 // 종목처럼 수요·공급을 따지진 않고, 기준가(MINERALS[].price, Lv.1 기준) 둘레에서 배율이 오르내려요.
 // 실제 판매가는 이 배율 × 채굴 레벨 보정(mineralPriceFor)으로 정해져요.
 export const MINERAL_MARKET_PATH = "config/mineralMarket";
-const MINERAL_STEP_PCT = 35;       // 평소 변동마다 직전 배율에서 최대 ±35%
-const MINERAL_SURGE_STEP_PCT = 100; // 급등락 시각엔 최대 ±100%
-const MINERAL_REVERT = 0.04;       // 배율 1(기준가) 쪽으로 돌아오려는 힘(로그, 변동 1번당)
-const MINERAL_MIN_MULT = 0.2;      // 기준가의 20% 밑으로는 안 내려가요
-const MINERAL_MAX_MULT = 10;       // 기준가의 1000% 위로는 안 올라가요
+const MINERAL_STEP_PCT = 8;        // 평소 변동마다 직전 배율에서 최대 ±8%
+const MINERAL_SURGE_STEP_PCT = 25; // 급등락 시각엔 최대 ±25%
+const MINERAL_REVERT = 0.08;       // 배율 1(기준가) 쪽으로 돌아오려는 힘(로그, 변동 1번당)
+const MINERAL_MIN_MULT = 0.5;      // 기준가의 50% 밑으로는 안 내려가요
+const MINERAL_MAX_MULT = 2.5;      // 기준가의 250% 위로는 안 올라가요
 
 // 저장된 배율 문서를 읽어요. 없거나 광물 종류가 바뀌었으면 전부 배율 1로 새로 만들어요.
 async function getMineralMarket(env) {
@@ -3555,6 +3549,122 @@ export async function renderStockChart(points, up) {
       JSON.stringify(buildConfig(slice, up))
     )}`;
     if (url.length <= 1900 || n === 12) return url;
+  }
+}
+
+// ---------- 전체 종목 시세를 한 장으로 (관리자 콘솔용) ----------
+// 종목마다 가격 범위가 달라서 그대로 겹치면 비교가 안 되니, "각자 첫 기록 대비 등락률(%)"로 맞춰서 한 차트에 그려요.
+// 해정지수와 같은 이유로 외국자산(코인·미국주식)은 배율 때문에 빼요.
+function buildAllStocksSeries(stocks, points = 60) {
+  const rows = stocks
+    .filter((s) => !isForeign(s))
+    .map((s) => ({ name: s.name, pts: getPriceHistory(s) }))
+    .filter((r) => r.pts.length >= 2);
+  if (!rows.length) return null;
+
+  const minT = Math.min(...rows.map((r) => r.pts[0].t));
+  const maxT = Math.max(...rows.map((r) => r.pts[r.pts.length - 1].t));
+  if (maxT <= minT) return null;
+  const step = (maxT - minT) / (points - 1);
+  const samples = Array.from({ length: points }, (_, i) => minT + i * step);
+
+  const series = rows.map((r) => {
+    const base = r.pts[0].p;
+    return {
+      name: r.name,
+      data: samples.map((t) => {
+        if (t < r.pts[0].t) return null; // 아직 상장 전 구간은 그려요 (선이 끊겨요)
+        return base > 0 ? +(((priceAtTime(r.pts, t) - base) / base) * 100).toFixed(2) : 0;
+      }),
+    };
+  });
+  return { samples, series };
+}
+
+function buildAllStocksConfig(samples, series) {
+  const n = series.length;
+  return {
+    type: "line",
+    data: {
+      labels: samples.map((t) => labelOf(t)),
+      datasets: series.map((s, i) => {
+        const color = `hsl(${Math.round((i * 360) / n)}, 65%, 45%)`;
+        return {
+          label: s.name,
+          data: s.data,
+          borderColor: color,
+          backgroundColor: color,
+          borderWidth: 2,
+          pointRadius: 0,
+          lineTension: 0,
+          fill: false,
+          spanGaps: false,
+        };
+      }),
+    },
+    options: {
+      title: { display: true, text: "전체 종목 등락률 (상장 시점 대비 %)" },
+      legend: { display: true, position: "bottom", labels: { fontSize: 10, boxWidth: 12 } },
+      scales: {
+        xAxes: [{ ticks: { maxTicksLimit: 8, maxRotation: 0, fontSize: 11 } }],
+        yAxes: [{ scaleLabel: { display: true, labelString: "%" }, ticks: { fontSize: 11 } }],
+      },
+    },
+  };
+}
+
+// 반환: 이미지 주소(URL), 그릴 종목이 없으면 null
+export async function renderAllStocksChart(env) {
+  const stocks = await listStocks(env);
+  const built = buildAllStocksSeries(stocks);
+  if (!built) return null;
+  const { samples, series } = built;
+
+  // 1) 짧은 주소 발급 (데이터가 많아도 안전). 실패하면 2번으로.
+  try {
+    const res = await fetch(`${QUICKCHART}/chart/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        version: "2",
+        backgroundColor: "white",
+        width: 900,
+        height: 500,
+        format: "png",
+        chart: buildAllStocksConfig(samples, series),
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.success && data.url) {
+        try {
+          const check = await fetch(data.url, { method: "GET", signal: AbortSignal.timeout(3000) });
+          const type = check.headers.get("content-type") || "";
+          if (check.ok && type.startsWith("image/")) return data.url;
+          console.error(`QuickChart 이미지 주소 이상(${check.status}, ${type}):`, data.url);
+        } catch (err) {
+          console.error("QuickChart 이미지 주소 확인 실패:", err.message, data.url);
+        }
+      } else {
+        console.error("QuickChart 짧은 주소 응답 이상:", JSON.stringify(data).slice(0, 200));
+      }
+    } else {
+      console.error(`QuickChart 짧은 주소 발급 실패(${res.status}):`, (await res.text().catch(() => "")).slice(0, 200));
+    }
+  } catch (err) {
+    console.error("QuickChart 짧은 주소 발급 실패:", err.message);
+  }
+
+  // 2) 긴 주소로 직접 요청 (표본을 줄여서 주소를 짧게)
+  for (const n of [30, 15]) {
+    const idx = Array.from({ length: n }, (_, i) => Math.round((i * (samples.length - 1)) / (n - 1)));
+    const slimSamples = idx.map((i) => samples[i]);
+    const slimSeries = series.map((s) => ({ name: s.name, data: idx.map((i) => s.data[i]) }));
+    const url = `${QUICKCHART}/chart?v=2&w=900&h=500&bkg=white&c=${encodeURIComponent(
+      JSON.stringify(buildAllStocksConfig(slimSamples, slimSeries))
+    )}`;
+    if (url.length <= 1900 || n === 15) return url;
   }
 }
 
@@ -5785,6 +5895,31 @@ export async function repayLoans(env, userId, target, amount) {
   return { ok: true, message: [`💳 **상환 완료** -${total.toLocaleString()}해정`, ...lines, ...creditLines, balanceLine(balanceBefore, user.balance)].join("\n") };
 }
 
+// ---------- 파산 악용 방지: 신청 직전 대출→송금으로 돈을 빼돌리는 걸 막아요 ----------
+// 별도 저장 없이, 모든 명령어가 이미 쌓고 있는 활동 로그(logs_YYYY-MM-DD, logAction)에서
+// "송금" 기록만 골라내요. 로그는 옵션 요약 문자열(a: "받는사람=..., 금액=...")로 남아 있어요.
+export const BANKRUPT_TRANSFER_LOOKBACK_DAYS = 7; // 파산 신청 전 이 기간의 송금 내역을 확인해요
+export const BANKRUPT_TRANSFER_SUSPECT_MIN = 1000; // 그 기간 송금 합계가 이 금액(해정) 이상이면 막아요
+
+async function recentTransfersOut(env, userId, days = BANKRUPT_TRANSFER_LOOKBACK_DAYS) {
+  const now = Date.now();
+  const since = now - days * DAY_MS;
+  // 기간에 걸친 날짜별 로그 컬렉션을 시간 범위로만 읽어요 (컬렉션 전체를 긁지 않음, logTradePressure와 같은 방식)
+  const dayList = [...new Set(Array.from({ length: days + 1 }, (_, i) => dayKST(now - i * DAY_MS)))];
+  const results = await Promise.all(
+    dayList.map((day) => queryByTime(env, collectionOf(day), since, now).catch(() => []))
+  );
+  return results
+    .flat()
+    .filter((doc) => doc.c === "송금" && String(doc.u) === String(userId))
+    .map((doc) => {
+      const m = String(doc.a || "").match(/받는사람=(\d+).*금액=(\d+)/);
+      return m ? { t: doc.t, toId: m[1], amount: Number(m[2]) } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.t - a.t);
+}
+
 // ---------- /파산신청 : 순자산이 0 이하일 때 빚을 정리하고 처음부터 ----------
 // 모든 자산(잔고·주식·달러·예금·선물·예약)이 채권자에게 넘어가고, 남은 빚은 탕감돼요.
 // 대신 신용점수 0, 대출 금지 BANKRUPT_LOAN_BAN_DAYS일, 재신청 BANKRUPT_COOLDOWN_DAYS일 대기가 붙어요.
@@ -5804,6 +5939,28 @@ export async function fileBankruptcy(env, userId, { confirm = false } = {}) {
   if (debt <= 0) {
     return { ok: false, message: "갚을 빚이 없어서 파산을 신청할 수 없어요. (파산은 대출이 있을 때만 가능해요)" };
   }
+
+  // 대출받고 바로 송금으로 돈을 빼돌린 뒤 파산 신청하는 수법 방지
+  const suspects = await recentTransfersOut(env, userId).catch((err) => {
+    console.error("파산 전 송금 내역 조회 실패:", err.message);
+    return null; // 조회가 실패해도 파산 기능 자체가 멈추진 않게 해요
+  });
+  if (suspects && suspects.length) {
+    const total = suspects.reduce((sum, s) => sum + s.amount, 0);
+    if (total >= BANKRUPT_TRANSFER_SUSPECT_MIN) {
+      const until = suspects[0].t + BANKRUPT_TRANSFER_LOOKBACK_DAYS * DAY_MS;
+      return {
+        ok: false,
+        message: [
+          `🚫 최근 ${BANKRUPT_TRANSFER_LOOKBACK_DAYS}일 안에 다른 유저에게 보낸 송금이 있어서 파산을 신청할 수 없어요.`,
+          ...suspects.slice(0, 10).map((s) => `- <@${s.toId}>에게 ${s.amount.toLocaleString()}해정 (${labelOf(s.t)})`),
+          ...(suspects.length > 10 ? [`...외 ${suspects.length - 10}건`] : []),
+          `총 **${total.toLocaleString()}해정**을 보냈어요. ${dueText(until)} 이후에 다시 신청할 수 있어요.`,
+        ].join("\n"),
+      };
+    }
+  }
+
   const { net } = await netWorthOf(env, userId, user0, bank, stocks);
   if (net > 0) {
     return { ok: false, message: `순자산이 아직 ${net.toLocaleString()}해정으로 플러스예요. 파산은 **순자산이 0 이하**일 때만 신청할 수 있어요. (자산을 정리해서 \`/상환\`으로 갚아 보세요)` };
@@ -7205,10 +7362,10 @@ export const commandDefinitions = [
     options: [
       {
         name: "광물",
-        description: "팔 광물 (목록에서 선택, 비우면 전부)",
+        description: "팔 광물 (비우면 전부)",
         type: 3,
         required: false,
-        autocomplete: true,
+        choices: [{ name: "전부", value: "전부" }, ...MINERALS.map((m) => ({ name: m.name, value: m.name }))],
       },
     ],
   },
@@ -7922,25 +8079,6 @@ export async function autocomplete(interaction, env) {
   }
   const pickable = (items) => items.filter((i) => !taken.has(i.value));
 
-  // ----- 광물판매: 내가 가진 광물 (보유 개수 · 개당 판매가), 맨 위에 "전부" -----
-  if (base === "광물" && command === "광물판매") {
-    const userId = interaction.member?.user?.id;
-    const [user, market] = await Promise.all([userId ? getUser(env, userId) : { minerals: {} }, getMineralMarket(env)]);
-    const level = ensureMining(user).level;
-    const items = [];
-    let total = 0;
-    for (const m of MINERALS) {
-      const qty = user.minerals?.[m.name] || 0;
-      if (qty <= 0) continue;
-      const price = mineralPriceFor(m, level, market[m.name]);
-      total += qty * price;
-      items.push({ label: `${m.icon} ${m.name} (보유 ${qty.toLocaleString()}개 · 개당 ${price.toLocaleString()}해정 · 합계 ${(qty * price).toLocaleString()}해정)`, value: m.name });
-    }
-    if (items.length === 0) return [{ name: "팔 광물이 없어요 (채굴하면 나와요)", value: "전부" }];
-    items.unshift({ label: `전부 (${items.length}종 · 합계 ${total.toLocaleString()}해정)`, value: "전부" });
-    return textChoices(items, keyword);
-  }
-
   // ----- 상장폐지종류: 폐지된 종목 이름 (최신 폐지순, 같은 이름은 가장 최근 것만) -----
   if (base === "종목" && command === "상장폐지종류") {
     const delisted = await listDelisted(env, 200);
@@ -8541,6 +8679,7 @@ function bankHelpText(rate) {
     "",
     "**📄 파산신청**",
     `\`/파산신청\` — 순자산이 0 이하이고 빚이 있을 때만 가능. 먼저 미리보기가 나오고, \`확인:True\`를 붙이면 실제로 신청돼요`,
+    `  ⚠️ 최근 ${BANKRUPT_TRANSFER_LOOKBACK_DAYS}일 안에 다른 유저에게 송금한 돈이 합쳐서 ${BANKRUPT_TRANSFER_SUSPECT_MIN.toLocaleString()}해정 이상이면, 그 송금이 그 기간을 벗어날 때까지 파산을 신청할 수 없어요`,
     `모든 자산이 정리되고 빚은 탕감, ${BANKRUPT_RESTART_CASH.toLocaleString()}해정으로 재시작해요. 신용점수 0점, 대출 ${BANKRUPT_LOAN_BAN_DAYS}일 금지, ${BANKRUPT_COOLDOWN_DAYS}일 동안 재신청 불가`,
     "",
     "`/은행` — 내 예금·대출·이자·한도를 지금 이 순간 기준으로 보기",
