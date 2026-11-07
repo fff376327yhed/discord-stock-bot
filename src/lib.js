@@ -1048,7 +1048,7 @@ export async function saveUser(env, userId, user) {
 // 같은 유저가 명령어를 연타하거나 두 번 눌러도 잔고·체력이 꼬이지 않게 해요.
 // 읽을 때의 문서 수정 시각(updateTime)을 기억해 두고, 저장할 때 "그 사이 아무도 안 바꿨을 때만" 저장해요.
 // 그 사이 바뀌었으면 처음부터 다시 읽고 계산해요. (mutate 안에서는 저장·전송 같은 부수 효과를 만들면 안 돼요)
-async function getDocMeta(env, path) {
+export async function getDocMeta(env, path) {
   const token = await getAccessToken(env);
   const res = await fetch(`${baseUrl(env)}/${path}`, { headers: { Authorization: `Bearer ${token}` } });
   if (res.status === 404) return null;
@@ -1058,7 +1058,7 @@ async function getDocMeta(env, path) {
 }
 
 // 성공하면 true, 그 사이 다른 요청이 문서를 바꿨으면 false
-async function setDocIfUnchanged(env, path, obj, updateTime) {
+export async function setDocIfUnchanged(env, path, obj, updateTime) {
   const token = await getAccessToken(env);
   const params = Object.keys(obj).map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`);
   params.push(`currentDocument.updateTime=${encodeURIComponent(updateTime)}`);
@@ -2252,7 +2252,7 @@ async function recordTradeFlow(env, trades) {
 
 // 유저 매수/매도를 종목 문서의 outHeld(유통 중 수량)·holderCount(주주수, 봇 제외)에 원자적으로 반영해요.
 // items: [{ name, qty(+매수/−매도), newHolder?: true(0→보유 시작), closedHolder?: true(보유→0) }]
-async function recordShareChange(env, items) {
+export async function recordShareChange(env, items) {
   if (!items.length) return;
   const parts = [];
   for (const it of items) {
@@ -4239,7 +4239,7 @@ async function discordRequest(env, method, path, body) {
   return res.status === 204 ? null : res.json();
 }
 
-const discordPost = (env, path, body) => discordRequest(env, "POST", path, body);
+export const discordPost = (env, path, body) => discordRequest(env, "POST", path, body);
 
 // 유저에게 DM 보내기 (DM 채널을 먼저 열고 메시지 전송)
 export async function sendDM(env, userId, content) {

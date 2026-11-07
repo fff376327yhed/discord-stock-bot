@@ -452,6 +452,18 @@
   </div>
 </details>
 
+<details>
+  <summary>📈 전체 종목 그래프 (한 장에 겹쳐 보기)</summary>
+  <div class="section">
+    <p class="hint">일반 종목(코인·미국주식은 배율 때문에 제외)의 "상장 시점 대비 등락률(%)"을 한 차트에 겹쳐서 보여줘요. 누를 때마다 QuickChart에서 새로 그려요.</p>
+    <div class="form-row">
+      <button onclick="loadAllStocksChart()">그래프 그리기</button>
+      <span id="allChartStatus" class="muted"></span>
+    </div>
+    <div id="allChartWrap"></div>
+  </div>
+</details>
+
 <script>
 const API = "https://discord-stock-bot-mauve.vercel.app/api/admin/stocks";
 const PW_KEY = "haejeongAdminPw";
@@ -537,6 +549,20 @@ async function act(fn, okMsg) {
 function refreshAll() {
   listingDirty = false;
   return reload();
+}
+
+async function loadAllStocksChart() {
+  $("allChartStatus").textContent = "그리는 중... (몇 초 걸릴 수 있어요)";
+  $("allChartWrap").innerHTML = "";
+  try {
+    const { url } = await call("allStocksChart");
+    $("allChartWrap").innerHTML = `<img src="${esc(url)}" style="max-width:100%; border-radius:8px; background:#fff;">`;
+    $("allChartStatus").textContent = "";
+    log("전체 종목 그래프를 그렸어요.");
+  } catch (e) {
+    $("allChartStatus").textContent = "";
+    log("오류: " + e.message);
+  }
 }
 
 async function reload(silent) {
