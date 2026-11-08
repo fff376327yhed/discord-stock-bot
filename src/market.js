@@ -8,7 +8,7 @@
 // 이 파일은 lib.js를 가져다 쓰기만 해요. (lib.js는 이 파일을 가져오지 않아요)
 
 import {
-  getUser, updateUserLocked, addHistory, sendDM, getStock, haltNotice, costOf,
+  getUser, updateUserLocked, addHistory, sendDM, getStock, haltNotice, costOf, profitLabel,
   listStocksForAutocomplete, getDoc, setDoc, getDocMeta, setDocIfUnchanged, recordShareChange, discordPost,
 } from "./lib.js";
 import { isForeign } from "./foreign.js";
@@ -565,7 +565,7 @@ export const marketCommandDefinitions = [
     options: [
       { name: "받는사람", description: "주식을 살 유저", type: 6, required: true },
       { name: "종목", description: "팔 종목 (내 보유 종목, 일반 종목만)", type: 3, required: true, autocomplete: true },
-      { name: "수량", description: "팔 수량", type: 4, required: true, min_value: 1 },
+      { name: "수량", description: "팔 수량 (칸을 누르면 보유 수량이 떠요)", type: 4, required: true, autocomplete: true, min_value: 1 },
       { name: "가격", description: "받고 싶은 전체 가격 (해정)", type: 4, required: true, autocomplete: true, min_value: 1 },
     ],
   },
@@ -589,7 +589,7 @@ export const marketCommandDefinitions = [
     description: `내 주식을 경매에 올려요. (낙찰되면 수수료 ${feeText}는 파는 사람이 내요)`,
     options: [
       { name: "종목", description: "경매에 올릴 종목 (내 보유 종목, 일반 종목만)", type: 3, required: true, autocomplete: true },
-      { name: "수량", description: "올릴 수량", type: 4, required: true, min_value: 1 },
+      { name: "수량", description: "올릴 수량 (칸을 누르면 보유 수량이 떠요)", type: 4, required: true, autocomplete: true, min_value: 1 },
       { name: "시작가", description: "시작 가격 (해정, 전체 가격)", type: 4, required: true, autocomplete: true, min_value: 1 },
       { name: "시간", description: "경매 기간", type: 4, required: true, choices: AUCTION_HOURS.map((h) => ({ name: `${h}시간`, value: h })) },
     ],
@@ -663,8 +663,22 @@ export async function marketAutocomplete(interaction, env) {
     const byName = new Map(stocks.map((s) => [s.name, s]));
     const list = Object.entries(user.holdings)
       .filter(([name, q]) => q > 0 && byName.has(name) && !isForeign(byName.get(name)))
-      .map(([name, q]) => ({ label: `${name} · 보유 ${num(q)}주 · 현재가 ${num(byName.get(name).price)}`, value: name }));
+      .map(([name, q]) => {
+        const price = byName.get(name).price;
+        const cost = costOf(user, name, price);
+        return { label: `${name} · 보유 ${num(q)}주 · ${num(price)} · ${profitLabel(price * q - cost, cost, true)}`, value: name };
+      });
     return pick(list, keyword);
+  }
+
+  // 수량: 보유 수량 안의 예시
+  if (focused.name === "수량") {
+    const name = String(val("종목") ?? "").trim();
+    const held = (await getUser(env, userId)).holdings?.[name] || 0;
+    if (!name || held <= 0) return [];
+    const list = [1, 5, 10, 50, 100].filter((n) => n < held).map((n) => ({ label: `${num(n)}주`, value: n }));
+    list.push({ label: `전량 ${num(held)}주`, value: held });
+    return pick(list, "").filter((c) => !keyword || String(c.value).startsWith(keyword));
   }
 
   // 가격/시작가: 시세 합계를 기준으로 예시

@@ -537,7 +537,7 @@ export const lotteryCommandDefinitions = [
     name: "복권구매",
     description: `복권을 삽니다. 장당 ${TICKET_PRICE}해정, 매주 토요일 20:45 추첨 (자동 번호가 기본)`,
     options: [
-      { name: "수량", description: `살 장수 (기본 1, 최대 ${MAX_TICKETS})`, type: 4, required: false, min_value: 1, max_value: MAX_TICKETS },
+      { name: "수량", description: `살 장수 (기본 1, 최대 ${MAX_TICKETS} · 칸을 누르면 살 수 있는 장수가 떠요)`, type: 4, required: false, autocomplete: true, min_value: 1, max_value: MAX_TICKETS },
       { name: "번호", description: `직접 고를 번호 ${PICK}개 (예: 3 8 12 19 25, 첫 장에만 적용)`, type: 3, required: false, max_length: 30 },
     ],
   },
@@ -552,20 +552,65 @@ export const lotteryCommandDefinitions = [
         required: false,
         choices: Object.entries(SCRATCH_KINDS).map(([value, k]) => ({ name: `${k.label} (${num(k.price)}해정 · 1등 ${num(k.tiers[0][1] * k.price)}해정)`, value })),
       },
-      { name: "수량", description: `살 장수 (기본 1, 최대 ${MAX_SCRATCH})`, type: 4, required: false, min_value: 1, max_value: MAX_SCRATCH },
+      { name: "수량", description: `살 장수 (기본 1, 최대 ${MAX_SCRATCH} · 칸을 누르면 살 수 있는 장수가 떠요)`, type: 4, required: false, autocomplete: true, min_value: 1, max_value: MAX_SCRATCH },
     ],
   },
   {
     name: "연금복권",
     description: `연금복권을 삽니다. 장당 ${TICKET_PRICE}해정, 1·2등은 매주 나눠 받아요. 매주 목요일 19:05 추첨`,
     options: [
-      { name: "수량", description: `살 장수 (기본 1, 최대 ${PENSION_MAX})`, type: 4, required: false, min_value: 1, max_value: PENSION_MAX },
+      { name: "수량", description: `살 장수 (기본 1, 최대 ${PENSION_MAX} · 칸을 누르면 살 수 있는 장수가 떠요)`, type: 4, required: false, autocomplete: true, min_value: 1, max_value: PENSION_MAX },
       { name: "번호", description: `직접 고를 조와 3자리 (예: 2 345, 첫 장에만 적용)`, type: 3, required: false, max_length: 10 },
     ],
   },
   { name: "연금복권현황", description: "이번 회차 연금복권 정보와 내 티켓, 받고 있는 연금을 봅니다." },
   { name: "복권현황", description: "이번 회차 당첨금 재원, 추첨 시각, 내 티켓과 지난 결과를 봅니다." },
 ];
+// ---------- 자동완성: 수량 칸에 "지금 살 수 있는 장수"와 구매 후 잔고를 보여줘요 ----------
+// (내 담당이 아니면 null을 돌려줘서 다음 자동완성이 처리해요)
+const BUY_COMMANDS = new Set(["복권구매", "즉석복권", "연금복권"]);
+export async function lotteryAutocomplete(interaction, env) {
+  const cmd = interaction.data.name;
+  if (!BUY_COMMANDS.has(cmd)) return null;
+  const focused = interaction.data.options?.find((o) => o.focused);
+  if (!focused || focused.name !== "수량") return [];
+  const userId = interaction.member?.user?.id;
+  if (!userId) return [];
+  const val = (name) => interaction.data.options?.find((o) => o.name === name)?.value;
+  const keyword = String(focused.value ?? "").trim();
+
+  let price = TICKET_PRICE;
+  let cap = MAX_SCRATCH;
+  let path = null;
+  if (cmd === "복권구매") { cap = MAX_TICKETS; path = PATH; }
+  else if (cmd === "연금복권") { cap = PENSION_MAX; path = PENSION_PATH; }
+  else price = (SCRATCH_KINDS[val("종류") ?? "normal"] || SCRATCH_KINDS.normal).price;
+
+  const [user, state] = await Promise.all([getUser(env, userId), path ? getDoc(env, path) : null]);
+  const balance = user.balance || 0;
+  const mine = path ? Object.keys(state?.tickets || {}).filter((k) => k.startsWith(`${userId}_`)).length : 0;
+  const closed = !!state?.drawAt && Date.now() >= state.drawAt - CLOSE_BEFORE_MS;
+  const max = closed ? 0 : Math.max(0, Math.min(cap - mine, Math.floor(balance / price)));
+
+  if (max <= 0) {
+    const why = closed ? "이번 회차 판매 마감" : cap - mine <= 0 ? `이번 회차 ${cap}장을 다 샀어요` : `잔고 부족 (장당 ${num(price)}해정 · 잔고 ${num(balance)})`;
+    return [{ name: `더 살 수 없어요 · ${why}`.slice(0, 100), value: 1 }];
+  }
+  const labelFor = (q) => {
+    const cost = price * q;
+    if (q > cap - mine) return `${num(q)}장 불가 (최대 ${num(cap - mine)}장 · 지금 ${mine}장)`;
+    if (cost > balance) return `${num(q)}장 불가 (필요 ${num(cost)} / 잔고 ${num(balance)}해정)`;
+    return `${num(q)}장 → -${num(cost)}해정 · 잔고 ${num(balance - cost)}해정`;
+  };
+  const out = [];
+  const seen = new Set();
+  const push = (q, label) => { if (!seen.has(q)) { seen.add(q); out.push({ name: label.slice(0, 100), value: q }); } };
+  const typed = Number(keyword);
+  if (/^\d+$/.test(keyword) && Number.isSafeInteger(typed) && typed >= 1) push(typed, labelFor(typed));
+  for (const q of [...[1, 2, 5, 10].filter((n) => n < max), max]) if (!keyword || String(q).startsWith(keyword)) push(q, (q === max ? "최대 " : "") + labelFor(q));
+  return out.slice(0, 25);
+}
+
 export const LOTTERY_VIEW_ONLY = new Set(["복권현황", "연금복권현황"]);
 const opt = (i, name) => i.data.options?.find((o) => o.name === name)?.value;
 export const lotteryHandlers = {

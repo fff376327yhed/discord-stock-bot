@@ -2,7 +2,7 @@ import {
   marketHandlers, marketAutocomplete, marketCommandDefinitions,
   MARKET_VIEW_ONLY, MARKET_SILENT, processMarket, marketStake,
 } from "../src/market.js";
-import { lotteryHandlers, LOTTERY_VIEW_ONLY, lotteryStake } from "../src/lottery.js";
+import { lotteryHandlers, LOTTERY_VIEW_ONLY, lotteryStake, lotteryAutocomplete } from "../src/lottery.js";
 
 import { verifyKey } from "discord-interactions";
 import { waitUntil } from "@vercel/functions";
@@ -192,7 +192,7 @@ async function handler(request) {
     let choices = [];
     try {
       const allowed = !env.ALLOWED_CHANNEL_ID || interaction.channel_id === env.ALLOWED_CHANNEL_ID;
-      if (allowed) choices = (await marketAutocomplete(interaction, env)) ?? (await autocomplete(interaction, env));
+      if (allowed) choices = (await marketAutocomplete(interaction, env)) ?? (await lotteryAutocomplete(interaction, env)) ?? (await autocomplete(interaction, env));
     } catch (err) {
       console.error("자동완성 오류:", err.message);
     }
