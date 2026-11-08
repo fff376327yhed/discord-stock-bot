@@ -2,7 +2,7 @@ import {
   marketHandlers, marketAutocomplete, marketCommandDefinitions,
   MARKET_VIEW_ONLY, MARKET_SILENT, processMarket, marketStake,
 } from "../src/market.js";
-import { lotteryHandlers, LOTTERY_VIEW_ONLY } from "../src/lottery.js";
+import { lotteryHandlers, LOTTERY_VIEW_ONLY, lotteryStake } from "../src/lottery.js";
 
 import { verifyKey } from "discord-interactions";
 import { waitUntil } from "@vercel/functions";
@@ -237,6 +237,14 @@ async function handler(request) {
         if (userId) await touchUsername(env, userId, displayName);
         // 장터에 맡겨 둔 주식·입찰금은 순자산에 안 잡혀서, 파산으로 빚만 지우고 되찾는 꼼수를 막아요
         if (commandName === "파산신청" && userId) {
+          // 복권 티켓·받고 있는 연금도 순자산에 안 잡혀서 같은 꼼수가 가능해요 (확인이 실패하면 막지 않고 진행)
+          const held = await lotteryStake(env, userId).catch(() => null);
+          if (held) {
+            return {
+              content: `🚫 복권이 걸려 있어서 파산을 신청할 수 없어요. (${held.join(", ")})\n추첨이 끝나고 연금까지 다 받은 뒤에 다시 신청해 주세요.`,
+              mode: "private",
+            };
+          }
           const stake = await marketStake(env, userId);
           if (stake) {
             const list = stake.slice(0, 5).map((i) => `\`#${i.id}\``).join(" ");
